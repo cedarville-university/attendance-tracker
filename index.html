@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Attendance Tracker</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>Classroom Attendance Tracker</h1>
+    <p class="app-subtitle">WebHID card-reader attendance tracking &mdash; runs entirely in this browser tab.</p>
+  </header>
+
+  <div id="app-messages" class="app-messages" role="status" aria-live="polite"></div>
+
+  <div id="restore-session-banner" class="restore-banner" hidden>
+    <p>A previous session was found saved on this computer.</p>
+    <div class="restore-banner-actions">
+      <button id="btn-restore-session" type="button">Restore Session</button>
+      <button id="btn-discard-session" type="button" class="secondary">Discard</button>
+    </div>
+  </div>
+
+  <main class="app-grid">
+    <!-- Reader Status -->
+    <section class="panel" aria-labelledby="reader-status-heading">
+      <h2 id="reader-status-heading">Reader Status</h2>
+      <p>
+        <span id="reader-status-dot" class="status-dot status-dot--disconnected" aria-hidden="true"></span>
+        <span id="reader-status-text">Disconnected</span>
+      </p>
+      <p id="reader-product-name" class="muted">No reader connected.</p>
+      <div class="button-row">
+        <button id="btn-connect" type="button" class="primary">Connect Card Reader</button>
+        <button id="btn-disconnect" type="button" class="secondary" disabled>Disconnect</button>
+      </div>
+    </section>
+
+    <!-- Roster -->
+    <section class="panel" aria-labelledby="roster-heading">
+      <h2 id="roster-heading">Expected Students / Class Roster</h2>
+      <label class="toggle-row">
+        <input type="checkbox" id="roster-enable-toggle" disabled />
+        Enable roster checking
+      </label>
+
+      <div class="button-row">
+        <button id="btn-load-roster" type="button" class="secondary">Load CSV&hellip;</button>
+        <input type="file" id="roster-file-input" accept=".csv,text/csv" hidden />
+        <button id="btn-clear-roster" type="button" class="secondary" disabled>Clear Roster</button>
+      </div>
+
+      <dl class="fact-list">
+        <dt>File</dt>
+        <dd id="roster-filename">None loaded</dd>
+        <dt>Rows loaded</dt>
+        <dd id="roster-row-count">0</dd>
+        <dt>University ID column</dt>
+        <dd>
+          <select id="roster-id-column-select" disabled>
+            <option value="">Select a column&hellip;</option>
+          </select>
+        </dd>
+      </dl>
+    </section>
+
+    <!-- Latest Scan -->
+    <section id="latest-scan-panel" class="panel latest-scan latest-scan--idle" aria-labelledby="latest-scan-heading" aria-live="polite">
+      <h2 id="latest-scan-heading">Latest Scan</h2>
+      <p id="latest-scan-status-text" class="latest-scan-status-text">Waiting for a card&hellip;</p>
+      <dl class="fact-list">
+        <dt>Name</dt>
+        <dd id="latest-scan-name">&mdash;</dd>
+        <dt>University ID</dt>
+        <dd id="latest-scan-university-id">&mdash;</dd>
+        <dt>Card code</dt>
+        <dd id="latest-scan-card-code">&mdash;</dd>
+        <dt>Time</dt>
+        <dd id="latest-scan-time">&mdash;</dd>
+      </dl>
+    </section>
+
+    <!-- Session Statistics -->
+    <section class="panel" aria-labelledby="stats-heading">
+      <h2 id="stats-heading">Session Statistics</h2>
+      <dl class="fact-list">
+        <dt>Total accepted</dt>
+        <dd id="stats-total">0</dd>
+        <dt>Suppressed duplicates</dt>
+        <dd id="stats-duplicates">0</dd>
+      </dl>
+      <dl id="stats-roster-group" class="fact-list" hidden>
+        <dt>Expected</dt>
+        <dd id="stats-expected">0</dd>
+        <dt>Unexpected</dt>
+        <dd id="stats-unexpected">0</dd>
+        <dt>Lookup errors</dt>
+        <dd id="stats-lookup-errors">0</dd>
+      </dl>
+    </section>
+
+    <!-- Preferences -->
+    <section class="panel" aria-labelledby="prefs-heading">
+      <h2 id="prefs-heading">Preferences</h2>
+      <label class="toggle-row">
+        <input type="checkbox" id="sound-alerts-toggle" checked />
+        Sound alerts
+      </label>
+      <label class="toggle-row">
+        <input type="checkbox" id="remember-session-toggle" />
+        Remember this session on this computer
+      </label>
+      <div class="button-row">
+        <button id="btn-clear-local-data" type="button" class="secondary">Clear Local Data</button>
+      </div>
+      <p id="storage-warning" class="muted" hidden>Local storage is unavailable in this browser session; "Remember this session" cannot be used.</p>
+    </section>
+
+    <!-- Attendance Table -->
+    <section class="panel panel--wide" aria-labelledby="attendance-heading">
+      <div class="panel-header-row">
+        <h2 id="attendance-heading">Attendance</h2>
+        <div class="button-row">
+          <button id="btn-download-csv" type="button" class="primary">Download Attendance CSV</button>
+          <button id="btn-clear-all" type="button" class="danger">Clear All</button>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Card Code</th>
+              <th>University ID</th>
+              <th>Name</th>
+              <th>Roster Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="attendance-table-body"></tbody>
+        </table>
+      </div>
+      <p id="attendance-empty-message" class="muted">No scans yet.</p>
+    </section>
+
+    <!-- Diagnostics -->
+    <details id="diagnostics-panel" class="panel panel--wide" open>
+      <summary>Reader Diagnostics</summary>
+
+      <div class="diagnostics-body">
+        <p class="muted">
+          This panel doubles as the hardware-test mode: it shows exactly what the reader reports so
+          the OMNIKEY custom-report parsing can be verified/adjusted against real hardware.
+        </p>
+
+        <h3>Support &amp; Device</h3>
+        <dl class="fact-list">
+          <dt>WebHID supported</dt>
+          <dd id="diag-webhid-support">Checking&hellip;</dd>
+          <dt>Secure context</dt>
+          <dd id="diag-secure-context">Checking&hellip;</dd>
+          <dt>Product name</dt>
+          <dd id="diag-product-name">&mdash;</dd>
+          <dt>Vendor ID</dt>
+          <dd id="diag-vendor-id">&mdash;</dd>
+          <dt>Product ID</dt>
+          <dd id="diag-product-id">&mdash;</dd>
+          <dt>Opened</dt>
+          <dd id="diag-opened">&mdash;</dd>
+        </dl>
+
+        <h3>HID Collections</h3>
+        <pre id="diag-collections" class="diag-pre">No device connected.</pre>
+
+        <label class="toggle-row">
+          <input type="checkbox" id="debug-mode-toggle" />
+          Debug mode (show raw HID reports)
+        </label>
+
+        <h3>Raw HID Reports <span class="muted">(most recent first)</span></h3>
+        <div id="diag-raw-reports" class="diag-report-list"></div>
+
+        <h3>Error Log</h3>
+        <div id="diag-error-log" class="diag-report-list"></div>
+
+        <div class="button-row">
+          <button id="btn-copy-diagnostics" type="button" class="secondary">Copy Diagnostics</button>
+          <button id="btn-clear-diagnostics" type="button" class="secondary">Clear Diagnostics</button>
+        </div>
+      </div>
+    </details>
+  </main>
+
+  <template id="attendance-row-template">
+    <tr>
+      <td class="col-time"></td>
+      <td class="col-card-code"></td>
+      <td class="col-university-id"></td>
+      <td class="col-name"></td>
+      <td class="col-status"><span class="status-badge"></span></td>
+      <td class="col-actions"><button type="button" class="link-button remove-row-button">Remove</button></td>
+    </tr>
+  </template>
+
+  <template id="diag-report-entry-template">
+    <div class="diag-report-entry">
+      <div class="diag-report-entry-header">
+        <span class="diag-report-id"></span>
+        <span class="diag-report-timestamp"></span>
+      </div>
+      <div class="diag-report-hex"></div>
+      <div class="diag-report-parsed"></div>
+    </div>
+  </template>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
