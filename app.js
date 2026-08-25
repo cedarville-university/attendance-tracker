@@ -414,6 +414,7 @@ elements.restoreBtn.addEventListener('click', () => {
 });
 
 elements.discardBtn.addEventListener('click', () => {
+  storage.clearLocalData();
   ui.showRestoreBanner(false);
 });
 

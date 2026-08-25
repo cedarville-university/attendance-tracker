@@ -83,6 +83,10 @@ body {
   flex-wrap: wrap;
 }
 
+.restore-banner[hidden] {
+  display: none;
+}
+
 .restore-banner p {
   margin: 0;
 }
@@ -352,8 +356,16 @@ details.panel > summary {
   padding: 0.1rem 0;
 }
 
-.diagnostics-body {
+.diagnostics-body,
+.settings-body {
   margin-top: 0.75rem;
+}
+
+.settings-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+  align-items: start;
 }
 
 .diag-pre {

@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Attendance Tracker</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🪪</text></svg>" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -23,6 +24,77 @@
   </div>
 
   <main class="app-grid">
+    <!-- Settings -->
+    <details id="settings-panel" class="panel panel--wide" open>
+      <summary>Settings</summary>
+
+      <div class="settings-body">
+        <!-- Roster -->
+        <section class="panel" aria-labelledby="roster-heading">
+          <h2 id="roster-heading">Expected Students / Class Roster</h2>
+          <label class="toggle-row">
+            <input type="checkbox" id="roster-enable-toggle" disabled />
+            Enable roster checking
+          </label>
+
+          <div class="button-row">
+            <button id="btn-load-roster" type="button" class="secondary">Load CSV&hellip;</button>
+            <input type="file" id="roster-file-input" accept=".csv,text/csv" hidden />
+            <button id="btn-clear-roster" type="button" class="secondary" disabled>Clear Roster</button>
+          </div>
+
+          <dl class="fact-list">
+            <dt>File</dt>
+            <dd id="roster-filename">None loaded</dd>
+            <dt>Rows loaded</dt>
+            <dd id="roster-row-count">0</dd>
+            <dt>University ID column</dt>
+            <dd>
+              <select id="roster-id-column-select" disabled>
+                <option value="">Select a column&hellip;</option>
+              </select>
+            </dd>
+          </dl>
+        </section>
+
+        <!-- API Credentials -->
+        <section class="panel" aria-labelledby="api-credentials-heading">
+          <h2 id="api-credentials-heading">Card Lookup API Credentials</h2>
+          <p class="muted">Required to resolve scanned cards to student identities. Stored only in this browser.</p>
+          <div class="field-row">
+            <label for="api-keyname-input">Key Name</label>
+            <input type="text" id="api-keyname-input" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field-row">
+            <label for="api-key-input">API Key</label>
+            <input type="password" id="api-key-input" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="button-row">
+            <button id="btn-save-credentials" type="button" class="secondary">Save</button>
+            <button id="btn-clear-credentials" type="button" class="secondary">Clear Saved Key</button>
+          </div>
+          <p id="credentials-status" class="muted">No credentials saved.</p>
+        </section>
+
+        <!-- Preferences -->
+        <section class="panel" aria-labelledby="prefs-heading">
+          <h2 id="prefs-heading">Preferences</h2>
+          <label class="toggle-row">
+            <input type="checkbox" id="sound-alerts-toggle" checked />
+            Sound alerts
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="remember-session-toggle" />
+            Remember this session on this computer
+          </label>
+          <div class="button-row">
+            <button id="btn-clear-local-data" type="button" class="secondary">Clear Local Data</button>
+          </div>
+          <p id="storage-warning" class="muted" hidden>Local storage is unavailable in this browser session; "Remember this session" cannot be used.</p>
+        </section>
+      </div>
+    </details>
+
     <!-- Reader Status -->
     <section class="panel" aria-labelledby="reader-status-heading">
       <h2 id="reader-status-heading">Reader Status</h2>
@@ -35,53 +107,6 @@
         <button id="btn-connect" type="button" class="primary">Connect Card Reader</button>
         <button id="btn-disconnect" type="button" class="secondary" disabled>Disconnect</button>
       </div>
-    </section>
-
-    <!-- Roster -->
-    <section class="panel" aria-labelledby="roster-heading">
-      <h2 id="roster-heading">Expected Students / Class Roster</h2>
-      <label class="toggle-row">
-        <input type="checkbox" id="roster-enable-toggle" disabled />
-        Enable roster checking
-      </label>
-
-      <div class="button-row">
-        <button id="btn-load-roster" type="button" class="secondary">Load CSV&hellip;</button>
-        <input type="file" id="roster-file-input" accept=".csv,text/csv" hidden />
-        <button id="btn-clear-roster" type="button" class="secondary" disabled>Clear Roster</button>
-      </div>
-
-      <dl class="fact-list">
-        <dt>File</dt>
-        <dd id="roster-filename">None loaded</dd>
-        <dt>Rows loaded</dt>
-        <dd id="roster-row-count">0</dd>
-        <dt>University ID column</dt>
-        <dd>
-          <select id="roster-id-column-select" disabled>
-            <option value="">Select a column&hellip;</option>
-          </select>
-        </dd>
-      </dl>
-    </section>
-
-    <!-- API Credentials -->
-    <section class="panel" aria-labelledby="api-credentials-heading">
-      <h2 id="api-credentials-heading">Card Lookup API Credentials</h2>
-      <p class="muted">Required to resolve scanned cards to student identities. Stored only in this browser.</p>
-      <div class="field-row">
-        <label for="api-keyname-input">Key Name</label>
-        <input type="text" id="api-keyname-input" autocomplete="off" spellcheck="false" />
-      </div>
-      <div class="field-row">
-        <label for="api-key-input">API Key</label>
-        <input type="password" id="api-key-input" autocomplete="off" spellcheck="false" />
-      </div>
-      <div class="button-row">
-        <button id="btn-save-credentials" type="button" class="secondary">Save</button>
-        <button id="btn-clear-credentials" type="button" class="secondary">Clear Saved Key</button>
-      </div>
-      <p id="credentials-status" class="muted">No credentials saved.</p>
     </section>
 
     <!-- Latest Scan -->
@@ -117,23 +142,6 @@
         <dt>Lookup errors</dt>
         <dd id="stats-lookup-errors">0</dd>
       </dl>
-    </section>
-
-    <!-- Preferences -->
-    <section class="panel" aria-labelledby="prefs-heading">
-      <h2 id="prefs-heading">Preferences</h2>
-      <label class="toggle-row">
-        <input type="checkbox" id="sound-alerts-toggle" checked />
-        Sound alerts
-      </label>
-      <label class="toggle-row">
-        <input type="checkbox" id="remember-session-toggle" />
-        Remember this session on this computer
-      </label>
-      <div class="button-row">
-        <button id="btn-clear-local-data" type="button" class="secondary">Clear Local Data</button>
-      </div>
-      <p id="storage-warning" class="muted" hidden>Local storage is unavailable in this browser session; "Remember this session" cannot be used.</p>
     </section>
 
     <!-- Attendance Table -->
