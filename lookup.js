@@ -19,7 +19,7 @@
 //     lastName: string|null,
 //     email: string|null,
 //     raw: object|null,           // the original parsed JSON, for diagnostics only
-//     error: null | { kind: 'timeout'|'network'|'http-status'|'bad-json'|'missing-university-id', message: string },
+//     error: null | { kind: 'timeout'|'network'|'http-status'|'bad-json'|'missing-university-id'|'missing-credentials', message: string },
 //   }
 //
 // To add another field returned by a real API (e.g. "section" or
@@ -29,6 +29,7 @@
 
 import { LOOKUP_CONFIG } from './config.js';
 import { logEvent } from './diagnostics.js';
+import { getCredentials } from './credentials.js';
 
 /**
  * Reads a possibly dot-pathed field (e.g. "student.universityId") out of a
@@ -72,7 +73,15 @@ function successResult(normalized, raw) {
  * @param {string} cardCode
  */
 async function realLookup(cardCode) {
-  const url = LOOKUP_CONFIG.url.replace('{CARD_CODE}', encodeURIComponent(cardCode));
+  const { keyName, key } = getCredentials();
+  if (!keyName || !key) {
+    return errorResult('missing-credentials', 'Card lookup API key/keyname not set. Enter them in the Card Lookup API Credentials panel.');
+  }
+
+  const url = LOOKUP_CONFIG.url
+    .replace('{CARD_CODE}', encodeURIComponent(cardCode))
+    .replace('{KEY_NAME}', encodeURIComponent(keyName))
+    .replace('{KEY}', encodeURIComponent(key));
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), LOOKUP_CONFIG.timeoutMs);
 

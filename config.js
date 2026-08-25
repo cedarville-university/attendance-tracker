@@ -53,13 +53,15 @@ export const SESSION_STORAGE_KEY = 'attendance-tracker:v1:session';
 // file ships to every browser that loads the page.
 
 export const LOOKUP_CONFIG = {
-  // Set to false once a real API endpoint is configured below.
-  useMock: true,
+  useMock: false,
 
-  // Example real endpoint shape: GET https://example.edu/api/card/{CARD_CODE}
-  // The literal string "{CARD_CODE}" in `url` is replaced with the
-  // URI-encoded card code read from the reader.
-  url: 'https://example.edu/api/card/{CARD_CODE}',
+  // Cedarville's ProxID lookup proxy. "{CARD_CODE}" is replaced with the
+  // URI-encoded card code read from the reader. "{KEY_NAME}" and "{KEY}"
+  // are replaced with the credentials entered into the "Card Lookup API
+  // Credentials" panel (see credentials.js) -- the real key is never
+  // hardcoded here, since this file ships to every browser that loads the
+  // page.
+  url: 'https://cedarvilledataproxyapi.azurewebsites.net/api/ProxId?id={CARD_CODE}&keyname={KEY_NAME}&key={KEY}',
   method: 'GET',
 
   // Called per-request so headers can include anything computed at request
@@ -74,9 +76,9 @@ export const LOOKUP_CONFIG = {
   timeoutMs: 5000,
 
   // Field name (or dot-path, e.g. "student.universityId") to read the
-  // university ID from the raw JSON response. Update this (and the fields
-  // below) to match the real API's response shape.
-  universityIdField: 'universityId',
+  // university ID from the raw JSON response. The ProxID API's primary
+  // student identifier is "redwoodId".
+  universityIdField: 'redwoodId',
   firstNameField: 'firstName',
   lastNameField: 'lastName',
   emailField: 'email',

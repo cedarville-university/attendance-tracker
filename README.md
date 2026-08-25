@@ -58,40 +58,49 @@ or over HTTPS.
 
 ## 5. Configuring the external card-lookup API
 
-All API-specific configuration lives in **`config.js`**, in the `LOOKUP_CONFIG` object:
+Most API-specific configuration lives in **`config.js`**, in the `LOOKUP_CONFIG` object:
 
 ```js
 export const LOOKUP_CONFIG = {
-  useMock: true, // set to false once url/fields below are configured
-  url: 'https://example.edu/api/card/{CARD_CODE}',
+  useMock: false,
+  url: 'https://cedarvilledataproxyapi.azurewebsites.net/api/ProxId?id={CARD_CODE}&keyname={KEY_NAME}&key={KEY}',
   method: 'GET',
   headers: () => ({ Accept: 'application/json' }),
   timeoutMs: 5000,
-  universityIdField: 'universityId',
+  universityIdField: 'redwoodId',
   firstNameField: 'firstName',
   lastNameField: 'lastName',
   emailField: 'email',
 };
 ```
 
-- `url` may contain the literal placeholder `{CARD_CODE}`, which is replaced with the
-  URI-encoded card code read from the reader.
+- `url` may contain the literal placeholders `{CARD_CODE}`, `{KEY_NAME}`, and `{KEY}`, each replaced
+  (URI-encoded) at request time: `{CARD_CODE}` with the card code read from the reader, and
+  `{KEY_NAME}`/`{KEY}` with whatever is currently saved in the **Card Lookup API Credentials** panel
+  (see below).
 - `universityIdField` / `firstNameField` / `lastNameField` / `emailField` are field names (or
-  dot-paths, e.g. `"student.universityId"`) read out of the raw JSON response.
+  dot-paths, e.g. `"student.universityId"`) read out of the raw JSON response. The ProxID API's
+  primary student identifier is `redwoodId`, so that's what `universityIdField` points at -- it's
+  used as-is everywhere else in the app that talks about a "University ID" (roster matching, record
+  identity, CSV export).
 - All response-shape-specific logic lives in the `mapRawResponseToNormalized()` function inside
   **`lookup.js`** -- that is the one place to touch if a real API's JSON shape needs custom mapping
   logic beyond a simple field path (e.g. combining two fields, or a lookup table).
-- To add another normalized field later (e.g. `section`): add a `sectionField: 'section'` entry to
-  `LOOKUP_CONFIG`, then one line inside `mapRawResponseToNormalized()`.
-- Until `useMock` is set to `false`, the app uses a built-in **mock adapter** (clearly marked in
+- To add another normalized field later (e.g. `cohort`, `dorm`, `gender`): add a matching `*Field`
+  entry to `LOOKUP_CONFIG`, then one line inside `mapRawResponseToNormalized()`.
+- Setting `useMock` back to `true` switches to a built-in **mock adapter** (clearly marked in
   `lookup.js`) that fabricates a deterministic pseudo-student per card code, so the whole app can be
   demoed and tested without a real backend. Two special-case card codes exercise error states without
   hardware: a code containing `NOID` simulates a response missing a University ID, and a code
   containing `ERR` simulates a network failure.
-- Do **not** put secret API keys, passwords, or credentials in `config.js` -- it ships to every
-  browser that loads the page. If the real API requires authentication, it needs to be something
-  safe to expose client-side (e.g. a per-institution public token), or the API itself needs to be
-  scoped so that only expected campus networks/devices can reach it.
+
+**Credentials are never hardcoded in `config.js`** -- it ships to every browser that loads the page.
+Instead, the API key name and key are entered into the **Card Lookup API Credentials** panel in the
+app itself, held in memory and in a dedicated `localStorage` entry managed by **`credentials.js`**
+(see §10). If either is unset, every lookup fails fast as a `missing-credentials` lookup error
+without making a network request. If a different real API requires authentication that isn't safe to
+expose client-side at all, the API itself needs to be scoped so that only expected campus
+networks/devices can reach it.
 
 ## 6. CORS requirement
 
@@ -167,6 +176,12 @@ If `localStorage` is unavailable (e.g. a strict private-browsing mode), the app 
 disables the "Remember this session" toggle, shows a notice, and continues working normally
 in-memory-only.
 
+**Card Lookup API Credentials** (key name + key) are saved separately, under their own
+`localStorage` entry managed by `credentials.js`, independent of the "Remember this session" toggle
+above -- they're operational configuration rather than student data, so they persist across visits
+even if a professor never turns "Remember this session" on. Use **Clear Saved Key** in that panel to
+remove them.
+
 ## 11. Troubleshooting
 
 | Symptom | Likely cause / fix |
@@ -224,6 +239,7 @@ config.js            Central configuration: HID vendor ID, lookup API settings, 
 omnikey-parser.js     Pure OMNIKEY Custom Report packet parser.
 hid-reader.js         WebHID transport (connect/reconnect/disconnect, raw report handling).
 lookup.js            Card lookup adapter (mock + real fetch), normalizes API responses.
+credentials.js        Card lookup API key name/key: in-memory + localStorage persistence.
 roster.js            Hand-written CSV parser + roster indexing/matching.
 scan-pipeline.js     Scan orchestration: duplicate suppression, record lifecycle, lookup correlation.
 diagnostics.js       In-memory ring-buffer diagnostic/error log.

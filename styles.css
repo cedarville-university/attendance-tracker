@@ -196,6 +196,26 @@ button.danger:hover:not(:disabled) {
   margin: 0.4rem 0;
 }
 
+.field-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0.5rem 0;
+}
+
+.field-row label {
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.field-row input[type='text'],
+.field-row input[type='password'] {
+  font: inherit;
+  padding: 0.45rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+}
+
 .fact-list {
   display: grid;
   grid-template-columns: auto 1fr;

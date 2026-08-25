@@ -15,6 +15,12 @@ export const elements = {
   readerStatusText: document.getElementById('reader-status-text'),
   readerProductName: document.getElementById('reader-product-name'),
 
+  apiKeyNameInput: document.getElementById('api-keyname-input'),
+  apiKeyInput: document.getElementById('api-key-input'),
+  saveCredentialsBtn: document.getElementById('btn-save-credentials'),
+  clearCredentialsBtn: document.getElementById('btn-clear-credentials'),
+  credentialsStatus: document.getElementById('credentials-status'),
+
   rosterEnableToggle: document.getElementById('roster-enable-toggle'),
   loadRosterBtn: document.getElementById('btn-load-roster'),
   rosterFileInput: document.getElementById('roster-file-input'),
@@ -91,6 +97,17 @@ export function setReaderStatus({ connected, device }) {
   elements.readerProductName.textContent = connected && device ? device.productName : 'No reader connected.';
   elements.connectBtn.disabled = connected;
   elements.disconnectBtn.disabled = !connected;
+}
+
+// ---- API credentials ------------------------------------------------------
+
+export function setCredentialsFields({ keyName, key }) {
+  elements.apiKeyNameInput.value = keyName || '';
+  elements.apiKeyInput.value = key || '';
+}
+
+export function setCredentialsStatus(text) {
+  elements.credentialsStatus.textContent = text;
 }
 
 // ---- Roster status ------------------------------------------------------

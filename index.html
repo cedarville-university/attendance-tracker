@@ -65,6 +65,25 @@
       </dl>
     </section>
 
+    <!-- API Credentials -->
+    <section class="panel" aria-labelledby="api-credentials-heading">
+      <h2 id="api-credentials-heading">Card Lookup API Credentials</h2>
+      <p class="muted">Required to resolve scanned cards to student identities. Stored only in this browser.</p>
+      <div class="field-row">
+        <label for="api-keyname-input">Key Name</label>
+        <input type="text" id="api-keyname-input" autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="field-row">
+        <label for="api-key-input">API Key</label>
+        <input type="password" id="api-key-input" autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="button-row">
+        <button id="btn-save-credentials" type="button" class="secondary">Save</button>
+        <button id="btn-clear-credentials" type="button" class="secondary">Clear Saved Key</button>
+      </div>
+      <p id="credentials-status" class="muted">No credentials saved.</p>
+    </section>
+
     <!-- Latest Scan -->
     <section id="latest-scan-panel" class="panel latest-scan latest-scan--idle" aria-labelledby="latest-scan-heading" aria-live="polite">
       <h2 id="latest-scan-heading">Latest Scan</h2>

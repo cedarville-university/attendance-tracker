@@ -14,6 +14,7 @@ import { loadRosterCsv, buildRosterIndex } from './roster.js';
 import { ScanPipeline } from './scan-pipeline.js';
 import { downloadAttendanceCsv } from './csv.js';
 import * as storage from './storage.js';
+import * as credentials from './credentials.js';
 import * as ui from './ui.js';
 
 const { elements } = ui;
@@ -175,6 +176,20 @@ elements.connectBtn.addEventListener('click', async () => {
 
 elements.disconnectBtn.addEventListener('click', () => {
   hidReader.disconnect();
+});
+
+// ---- API credentials wiring -----------------------------------------------------
+
+elements.saveCredentialsBtn.addEventListener('click', () => {
+  credentials.setCredentials({ keyName: elements.apiKeyNameInput.value, key: elements.apiKeyInput.value });
+  const saved = credentials.getCredentials();
+  ui.setCredentialsStatus(saved.keyName && saved.key ? 'Saved.' : 'No credentials saved.');
+});
+
+elements.clearCredentialsBtn.addEventListener('click', () => {
+  credentials.clearCredentials();
+  ui.setCredentialsFields({ keyName: '', key: '' });
+  ui.setCredentialsStatus('No credentials saved.');
 });
 
 // ---- Roster wiring ------------------------------------------------------------
@@ -429,9 +444,17 @@ function initPreferencesDefaults() {
   }
 }
 
+function initCredentials() {
+  credentials.loadPersistedCredentials();
+  const saved = credentials.getCredentials();
+  ui.setCredentialsFields(saved);
+  ui.setCredentialsStatus(saved.keyName && saved.key ? 'Saved.' : 'No credentials saved.');
+}
+
 async function init() {
   initDiagnosticsSupportInfo();
   initPreferencesDefaults();
+  initCredentials();
   ui.setDiagDeviceInfo(null);
   ui.renderStats(scanPipeline.getStats(), rosterState.enabled);
 
