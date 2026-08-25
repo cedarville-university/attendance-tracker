@@ -69,19 +69,14 @@ function successResult(normalized, raw) {
 }
 
 /**
- * Real fetch-based adapter. Reads everything it needs from LOOKUP_CONFIG.
- * @param {string} cardCode
+ * Shared fetch mechanics for both the card-code and university-ID lookup
+ * adapters: applies the request timeout, performs the fetch, and validates
+ * the HTTP/JSON envelope. Does not know anything about student-identity
+ * fields -- that's finalizeLookup()'s job.
+ * @param {string} url
+ * @returns {Promise<{ok: true, json: any} | {ok: false, errorKind: string, message: string}>}
  */
-async function realLookup(cardCode) {
-  const { keyName, key } = getCredentials();
-  if (!keyName || !key) {
-    return errorResult('missing-credentials', 'Card lookup API key/keyname not set. Enter them in the Card Lookup API Credentials panel.');
-  }
-
-  const url = LOOKUP_CONFIG.url
-    .replace('{CARD_CODE}', encodeURIComponent(cardCode))
-    .replace('{KEY_NAME}', encodeURIComponent(keyName))
-    .replace('{KEY}', encodeURIComponent(key));
+async function performApiRequest(url) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), LOOKUP_CONFIG.timeoutMs);
 
@@ -94,30 +89,83 @@ async function realLookup(cardCode) {
     });
   } catch (err) {
     if (err.name === 'AbortError') {
-      return errorResult('timeout', `Card lookup timed out after ${LOOKUP_CONFIG.timeoutMs}ms.`);
+      return { ok: false, errorKind: 'timeout', message: `Lookup timed out after ${LOOKUP_CONFIG.timeoutMs}ms.` };
     }
-    return errorResult('network', `Card lookup failed: ${err.message}`);
+    return { ok: false, errorKind: 'network', message: `Lookup failed: ${err.message}` };
   } finally {
     clearTimeout(timeoutId);
   }
 
   if (!response.ok) {
-    return errorResult('http-status', `Card lookup API returned HTTP ${response.status} ${response.statusText}`);
+    return { ok: false, errorKind: 'http-status', message: `Lookup API returned HTTP ${response.status} ${response.statusText}` };
   }
 
-  let json;
   try {
-    json = await response.json();
+    const json = await response.json();
+    return { ok: true, json };
   } catch (err) {
-    return errorResult('bad-json', `Card lookup API returned a response that was not valid JSON: ${err.message}`);
+    return { ok: false, errorKind: 'bad-json', message: `Lookup API returned a response that was not valid JSON: ${err.message}` };
   }
+}
 
+/**
+ * Maps a raw parsed API response into the normalized result shape, failing
+ * if no University ID could be extracted from it.
+ * @param {any} json
+ * @returns {ReturnType<typeof successResult> | ReturnType<typeof errorResult>}
+ */
+function finalizeLookup(json) {
   const normalized = mapRawResponseToNormalized(json);
   if (!normalized.universityId) {
-    return errorResult('missing-university-id', 'Card lookup API response did not include a University ID.', json);
+    return errorResult('missing-university-id', 'Lookup API response did not include a University ID.', json);
+  }
+  return successResult(normalized, json);
+}
+
+/**
+ * Real fetch-based adapter, keyed by card code. Reads everything it needs
+ * from LOOKUP_CONFIG.
+ * @param {string} cardCode
+ */
+async function realLookup(cardCode) {
+  const { keyName, key } = getCredentials();
+  if (!keyName || !key) {
+    return errorResult('missing-credentials', 'Card lookup API key/keyname not set. Enter them in the Card Lookup API Credentials panel.');
   }
 
-  return successResult(normalized, json);
+  const url = LOOKUP_CONFIG.url
+    .replace('{CARD_CODE}', encodeURIComponent(cardCode))
+    .replace('{KEY_NAME}', encodeURIComponent(keyName))
+    .replace('{KEY}', encodeURIComponent(key));
+
+  const requestResult = await performApiRequest(url);
+  if (!requestResult.ok) {
+    return errorResult(requestResult.errorKind, requestResult.message);
+  }
+  return finalizeLookup(requestResult.json);
+}
+
+/**
+ * Real fetch-based adapter, keyed directly by University ID -- used to
+ * enrich "Absent" roster rows, which have no scanned card code.
+ * @param {string} universityId
+ */
+async function realPersonLookup(universityId) {
+  const { keyName, key } = getCredentials();
+  if (!keyName || !key) {
+    return errorResult('missing-credentials', 'Card lookup API key/keyname not set. Enter them in the Card Lookup API Credentials panel.');
+  }
+
+  const url = LOOKUP_CONFIG.personByIdUrl
+    .replace('{UNIVERSITY_ID}', encodeURIComponent(universityId))
+    .replace('{KEY_NAME}', encodeURIComponent(keyName))
+    .replace('{KEY}', encodeURIComponent(key));
+
+  const requestResult = await performApiRequest(url);
+  if (!requestResult.ok) {
+    return errorResult(requestResult.errorKind, requestResult.message);
+  }
+  return finalizeLookup(requestResult.json);
 }
 
 // ---- MOCK ADAPTER -- for demo/dev use only, no network access ------------
@@ -172,6 +220,36 @@ async function mockLookup(cardCode) {
 }
 
 /**
+ * Mock adapter for the university-ID lookup path (used to enrich "Absent"
+ * roster rows). Same deterministic-hash approach as mockLookup(), but keyed
+ * on (and echoing back) the University ID directly rather than a card code.
+ * The same "ERR"/"NOID" substring convention applies, checked against the
+ * University ID, so a roster row's ID can be crafted to exercise the failed-
+ * absent-lookup path without a real API.
+ */
+async function mockPersonLookup(universityId) {
+  await delay(150 + Math.floor(Math.random() * 750));
+
+  const upperId = universityId.toUpperCase();
+  if (upperId.includes('ERR')) {
+    return errorResult('network', 'Simulated network failure (mock adapter: University ID contains "ERR").');
+  }
+  if (upperId.includes('NOID')) {
+    return errorResult('missing-university-id', 'Simulated missing University ID (mock adapter: University ID contains "NOID").', {
+      note: 'mock response intentionally omitted universityId',
+    });
+  }
+
+  const hash = hashString(universityId);
+  const firstName = MOCK_FIRST_NAMES[hash % MOCK_FIRST_NAMES.length];
+  const lastName = MOCK_LAST_NAMES[Math.floor(hash / MOCK_FIRST_NAMES.length) % MOCK_LAST_NAMES.length];
+  const email = `${firstName}.${lastName}${universityId.slice(-3)}@example.edu`.toLowerCase();
+
+  const raw = { universityId, firstName, lastName, email, mock: true };
+  return successResult({ universityId, firstName, lastName, email }, raw);
+}
+
+/**
  * Resolves a scanned card code to normalized student identity information.
  * Always resolves (never rejects) to the normalized shape documented above.
  * @param {string} cardCode
@@ -191,6 +269,30 @@ export async function lookupCard(cardCode) {
     ok: result.ok,
     universityId: result.universityId,
     error: result.error,
+  });
+
+  return result;
+}
+
+/**
+ * Resolves a University ID directly to normalized student identity
+ * information -- used to enrich "Absent" roster rows during CSV export,
+ * since those students never scanned a card and so have no card code to
+ * look up by. Always resolves (never rejects) to the same normalized shape
+ * as lookupCard().
+ * @param {string} universityId
+ * @returns {Promise<{ok: boolean, universityId: string|null, firstName: string|null, lastName: string|null, email: string|null, raw: any, error: null|{kind: string, message: string}}>}
+ */
+export async function lookupPerson(universityId) {
+  logEvent('lookup-request', { universityId, useMock: LOOKUP_CONFIG.useMock, kind: 'person-by-id' });
+
+  const result = LOOKUP_CONFIG.useMock ? await mockPersonLookup(universityId) : await realPersonLookup(universityId);
+
+  logEvent('lookup-result', {
+    universityId,
+    ok: result.ok,
+    error: result.error,
+    kind: 'person-by-id',
   });
 
   return result;

@@ -153,6 +153,12 @@
       <div class="panel-header-row">
         <h2 id="attendance-heading">Attendance</h2>
         <div class="button-row">
+          <select id="export-mode-select" hidden aria-label="Export mode">
+            <option value="present">Present only</option>
+            <option value="present-absent">Present + Absent</option>
+            <option value="absent">Absent only</option>
+          </select>
+          <span id="export-progress-text" class="muted" hidden></span>
           <button id="btn-download-csv" type="button" class="primary">Download Attendance CSV</button>
           <button id="btn-clear-all" type="button" class="danger">Clear All</button>
         </div>

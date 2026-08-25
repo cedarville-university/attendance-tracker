@@ -64,6 +64,14 @@ export const LOOKUP_CONFIG = {
   url: 'https://cedarvilledataproxyapi.azurewebsites.net/api/ProxId?id={CARD_CODE}&keyname={KEY_NAME}&key={KEY}',
   method: 'GET',
 
+  // URL template for looking up a single person directly by University ID
+  // (used to enrich "Absent" roster rows during CSV export -- there is no
+  // scanned card code to look up by for a student who never tapped). Same
+  // host/auth query params as the ProxID endpoint above, and the real API
+  // returns the same field names, so universityIdField/firstNameField/
+  // lastNameField/emailField below apply to both endpoints unchanged.
+  personByIdUrl: 'https://cedarvilledataproxyapi.azurewebsites.net/api/personid?id={UNIVERSITY_ID}&keyname={KEY_NAME}&key={KEY}',
+
   // Called per-request so headers can include anything computed at request
   // time (but still no secrets -- browser-side headers are visible to
   // anyone who opens devtools).
@@ -83,3 +91,10 @@ export const LOOKUP_CONFIG = {
   lastNameField: 'lastName',
   emailField: 'email',
 };
+
+// ---- Absent-roster lookups --------------------------------------------------
+
+// How many person-by-ID lookups run concurrently when enriching "Absent"
+// rows for a CSV export. Bounded so a large roster doesn't fire dozens of
+// simultaneous requests at the lookup API.
+export const ABSENT_LOOKUP_CONCURRENCY = 4;

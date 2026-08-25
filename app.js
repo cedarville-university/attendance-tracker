@@ -7,12 +7,13 @@
 // matching, CSV, or storage logic lives in this file -- it delegates to
 // the dedicated modules for all of that.
 
-import { DEBUG_MODE_DEFAULT } from './config.js';
+import { DEBUG_MODE_DEFAULT, ABSENT_LOOKUP_CONCURRENCY } from './config.js';
 import * as diagnostics from './diagnostics.js';
 import { HidReader, isWebHidSupported, isSecureContext } from './hid-reader.js';
-import { loadRosterCsv, buildRosterIndex } from './roster.js';
+import { loadRosterCsv, buildRosterIndex, normalizeId } from './roster.js';
 import { ScanPipeline } from './scan-pipeline.js';
 import { downloadAttendanceCsv } from './csv.js';
+import { computeAbsentRows } from './absentees.js';
 import * as storage from './storage.js';
 import * as credentials from './credentials.js';
 import * as ui from './ui.js';
@@ -29,6 +30,19 @@ const rosterState = {
   idColumnHeader: null,
   index: new Map(),
 };
+
+// ---- Export state (session-lifetime only; never persisted) ----------------
+
+// Successful person-by-ID lookups for "Absent" export rows, keyed by
+// normalized university ID. Failed lookups are never cached, so the next
+// export retries them (mirrors ScanPipeline's retry-failed-lookups
+// philosophy).
+const absentLookupCache = new Map();
+let exportInFlight = false;
+// Bumped whenever roster state changes; an in-flight absent-lookup batch
+// checks this to detect it's been superseded and should discard its result
+// rather than downloading a CSV built against a stale roster.
+let exportGeneration = 0;
 
 // ---- Scan pipeline ----------------------------------------------------------
 
@@ -197,6 +211,15 @@ elements.clearCredentialsBtn.addEventListener('click', () => {
 
 // ---- Roster wiring ------------------------------------------------------------
 
+// Called after any change to rosterState (load/column-select/clear/enable):
+// refreshes whether the Present/Absent export mode selector is shown, and
+// invalidates any absent-lookup batch already in flight so it discards its
+// result instead of downloading a CSV built against a stale roster.
+function refreshExportControls() {
+  exportGeneration += 1;
+  ui.setExportControlsAvailability({ rosterActive: rosterState.enabled && rosterState.index.size > 0 });
+}
+
 elements.loadRosterBtn.addEventListener('click', () => {
   elements.rosterFileInput.click();
 });
@@ -221,6 +244,7 @@ elements.rosterFileInput.addEventListener('change', () => {
 
     ui.setRosterStatus({ filename: rosterState.filename, rowCount: rosterState.rawRows.length, headers: rosterState.headers, selectedHeader: null });
     ui.setRosterControlsAvailability({ hasRows: rosterState.rawRows.length > 0, hasIdColumn: false });
+    refreshExportControls();
     ui.showAppMessage('info', `Loaded ${rosterState.rawRows.length} roster row(s) from ${file.name}.`);
     schedulePersist();
   };
@@ -236,6 +260,7 @@ elements.rosterIdColumnSelect.addEventListener('change', () => {
   rosterState.idColumnHeader = header;
   rosterState.index = header ? buildRosterIndex(rosterState.rawRows, header) : new Map();
   ui.setRosterControlsAvailability({ hasRows: rosterState.rawRows.length > 0, hasIdColumn: !!header });
+  refreshExportControls();
   schedulePersist();
 });
 
@@ -251,6 +276,7 @@ elements.clearRosterBtn.addEventListener('click', () => {
   ui.setRosterStatus({ filename: null, rowCount: 0, headers: [], selectedHeader: null });
   ui.setRosterControlsAvailability({ hasRows: false, hasIdColumn: false });
   ui.renderStats(scanPipeline.getStats(), rosterState.enabled);
+  refreshExportControls();
   schedulePersist();
 });
 
@@ -263,13 +289,65 @@ elements.rosterEnableToggle.addEventListener('change', () => {
   }
   rosterState.enabled = elements.rosterEnableToggle.checked;
   ui.renderStats(scanPipeline.getStats(), rosterState.enabled);
+  refreshExportControls();
   schedulePersist();
 });
 
 // ---- Attendance table / export -------------------------------------------------
 
-elements.downloadCsvBtn.addEventListener('click', () => {
-  const result = downloadAttendanceCsv(scanPipeline.getRecords());
+elements.downloadCsvBtn.addEventListener('click', async () => {
+  if (exportInFlight) return; // defensive; button is also disabled while in flight
+
+  const rosterActive = rosterState.enabled && rosterState.index.size > 0;
+  const mode = rosterActive ? elements.exportModeSelect.value : 'present';
+
+  if (mode === 'present') {
+    const result = downloadAttendanceCsv(scanPipeline.getRecords());
+    if (!result.ok) {
+      ui.showAppMessage('error', `CSV export failed: ${result.error}`);
+    }
+    return;
+  }
+
+  const myGeneration = ++exportGeneration;
+  exportInFlight = true;
+  ui.setExportInProgress(true);
+  ui.setExportProgressText('Checking roster for absent students…');
+
+  const scannedIds = new Set(
+    scanPipeline
+      .getRecords()
+      .map((record) => record.universityId)
+      .filter(Boolean)
+      .map(normalizeId)
+  );
+
+  const absentRows = await computeAbsentRows({
+    rosterState,
+    scannedIds,
+    cache: absentLookupCache,
+    concurrency: ABSENT_LOOKUP_CONCURRENCY,
+    onProgress: ({ done, total }) => {
+      if (myGeneration !== exportGeneration) return;
+      ui.setExportProgressText(`Looking up ${done} of ${total} absent students…`);
+    },
+    shouldAbort: () => myGeneration !== exportGeneration,
+  });
+
+  exportInFlight = false;
+  ui.setExportInProgress(false);
+  ui.setExportProgressText('');
+
+  if (myGeneration !== exportGeneration) return; // roster changed mid-fetch: discard this result
+
+  if (absentRows.length === 0) {
+    ui.showAppMessage('info', 'No absent students found — everyone on the roster was scanned.');
+  }
+
+  const presentRecords = scanPipeline.getRecords();
+  const combinedRecords = mode === 'absent' ? absentRows : [...presentRecords, ...absentRows];
+
+  const result = downloadAttendanceCsv(combinedRecords);
   if (!result.ok) {
     ui.showAppMessage('error', `CSV export failed: ${result.error}`);
   }
@@ -395,6 +473,7 @@ function restoreFromSaved(saved) {
   });
   ui.setRosterControlsAvailability({ hasRows: rosterState.rawRows.length > 0, hasIdColumn: !!rosterState.idColumnHeader });
   elements.rosterEnableToggle.checked = rosterState.enabled;
+  refreshExportControls();
 
   scanPipeline.restoreState({
     records: saved.attendanceRecords || [],

@@ -51,6 +51,8 @@ export const elements = {
 
   downloadCsvBtn: document.getElementById('btn-download-csv'),
   clearAllBtn: document.getElementById('btn-clear-all'),
+  exportModeSelect: document.getElementById('export-mode-select'),
+  exportProgressText: document.getElementById('export-progress-text'),
   attendanceTableBody: document.getElementById('attendance-table-body'),
   attendanceEmptyMessage: document.getElementById('attendance-empty-message'),
   attendanceRowTemplate: document.getElementById('attendance-row-template'),
@@ -145,6 +147,26 @@ export function setRosterStatus({ filename, rowCount, headers, selectedHeader })
 export function setRosterControlsAvailability({ hasRows, hasIdColumn }) {
   elements.rosterEnableToggle.disabled = !(hasRows && hasIdColumn);
   elements.clearRosterBtn.disabled = !hasRows;
+}
+
+// ---- Export controls -------------------------------------------------------
+
+/** Shows/hides the Present/Absent export mode selector -- only relevant when a roster is active. */
+export function setExportControlsAvailability({ rosterActive }) {
+  elements.exportModeSelect.hidden = !rosterActive;
+  if (!rosterActive) elements.exportModeSelect.value = 'present';
+}
+
+/** Disables the export button + mode selector while an absent-student lookup batch is in flight. */
+export function setExportInProgress(inProgress) {
+  elements.downloadCsvBtn.disabled = inProgress;
+  elements.exportModeSelect.disabled = inProgress;
+}
+
+/** Shows/hides the inline progress text next to the export button. */
+export function setExportProgressText(text) {
+  elements.exportProgressText.hidden = !text;
+  elements.exportProgressText.textContent = text || '';
 }
 
 // ---- Latest scan ---------------------------------------------------------

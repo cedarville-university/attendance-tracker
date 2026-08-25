@@ -12,7 +12,7 @@
 
 import { logEvent } from './diagnostics.js';
 
-const BASE_COLUMNS = ['timestamp', 'rawCardCode', 'universityId', 'rosterStatus', 'status'];
+const BASE_COLUMNS = ['timestamp', 'rawCardCode', 'universityId', 'rosterStatus', 'status', 'attendance'];
 
 /**
  * Quotes a CSV field only when necessary (RFC 4180 style): if it contains
@@ -59,6 +59,7 @@ export function buildAttendanceCsv(records) {
   const lines = [columns.map(csvEscapeField).join(',')];
   for (const record of records) {
     const values = columns.map((column) => {
+      if (column === 'attendance') return record.isAbsent ? 'Absent' : 'Present';
       if (BASE_COLUMNS.includes(column)) return record[column];
       if (column.startsWith('lookup.')) return (record.lookupData || {})[column.slice('lookup.'.length)];
       if (column.startsWith('roster.')) return (record.rosterData || {})[column.slice('roster.'.length)];
