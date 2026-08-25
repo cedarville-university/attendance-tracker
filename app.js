@@ -442,6 +442,11 @@ function initPreferencesDefaults() {
 
   if (!storage.isStorageAvailable()) {
     ui.setStorageWarning(true);
+    // #storage-warning lives inside the (now collapsed-by-default)
+    // Settings panel, so it's invisible until the user opens it. Also
+    // surface it in the always-visible app-messages area so it can't be
+    // missed at startup.
+    ui.showAppMessage('warning', 'Local storage is unavailable in this browser session; "Remember this session" cannot be used.');
     elements.rememberSessionToggle.checked = false;
     elements.rememberSessionToggle.disabled = true;
     elements.clearLocalDataBtn.disabled = true;

@@ -280,6 +280,20 @@ export class ScanPipeline {
    */
   restoreState({ records, duplicateCounters }) {
     this.records = records || [];
+    // A record still 'pending' at save time had its lookup in flight when
+    // the page was last saved; that promise died with the page and can
+    // never resolve on its own. Normalize it the same way a real failed
+    // lookup is represented in `_resolveScan`, so it's counted correctly
+    // below, renders as a visible failure instead of a stuck "Looking
+    // up..." row, and -- critically -- so `_processCandidateScan`'s
+    // duplicate-merge retry gate (which only fires on 'lookup-error') can
+    // actually recover it on the next scan of that card.
+    for (const record of this.records) {
+      if (record.status === 'pending') {
+        record.status = 'lookup-error';
+        record.rosterStatus = 'lookup-error'; // never claim "not on roster" when we couldn't even determine an ID
+      }
+    }
     this.recordsById = new Map(this.records.map((r) => [r.id, r]));
     // Later entries win for a repeated card code, matching "current live
     // record" semantics -- relevant only for sessions saved before this
