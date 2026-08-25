@@ -183,13 +183,16 @@ elements.disconnectBtn.addEventListener('click', () => {
 elements.saveCredentialsBtn.addEventListener('click', () => {
   credentials.setCredentials({ keyName: elements.apiKeyNameInput.value, key: elements.apiKeyInput.value });
   const saved = credentials.getCredentials();
-  ui.setCredentialsStatus(saved.keyName && saved.key ? 'Saved.' : 'No credentials saved.');
+  const hasCredentials = !!(saved.keyName && saved.key);
+  ui.setCredentialsStatus(hasCredentials ? 'Saved.' : 'No credentials saved.');
+  ui.setApiKeyWarning(!hasCredentials);
 });
 
 elements.clearCredentialsBtn.addEventListener('click', () => {
   credentials.clearCredentials();
   ui.setCredentialsFields({ keyName: '', key: '' });
   ui.setCredentialsStatus('No credentials saved.');
+  ui.setApiKeyWarning(true);
 });
 
 // ---- Roster wiring ------------------------------------------------------------
@@ -449,7 +452,9 @@ function initCredentials() {
   credentials.loadPersistedCredentials();
   const saved = credentials.getCredentials();
   ui.setCredentialsFields(saved);
-  ui.setCredentialsStatus(saved.keyName && saved.key ? 'Saved.' : 'No credentials saved.');
+  const hasCredentials = !!(saved.keyName && saved.key);
+  ui.setCredentialsStatus(hasCredentials ? 'Saved.' : 'No credentials saved.');
+  ui.setApiKeyWarning(!hasCredentials);
 }
 
 async function init() {

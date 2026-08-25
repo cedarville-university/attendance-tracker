@@ -20,6 +20,7 @@ export const elements = {
   saveCredentialsBtn: document.getElementById('btn-save-credentials'),
   clearCredentialsBtn: document.getElementById('btn-clear-credentials'),
   credentialsStatus: document.getElementById('credentials-status'),
+  apiKeyWarningBanner: document.getElementById('api-key-warning-banner'),
 
   rosterEnableToggle: document.getElementById('roster-enable-toggle'),
   loadRosterBtn: document.getElementById('btn-load-roster'),
@@ -108,6 +109,10 @@ export function setCredentialsFields({ keyName, key }) {
 
 export function setCredentialsStatus(text) {
   elements.credentialsStatus.textContent = text;
+}
+
+export function setApiKeyWarning(show) {
+  elements.apiKeyWarningBanner.hidden = !show;
 }
 
 // ---- Roster status ------------------------------------------------------
