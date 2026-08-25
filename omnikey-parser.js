@@ -6,17 +6,19 @@
 // format -- Custom Report packets arrive as raw HID input reports, not
 // keystroke/keydown events.
 //
-// Documented packet shape (per OMNIKEY 5x27CK Custom Report spec), up to
-// 40 bytes total:
-//   byte 0            : number of data bytes ("declared length")
-//   byte 1            : report/protocol version
-//   bytes 2..N        : card/output data (the payload)
+// HID's documented packet shape (length byte, then version byte, then
+// payload starting at byte 2) does NOT match what this reader's firmware
+// (report version 6) actually sends. Verified against a real 5427 G2, the
+// observed layout is, up to 40 bytes total:
+//   byte 0            : report/protocol version
+//   byte 1            : number of data bytes ("declared length")
+//   byte 2            : extra per-field tag/count byte (unused by this parser)
+//   bytes 3..N        : card/output data (the payload)
 //   remaining bytes   : zero padding
 //
-// The exact behavior of a given reader/firmware/browser combination has
-// NOT been verified against physical hardware yet, so this parser is
-// deliberately defensive and keeps every offset as a named constant below
-// so it can be adjusted in one place after testing against a real 5427CK.
+// This parser is deliberately defensive and keeps every offset as a named
+// constant below so it can be re-adjusted in one place if a different
+// reader/firmware combination turns out to use yet another layout.
 //
 // This module is pure and side-effect free: no DOM, no navigator.hid, no
 // imports. That makes it trivially testable/adjustable in isolation
@@ -26,9 +28,9 @@
 // Adjust these if a real reader's report layout differs from the
 // documented Custom Report format described above.
 
-export const LENGTH_BYTE_OFFSET = 0; // byte index holding the declared payload length
-export const VERSION_BYTE_OFFSET = 1; // byte index holding the protocol/report version
-export const PAYLOAD_START_OFFSET = 2; // byte index where card/output data begins
+export const LENGTH_BYTE_OFFSET = 1; // byte index holding the declared payload length
+export const VERSION_BYTE_OFFSET = 0; // byte index holding the protocol/report version
+export const PAYLOAD_START_OFFSET = 3; // byte index where card/output data begins
 export const MIN_REPORT_BYTES = 2; // minimum bytes needed to read length + version
 export const MAX_REASONABLE_PAYLOAD = 40; // reports are documented as "up to 40 bytes" total
 
