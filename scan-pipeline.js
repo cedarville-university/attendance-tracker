@@ -52,6 +52,8 @@ export class ScanPipeline {
     this.recordsById = new Map();
     /** @type {Map<string, number>} last-accepted timestamp (ms) per card code, for duplicate suppression */
     this.lastAcceptedByCode = new Map();
+    /** @type {Map<string, string>} current live record id per card code, so a later scan of the same card merges into that row instead of creating a new one */
+    this.recordIdByCardCode = new Map();
     this.latestScanId = null;
     this.nextId = 1;
     this.stats = emptyStats();
@@ -76,6 +78,25 @@ export class ScanPipeline {
 
   /** @private */
   _processCandidateScan(cardCode) {
+    // Independent of the time-windowed check below: if this card code
+    // already has a live row in the table -- however long ago it was first
+    // scanned -- never create a second row for it. A row whose lookup
+    // already failed gets retried in place; anything else is just
+    // suppressed (it's still counted as a suppressed duplicate either way,
+    // since no new row is added).
+    const existingRecordId = this.recordIdByCardCode.get(cardCode);
+    if (existingRecordId !== undefined) {
+      this.stats.suppressedDuplicates += 1;
+      logEvent('duplicate-suppressed', { cardCode, existingRecordId });
+      this.callbacks.onStatsChanged(this.getStats());
+
+      const existingRecord = this.recordsById.get(existingRecordId);
+      if (existingRecord && existingRecord.status === 'lookup-error') {
+        this._retryLookup(existingRecordId, cardCode);
+      }
+      return;
+    }
+
     const now = Date.now();
     const lastAccepted = this.lastAcceptedByCode.get(cardCode);
     if (lastAccepted !== undefined && now - lastAccepted < DUPLICATE_SUPPRESS_WINDOW_MS) {
@@ -104,6 +125,7 @@ export class ScanPipeline {
 
     this.records.push(record);
     this.recordsById.set(record.id, record);
+    this.recordIdByCardCode.set(cardCode, record.id);
     this.latestScanId = record.id;
 
     this.callbacks.onRecordCreated(record);
@@ -112,6 +134,37 @@ export class ScanPipeline {
     // must return immediately so the next inputreport -- possibly a
     // different card -- is never blocked behind this lookup.
     this._resolveScan(record.id, cardCode);
+  }
+
+  /**
+   * Re-runs the lookup for a record whose previous attempt already failed
+   * ('lookup-error'), triggered by a later duplicate scan of the same card
+   * code -- e.g. the first lookup timed out and a professor has the
+   * student tap again. Flips the record back to 'pending' (so its row
+   * shows "Looking up..." again) and decrements whatever stats its failed
+   * state previously contributed, before re-resolving through the normal
+   * `_resolveScan` path so the two code paths can't double-count stats.
+   * @private
+   * @param {string} recordId
+   * @param {string} cardCode
+   */
+  _retryLookup(recordId, cardCode) {
+    const record = this.recordsById.get(recordId);
+    if (!record) return;
+
+    this._decrementStatsForRecord(record);
+
+    const rosterState = this.getRosterState();
+    record.universityId = null;
+    record.lookupData = {};
+    record.rosterData = {};
+    record.status = 'pending';
+    record.rosterStatus = rosterState.enabled ? 'pending' : 'unchecked';
+
+    this.callbacks.onRecordUpdated(record);
+    this.callbacks.onStatsChanged(this.getStats());
+
+    this._resolveScan(recordId, cardCode);
   }
 
   /** @private */
@@ -188,6 +241,9 @@ export class ScanPipeline {
     if (index === -1) return false;
     const [removed] = this.records.splice(index, 1);
     this.recordsById.delete(id);
+    if (this.recordIdByCardCode.get(removed.rawCardCode) === id) {
+      this.recordIdByCardCode.delete(removed.rawCardCode);
+    }
     this._decrementStatsForRecord(removed);
     if (this.latestScanId === id) {
       this.latestScanId = this.records.length ? this.records[this.records.length - 1].id : null;
@@ -209,6 +265,7 @@ export class ScanPipeline {
     this.records = [];
     this.recordsById.clear();
     this.lastAcceptedByCode.clear();
+    this.recordIdByCardCode.clear();
     this.latestScanId = null;
     this.stats = emptyStats();
     this.callbacks.onStatsChanged(this.getStats());
@@ -224,6 +281,10 @@ export class ScanPipeline {
   restoreState({ records, duplicateCounters }) {
     this.records = records || [];
     this.recordsById = new Map(this.records.map((r) => [r.id, r]));
+    // Later entries win for a repeated card code, matching "current live
+    // record" semantics -- relevant only for sessions saved before this
+    // feature existed, which could contain more than one row per card code.
+    this.recordIdByCardCode = new Map(this.records.map((r) => [r.rawCardCode, r.id]));
     this.latestScanId = this.records.length ? this.records[this.records.length - 1].id : null;
 
     let maxSeen = 0;
