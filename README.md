@@ -39,22 +39,25 @@ will show a visible error explaining this.
 
 ## 4. Running it locally for testing
 
-No build step is required. From the project directory, serve the files with any static file
-server, for example:
+The app is now served by a small Fastify backend (`server/src/index.ts`), which serves the
+frontend in `web/` as static files and hot-reloads on change:
 
 ```bash
-python3 -m http.server 8000
+npm install
+npm run dev
+# then open http://localhost:3000/index.html
+```
+
+For pure frontend hacking with no backend involved, any static file server pointed at `web/` still
+works, since `web/` remains a plain, build-step-free set of ES modules:
+
+```bash
+python3 -m http.server 8000 --directory web
 # then open http://localhost:8000/index.html
 ```
 
-or, with Node installed:
-
-```bash
-npx serve .
-```
-
-Any static server works -- the only requirement is that it's reachable at `http://localhost:<port>`
-or over HTTPS.
+Either way, the only requirement is that it's reachable at `http://localhost:<port>` or over HTTPS,
+per WebHID's secure-context rule below.
 
 ## 5. Configuring the external card-lookup API
 

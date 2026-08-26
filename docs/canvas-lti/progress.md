@@ -11,11 +11,11 @@ listed below for continuity but have not been planned in detail yet.
       harness; tests around the OMNIKEY parser, `ScanPipeline`, and roster CSV
       parsing; existing browser app behavior preserved unchanged.
       Exit criterion: current standalone scanner still works. ✅ met.
-- [ ] **Phase 1 — Repository restructuring** — move browser sources into `web/`;
+- [x] **Phase 1 — Repository restructuring** — move browser sources into `web/`;
       create `server/`; one local dev command starts Postgres + backend +
       frontend; Docker Compose for local Postgres.
       Exit criterion: existing frontend served through the new backend, no card
-      behavior regression.
+      behavior regression. ✅ met.
 - [ ] **Phase 2 — Server-side identity resolver** — `IdentityResolver` interface,
       `MockIdentityResolver`, `HttpIdentityResolver`; browser card-service
       requests replaced with same-origin backend scan requests; production
@@ -80,6 +80,48 @@ listed below for continuity but have not been planned in detail yet.
 - `docs/canvas-lti/spec.md` was copied verbatim from the user-supplied
   `docs/lti-spec.md` (which was untracked in the parent checkout and not
   copied automatically into this worktree).
+
+## Phase 1 — what actually happened
+
+- All 14 frontend source files plus `index.html`/`styles.css` were moved with
+  `git mv` into `web/`; Phase 0's test files moved to `web/tests/` and
+  `vitest.config.ts`'s `include` was updated to match. No import paths needed
+  to change — all cross-file imports were already relative siblings. All 33
+  Phase 0 tests still pass after the move alone.
+- `server/src/index.ts` now boots a real Fastify app: `@fastify/static` serves
+  `web/` at the root, and `GET /health` returns `{ status: 'ok' }`. The
+  Phase 0 placeholder (`export {}`) is gone.
+- `npm run dev` now runs `tsx watch server/src/index.ts` (hot-reloading
+  Fastify) instead of the Phase 0 placeholder `python3 -m http.server 8000`.
+  Added `fastify`, `@fastify/static`, `tsx`, and `@types/node` as
+  dependencies.
+- `eslint.config.js` gained a `typescript-eslint` block scoped to
+  `server/**/*.ts` (existing `web/**/*.js` and `web/tests/**/*.js` blocks were
+  narrowed with explicit `files` globs to match). Without this, `eslint .`
+  silently skipped `.ts` files with no error, so `npm run lint` would have
+  passed while never actually checking `server/src/index.ts`. Verified by
+  temporarily adding an unused variable to `index.ts` and confirming ESLint
+  flagged it, then reverting.
+- `docker-compose.yml` added at repo root with a single `postgres:16` service
+  (named volume, port 5432). Per the plan's decision #1, nothing in
+  `npm run dev` or any app code starts or reads this yet — it's scaffolding
+  only, for Phase 5.
+- `README.md`'s "Running it locally for testing" section now leads with
+  `npm run dev`, and keeps a fallback note for serving `web/` directly with
+  any static server for frontend-only work.
+- Verified manually via Playwright MCP (no physical card reader available in
+  this environment, consistent with the plan's note that WebHID cannot be
+  exercised by automated tooling): loaded `http://localhost:3000/index.html`
+  through the new Fastify server, confirmed the page/markup/console are
+  identical to pre-move behavior, expanded the Settings panel, uploaded a
+  roster CSV (parsed to 2 rows, column selector populated correctly), and
+  clicked Download Attendance CSV (produced a real file download with the
+  expected header row, zero data rows since no scan occurred). No console
+  errors or warnings at any point. `npm test`/`lint`/`typecheck` all pass.
+- WebHID connect/scan itself was **not** exercised end-to-end in this session
+  — that requires real OMNIKEY hardware and a human at a Chromium browser.
+  This is unchanged from Phase 0/the plan's stated limitation, not a new gap
+  introduced by Phase 1's restructuring.
 
 ## Deferred decisions
 
