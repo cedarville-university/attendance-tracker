@@ -1,0 +1,219 @@
+# Canvas LTI Attendance Tracker — Progress Tracker
+
+Tracks implementation of `docs/canvas-lti/spec.md` (§54 "Implementation phases").
+This pass (`docs/superpowers/plans/i-have-a-spec-velvety-moon.md` — see the user's
+plan file, not committed to this repo) covers **Phases 0–2 only**. Phases 3–8 are
+listed below for continuity but have not been planned in detail yet.
+
+## Phase checklist
+
+- [x] **Phase 0 — Baseline and tests** — Node project tooling, linting, unit-test
+      harness; tests around the OMNIKEY parser, `ScanPipeline`, and roster CSV
+      parsing; existing browser app behavior preserved unchanged.
+      Exit criterion: current standalone scanner still works. ✅ met.
+- [x] **Phase 1 — Repository restructuring** — move browser sources into `web/`;
+      create `server/`; one local dev command starts Postgres + backend +
+      frontend; Docker Compose for local Postgres.
+      Exit criterion: existing frontend served through the new backend, no card
+      behavior regression. ✅ met.
+- [x] **Phase 2 — Server-side identity resolver** — `IdentityResolver` interface,
+      `MockIdentityResolver`, `HttpIdentityResolver`; browser card-service
+      requests replaced with same-origin backend scan requests; production
+      credentials UI removed.
+      Exit criterion: scanner works through backend, no resolver secret reaches
+      browser JavaScript. ✅ met.
+- [ ] **Phase 3 — LTI authentication** — `/lti/login`, `/lti/launch`,
+      `/lti/jwks`; OIDC transaction storage; launch validation; application
+      sessions; role authorization; full security test matrix (spec §45).
+      Exit criterion: valid instructor Canvas launches work, malformed/replayed
+      launches fail.
+- [ ] **Phase 4 — NRPS** — Canvas token acquisition and roster retrieval;
+      uploaded roster replaced as the primary workflow; identity matching
+      configuration.
+      Exit criterion: instructor launches from a course and sees the active
+      Canvas learner roster without uploading a file.
+- [ ] **Phase 5 — Persistent attendance** — attendance sessions, roster
+      snapshots, scan persistence, manual corrections, session close/reopen,
+      audit events, CSV export.
+      Exit criterion: closing/reopening the browser does not lose
+      server-accepted attendance.
+- [ ] **Phase 6 — AGS grading** — cumulative line item, grade calculation,
+      score submission, grade outbox, retry worker, status UI.
+      Exit criterion: closing attendance updates the expected Canvas Gradebook
+      column.
+- [ ] **Phase 7 — Infrastructure and CI/CD** — Dockerfile, Bicep, Azure
+      Container Apps, PostgreSQL, Key Vault, ACR, GitHub Actions OIDC
+      deployment, stage/prod environments, health checks, monitoring.
+      Exit criterion: a tagged/approved release deploys without any long-lived
+      Azure deployment password in GitHub.
+- [ ] **Phase 8 — Hardening** — dependency review, CSP/CSRF/tenant-isolation/
+      rate-limit testing, resolver redaction testing, key rotation drill,
+      database restore drill, Canvas token/key rotation tests, browser/hardware
+      validation.
+
+## Phase 0 — what actually happened
+
+- Root `package.json`/`tsconfig.json`/`vitest.config.ts`/`eslint.config.js`/
+  `.prettierrc` added. `npm run dev`/`test`/`lint`/`typecheck` all present;
+  `dev` is still the placeholder `python3 -m http.server 8000` command until
+  Phase 1 stands up the Fastify server.
+- `tsconfig.json`'s `include` points at `server/src/**/*.ts`; a placeholder
+  `server/src/index.ts` (`export {}`) was added only so `tsc --noEmit` has a
+  real input — Phase 1 replaces it with the actual Fastify entrypoint.
+- ESLint's `no-unused-vars` rule was configured with `ignoreRestSiblings: true`
+  — a pre-existing, correct use of that pattern in `app.js`
+  (`parsedReportLogDetail`) would otherwise false-positive now that a linter
+  exists for the first time.
+- 33 tests added across `tests/omnikey-parser.test.js`, `tests/roster.test.js`,
+  `tests/scan-pipeline.test.js`, covering every case in this plan's Phase 0
+  Step 2–4 (byte-offset parsing incl. the real-firmware fallback from commit
+  `99aec05`; CSV quoting/BOM/leading-zero-ID handling; and the full
+  `ScanPipeline` concurrency/correlation matrix — duplicate suppression within
+  and outside the time window, retry-after-failure, stale-lookup-does-not-
+  clobber-latest, deletion-during-lookup, roster expected/unexpected/timeout).
+  These are the pre-refactor regression baseline Phase 2 must not break when
+  it swaps `lookupCard()` for a `fetch('/api/scans')` call.
+- No existing runtime file (`app.js`, `scan-pipeline.js`, `lookup.js`, etc.)
+  was modified. Verified via `git diff --stat` against the tracked source
+  files (empty) and by serving the app with `python3 -m http.server` and
+  confirming all files still serve as before.
+- `docs/canvas-lti/spec.md` was copied verbatim from the user-supplied
+  `docs/lti-spec.md` (which was untracked in the parent checkout and not
+  copied automatically into this worktree).
+
+## Phase 1 — what actually happened
+
+- All 14 frontend source files plus `index.html`/`styles.css` were moved with
+  `git mv` into `web/`; Phase 0's test files moved to `web/tests/` and
+  `vitest.config.ts`'s `include` was updated to match. No import paths needed
+  to change — all cross-file imports were already relative siblings. All 33
+  Phase 0 tests still pass after the move alone.
+- `server/src/index.ts` now boots a real Fastify app: `@fastify/static` serves
+  `web/` at the root, and `GET /health` returns `{ status: 'ok' }`. The
+  Phase 0 placeholder (`export {}`) is gone.
+- `npm run dev` now runs `tsx watch server/src/index.ts` (hot-reloading
+  Fastify) instead of the Phase 0 placeholder `python3 -m http.server 8000`.
+  Added `fastify`, `@fastify/static`, `tsx`, and `@types/node` as
+  dependencies.
+- `eslint.config.js` gained a `typescript-eslint` block scoped to
+  `server/**/*.ts` (existing `web/**/*.js` and `web/tests/**/*.js` blocks were
+  narrowed with explicit `files` globs to match). Without this, `eslint .`
+  silently skipped `.ts` files with no error, so `npm run lint` would have
+  passed while never actually checking `server/src/index.ts`. Verified by
+  temporarily adding an unused variable to `index.ts` and confirming ESLint
+  flagged it, then reverting.
+- `docker-compose.yml` added at repo root with a single `postgres:16` service
+  (named volume, port 5432). Per the plan's decision #1, nothing in
+  `npm run dev` or any app code starts or reads this yet — it's scaffolding
+  only, for Phase 5.
+- `README.md`'s "Running it locally for testing" section now leads with
+  `npm run dev`, and keeps a fallback note for serving `web/` directly with
+  any static server for frontend-only work.
+- Verified manually via Playwright MCP (no physical card reader available in
+  this environment, consistent with the plan's note that WebHID cannot be
+  exercised by automated tooling): loaded `http://localhost:3000/index.html`
+  through the new Fastify server, confirmed the page/markup/console are
+  identical to pre-move behavior, expanded the Settings panel, uploaded a
+  roster CSV (parsed to 2 rows, column selector populated correctly), and
+  clicked Download Attendance CSV (produced a real file download with the
+  expected header row, zero data rows since no scan occurred). No console
+  errors or warnings at any point. `npm test`/`lint`/`typecheck` all pass.
+- WebHID connect/scan itself was **not** exercised end-to-end in this session
+  — that requires real OMNIKEY hardware and a human at a Chromium browser.
+  This is unchanged from Phase 0/the plan's stated limitation, not a new gap
+  introduced by Phase 1's restructuring.
+
+## Phase 2 — what actually happened
+
+- `server/src/identity/types.ts` defines `IdentityResolver`/`IdentityResolution`, mirroring
+  `lookup.js`'s old normalized shape. `missing-credentials` was dropped from the error-kind union
+  per the plan: server config is validated at startup (resolver selection falls back to Mock)
+  instead of a request ever reaching a misconfigured resolver.
+- `server/src/identity/mock-resolver.ts` (`MockIdentityResolver`) ports `lookup.js`'s `mockLookup`
+  hash/name-list/`ERR`/`NOID` logic verbatim — same card code always resolves to the same identity.
+- `server/src/identity/http-resolver.ts` (`HttpIdentityResolver`) ports `realLookup`'s
+  AbortController timeout, HTTP-status check, JSON-parse check, and missing-ID check verbatim.
+  Config (URL template, credentials, timeout, field paths) comes from `IDENTITY_API_*` env vars,
+  documented in `README.md` §5; `createHttpIdentityResolverFromEnv()` returns `null` when they're
+  unset, and `server/src/index.ts` falls back to `MockIdentityResolver` in that case — not wired to
+  real Cedarville ProxID values this pass, per decision #2.
+- `server/src/routes/scans.ts` adds `POST /api/scans`, Zod-validated (`{ cardCode: string }`,
+  non-empty). The raw card code is never logged: nothing in the handler logs `request.body` or
+  `cardCode`, and Fastify's default request/response logging only records method/url/status/timing.
+  Verified with a test that captures the Fastify logger's output stream and asserts a scanned card
+  code never appears in it.
+- `web/scan-pipeline.js`'s `_resolveScan` now calls a local `submitScan(cardCode)` (POSTs to
+  `/api/scans`, same-origin) instead of importing `lookupCard` from the now-deleted `lookup.js`.
+  `submitScan` preserves `lookupCard`'s "never throws/rejects" contract (network/HTTP-status/bad-JSON
+  failures all fold into the same normalized error shape) and its diagnostics logging
+  (`lookup-request`/`lookup-result` events, PII-limited the same way). All suppression/correlation/
+  retry state-machine logic in `ScanPipeline` is untouched — only the promise source changed.
+  `web/tests/scan-pipeline.test.js` now mocks `global.fetch` (delegating to the same
+  `lookupCardMock` the tests already used, so nearly every test body is unchanged) instead of
+  mocking `../lookup.js`; the extra fetch/json promise hops meant a couple of tests needed a
+  macrotask-based `flushAsync()` helper instead of a fixed number of `await Promise.resolve()` ticks.
+  All 11 pre-refactor regression tests still pass.
+- `web/lookup.js` and `web/credentials.js` deleted. `web/config.js` dropped `LOOKUP_CONFIG` and
+  `ABSENT_LOOKUP_CONCURRENCY`; browser-side config is now just `HID_VENDOR_ID`,
+  `DUPLICATE_SUPPRESS_WINDOW_MS`, `DIAGNOSTICS_RING_BUFFER_SIZE`, `DEBUG_MODE_DEFAULT`,
+  `SESSION_STORAGE_KEY`.
+- `web/absentees.js`'s `computeAbsentRows` is now a synchronous roster-diff (no `lookupPerson` call,
+  no `cache`/`concurrency`/`onProgress`/`shouldAbort` params) per decision #3 — absent rows use only
+  the uploaded roster CSV's own fields, `lookupData: {}` always. `web/app.js`'s CSV-export handler
+  is now fully synchronous: the "Looking up N of M absent students…" progress UI, `exportInFlight`,
+  `exportGeneration`, and `absentLookupCache` are all gone since there's no async gap to guard
+  against anymore. The now-dead `ui.setExportInProgress`/`setExportProgressText` functions and the
+  `#export-progress-text` element were removed rather than left unused.
+- `web/ui.js`/`web/index.html`: removed the "Card Lookup API Credentials" panel (key name/key
+  inputs, Save/Clear buttons, status text) and the always-visible "no API key saved" warning banner;
+  removed `web/app.js`'s credentials wiring and `initCredentials()`.
+- Added `zod` as a dependency (request validation). `tsconfig.json`'s `include` and
+  `vitest.config.ts`'s `include` both extended to cover `server/tests/**`; `eslint.config.js`
+  already matched `server/**/*.ts`, so no lint config change was needed for the new test files.
+- 19 new tests added: `server/tests/identity/mock-resolver.test.ts` (5),
+  `server/tests/identity/http-resolver.test.ts` (9, including `createHttpIdentityResolverFromEnv`),
+  `server/tests/routes/scans.test.ts` (5, using Fastify `inject`). Combined with the 33 Phase 0/1
+  tests (11 of which were updated for the fetch-based transport), the suite is now 52 tests, all
+  passing.
+- Verified manually via Playwright MCP (no physical reader available, same limitation as Phase 1):
+  `npm run dev`, then in-browser exercised the real `ScanPipeline`/`submitScan()` code path via a
+  synthetic HID report (`handleParsedReport({ valid: true, hasPayload: true, trimmedCardCode: ... })`)
+  — the scan resolved through the actual backend's Mock resolver end-to-end. Uploaded a roster CSV,
+  selected the University ID column, enabled roster checking, and downloaded the CSV in both
+  "Present only" (0 rows, succeeds) and "Absent only" (both roster rows present, `roster.*` columns
+  only, no `lookup.*` data) modes. `browser_network_requests` showed every request — static assets
+  and the one `POST /api/scans` — going to `http://localhost:3000` only; confirmed via `grep` on the
+  server's log output that neither test card code ever appeared in it. Zero console errors/warnings
+  throughout. `npm test`/`lint`/`typecheck` all pass (52 tests, 0 lint errors, 0 type errors).
+
+## Deferred decisions
+
+- **Real ProxID credentials.** `HttpIdentityResolver` is implemented (ported
+  from `lookup.js`'s `realLookup`) and documented in `README.md` §5
+  (`IDENTITY_API_URL`, `IDENTITY_API_KEY_NAME`, `IDENTITY_API_KEY`, and five
+  optional overrides), but no real Cedarville ProxID values have been set
+  anywhere — `createHttpIdentityResolverFromEnv()` returns `null` until they
+  are, so `MockIdentityResolver` stays the default/working resolver. Setting
+  the real env vars in the deployment environment is a future-session TODO;
+  no code change should be required.
+- **Phases 3–8 not yet planned.** This progress tracker mirrors spec §54's
+  phase list for continuity, but no plan/execute pass has been done for
+  Phases 3–8. Before planning Phase 3, resolve:
+  - LTI library vs. hand-rolled (spec §7) — a maintained LTI 1.3 library MAY
+    replace portions of the implementation if it satisfies all validation/
+    security requirements in spec §13.
+  - ORM choice (spec §7 recommends Drizzle or equivalent typed SQL layer).
+  - Whether a Canvas test/beta Developer Key registration and a
+    nonproduction Canvas environment are available for validation (spec §46).
+  - Azure subscription/OIDC federation access (spec §35–42).
+- **npm workspaces.** Not introduced yet (decision #4 in the plan) — one root
+  `package.json`/`tsconfig.json` covers `server/`; `web/` stays
+  dependency-free plain ES modules. Revisit if `packages/shared/` becomes
+  necessary (spec §6 mentions this directory; not created yet).
+- **Absentee-by-ID enrichment lookup retired, not migrated.** The former
+  `lookup.js`'s `lookupPerson`/`personByIdUrl` (used by `absentees.js` to
+  enrich "Absent" CSV rows) was retired in Phase 2, not ported to the server
+  — `absentees.js`'s `computeAbsentRows` is now a synchronous roster-diff.
+  Canvas NRPS (Phase 4) will supply authoritative names for absent students;
+  until then, absent CSV rows use only whatever fields the uploaded roster
+  CSV already contains.

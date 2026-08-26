@@ -15,13 +15,6 @@ export const elements = {
   readerStatusText: document.getElementById('reader-status-text'),
   readerProductName: document.getElementById('reader-product-name'),
 
-  apiKeyNameInput: document.getElementById('api-keyname-input'),
-  apiKeyInput: document.getElementById('api-key-input'),
-  saveCredentialsBtn: document.getElementById('btn-save-credentials'),
-  clearCredentialsBtn: document.getElementById('btn-clear-credentials'),
-  credentialsStatus: document.getElementById('credentials-status'),
-  apiKeyWarningBanner: document.getElementById('api-key-warning-banner'),
-
   rosterEnableToggle: document.getElementById('roster-enable-toggle'),
   loadRosterBtn: document.getElementById('btn-load-roster'),
   rosterFileInput: document.getElementById('roster-file-input'),
@@ -52,7 +45,6 @@ export const elements = {
   downloadCsvBtn: document.getElementById('btn-download-csv'),
   clearAllBtn: document.getElementById('btn-clear-all'),
   exportModeSelect: document.getElementById('export-mode-select'),
-  exportProgressText: document.getElementById('export-progress-text'),
   attendanceTableBody: document.getElementById('attendance-table-body'),
   attendanceEmptyMessage: document.getElementById('attendance-empty-message'),
   attendanceRowTemplate: document.getElementById('attendance-row-template'),
@@ -102,21 +94,6 @@ export function setReaderStatus({ connected, device }) {
   elements.disconnectBtn.disabled = !connected;
 }
 
-// ---- API credentials ------------------------------------------------------
-
-export function setCredentialsFields({ keyName, key }) {
-  elements.apiKeyNameInput.value = keyName || '';
-  elements.apiKeyInput.value = key || '';
-}
-
-export function setCredentialsStatus(text) {
-  elements.credentialsStatus.textContent = text;
-}
-
-export function setApiKeyWarning(show) {
-  elements.apiKeyWarningBanner.hidden = !show;
-}
-
 // ---- Roster status ------------------------------------------------------
 
 export function populateRosterColumnOptions(headers, selectedHeader) {
@@ -155,18 +132,6 @@ export function setRosterControlsAvailability({ hasRows, hasIdColumn }) {
 export function setExportControlsAvailability({ rosterActive }) {
   elements.exportModeSelect.hidden = !rosterActive;
   if (!rosterActive) elements.exportModeSelect.value = 'present';
-}
-
-/** Disables the export button + mode selector while an absent-student lookup batch is in flight. */
-export function setExportInProgress(inProgress) {
-  elements.downloadCsvBtn.disabled = inProgress;
-  elements.exportModeSelect.disabled = inProgress;
-}
-
-/** Shows/hides the inline progress text next to the export button. */
-export function setExportProgressText(text) {
-  elements.exportProgressText.hidden = !text;
-  elements.exportProgressText.textContent = text || '';
 }
 
 // ---- Latest scan ---------------------------------------------------------

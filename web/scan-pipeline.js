@@ -13,8 +13,58 @@
 
 import { DUPLICATE_SUPPRESS_WINDOW_MS } from './config.js';
 import { logEvent } from './diagnostics.js';
-import { lookupCard } from './lookup.js';
 import { isExpected, getRosterRow } from './roster.js';
+
+/**
+ * Submits a scanned card code to the backend's identity resolver
+ * (POST /api/scans) and returns its normalized result. Replaces the old
+ * direct-from-browser lookupCard() call (formerly lookup.js) now that card
+ * lookups -- and any credentials they require -- live server-side
+ * (Phase 2). Like the old lookupCard(), this never throws or rejects: a
+ * network failure or non-2xx response is folded into the same normalized
+ * error shape the resolver itself would produce, so a failed request still
+ * yields a recordable 'lookup-error' scan rather than an unhandled
+ * rejection.
+ * @param {string} cardCode
+ * @returns {Promise<{ok: boolean, universityId: string|null, firstName: string|null, lastName: string|null, email: string|null, raw: any, error: null|{kind: string, message: string}}>}
+ */
+async function submitScan(cardCode) {
+  logEvent('lookup-request', { cardCode });
+
+  const result = await performSubmit(cardCode);
+
+  // Diagnostics intentionally omit name/email to limit incidental exposure
+  // of student PII in copyable diagnostics text; the University ID and
+  // error state are kept since they're the most useful fields for
+  // debugging a lookup failure.
+  logEvent('lookup-result', { cardCode, ok: result.ok, universityId: result.universityId, error: result.error });
+
+  return result;
+}
+
+/** @param {string} cardCode */
+async function performSubmit(cardCode) {
+  let response;
+  try {
+    response = await fetch('/api/scans', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cardCode }),
+    });
+  } catch (err) {
+    return { ok: false, universityId: null, firstName: null, lastName: null, email: null, raw: null, error: { kind: 'network', message: `Scan submission failed: ${err.message}` } };
+  }
+
+  if (!response.ok) {
+    return { ok: false, universityId: null, firstName: null, lastName: null, email: null, raw: null, error: { kind: 'http-status', message: `Scan submission returned HTTP ${response.status} ${response.statusText}` } };
+  }
+
+  try {
+    return await response.json();
+  } catch (err) {
+    return { ok: false, universityId: null, firstName: null, lastName: null, email: null, raw: null, error: { kind: 'bad-json', message: `Scan submission returned a response that was not valid JSON: ${err.message}` } };
+  }
+}
 
 /**
  * @typedef {Object} ScanRecord
@@ -169,7 +219,7 @@ export class ScanPipeline {
 
   /** @private */
   async _resolveScan(scanId, cardCode) {
-    const result = await lookupCard(cardCode);
+    const result = await submitScan(cardCode);
 
     // The record may have been deleted (e.g. the professor removed the
     // row, or cleared the session) while the lookup was in flight.

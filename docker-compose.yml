@@ -1,0 +1,17 @@
+# Postgres is scaffolded here now (Phase 1) but unused until Phase 5's
+# persistent-attendance work. No application code reads this database yet.
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: attendance_tracker
+      POSTGRES_PASSWORD: attendance_tracker
+      POSTGRES_DB: attendance_tracker
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  postgres-data:
