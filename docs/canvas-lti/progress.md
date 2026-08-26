@@ -16,12 +16,12 @@ listed below for continuity but have not been planned in detail yet.
       frontend; Docker Compose for local Postgres.
       Exit criterion: existing frontend served through the new backend, no card
       behavior regression. ✅ met.
-- [ ] **Phase 2 — Server-side identity resolver** — `IdentityResolver` interface,
+- [x] **Phase 2 — Server-side identity resolver** — `IdentityResolver` interface,
       `MockIdentityResolver`, `HttpIdentityResolver`; browser card-service
       requests replaced with same-origin backend scan requests; production
       credentials UI removed.
       Exit criterion: scanner works through backend, no resolver secret reaches
-      browser JavaScript.
+      browser JavaScript. ✅ met.
 - [ ] **Phase 3 — LTI authentication** — `/lti/login`, `/lti/launch`,
       `/lti/jwks`; OIDC transaction storage; launch validation; application
       sessions; role authorization; full security test matrix (spec §45).
@@ -123,14 +123,79 @@ listed below for continuity but have not been planned in detail yet.
   This is unchanged from Phase 0/the plan's stated limitation, not a new gap
   introduced by Phase 1's restructuring.
 
+## Phase 2 — what actually happened
+
+- `server/src/identity/types.ts` defines `IdentityResolver`/`IdentityResolution`, mirroring
+  `lookup.js`'s old normalized shape. `missing-credentials` was dropped from the error-kind union
+  per the plan: server config is validated at startup (resolver selection falls back to Mock)
+  instead of a request ever reaching a misconfigured resolver.
+- `server/src/identity/mock-resolver.ts` (`MockIdentityResolver`) ports `lookup.js`'s `mockLookup`
+  hash/name-list/`ERR`/`NOID` logic verbatim — same card code always resolves to the same identity.
+- `server/src/identity/http-resolver.ts` (`HttpIdentityResolver`) ports `realLookup`'s
+  AbortController timeout, HTTP-status check, JSON-parse check, and missing-ID check verbatim.
+  Config (URL template, credentials, timeout, field paths) comes from `IDENTITY_API_*` env vars,
+  documented in `README.md` §5; `createHttpIdentityResolverFromEnv()` returns `null` when they're
+  unset, and `server/src/index.ts` falls back to `MockIdentityResolver` in that case — not wired to
+  real Cedarville ProxID values this pass, per decision #2.
+- `server/src/routes/scans.ts` adds `POST /api/scans`, Zod-validated (`{ cardCode: string }`,
+  non-empty). The raw card code is never logged: nothing in the handler logs `request.body` or
+  `cardCode`, and Fastify's default request/response logging only records method/url/status/timing.
+  Verified with a test that captures the Fastify logger's output stream and asserts a scanned card
+  code never appears in it.
+- `web/scan-pipeline.js`'s `_resolveScan` now calls a local `submitScan(cardCode)` (POSTs to
+  `/api/scans`, same-origin) instead of importing `lookupCard` from the now-deleted `lookup.js`.
+  `submitScan` preserves `lookupCard`'s "never throws/rejects" contract (network/HTTP-status/bad-JSON
+  failures all fold into the same normalized error shape) and its diagnostics logging
+  (`lookup-request`/`lookup-result` events, PII-limited the same way). All suppression/correlation/
+  retry state-machine logic in `ScanPipeline` is untouched — only the promise source changed.
+  `web/tests/scan-pipeline.test.js` now mocks `global.fetch` (delegating to the same
+  `lookupCardMock` the tests already used, so nearly every test body is unchanged) instead of
+  mocking `../lookup.js`; the extra fetch/json promise hops meant a couple of tests needed a
+  macrotask-based `flushAsync()` helper instead of a fixed number of `await Promise.resolve()` ticks.
+  All 11 pre-refactor regression tests still pass.
+- `web/lookup.js` and `web/credentials.js` deleted. `web/config.js` dropped `LOOKUP_CONFIG` and
+  `ABSENT_LOOKUP_CONCURRENCY`; browser-side config is now just `HID_VENDOR_ID`,
+  `DUPLICATE_SUPPRESS_WINDOW_MS`, `DIAGNOSTICS_RING_BUFFER_SIZE`, `DEBUG_MODE_DEFAULT`,
+  `SESSION_STORAGE_KEY`.
+- `web/absentees.js`'s `computeAbsentRows` is now a synchronous roster-diff (no `lookupPerson` call,
+  no `cache`/`concurrency`/`onProgress`/`shouldAbort` params) per decision #3 — absent rows use only
+  the uploaded roster CSV's own fields, `lookupData: {}` always. `web/app.js`'s CSV-export handler
+  is now fully synchronous: the "Looking up N of M absent students…" progress UI, `exportInFlight`,
+  `exportGeneration`, and `absentLookupCache` are all gone since there's no async gap to guard
+  against anymore. The now-dead `ui.setExportInProgress`/`setExportProgressText` functions and the
+  `#export-progress-text` element were removed rather than left unused.
+- `web/ui.js`/`web/index.html`: removed the "Card Lookup API Credentials" panel (key name/key
+  inputs, Save/Clear buttons, status text) and the always-visible "no API key saved" warning banner;
+  removed `web/app.js`'s credentials wiring and `initCredentials()`.
+- Added `zod` as a dependency (request validation). `tsconfig.json`'s `include` and
+  `vitest.config.ts`'s `include` both extended to cover `server/tests/**`; `eslint.config.js`
+  already matched `server/**/*.ts`, so no lint config change was needed for the new test files.
+- 19 new tests added: `server/tests/identity/mock-resolver.test.ts` (5),
+  `server/tests/identity/http-resolver.test.ts` (9, including `createHttpIdentityResolverFromEnv`),
+  `server/tests/routes/scans.test.ts` (5, using Fastify `inject`). Combined with the 33 Phase 0/1
+  tests (11 of which were updated for the fetch-based transport), the suite is now 52 tests, all
+  passing.
+- Verified manually via Playwright MCP (no physical reader available, same limitation as Phase 1):
+  `npm run dev`, then in-browser exercised the real `ScanPipeline`/`submitScan()` code path via a
+  synthetic HID report (`handleParsedReport({ valid: true, hasPayload: true, trimmedCardCode: ... })`)
+  — the scan resolved through the actual backend's Mock resolver end-to-end. Uploaded a roster CSV,
+  selected the University ID column, enabled roster checking, and downloaded the CSV in both
+  "Present only" (0 rows, succeeds) and "Absent only" (both roster rows present, `roster.*` columns
+  only, no `lookup.*` data) modes. `browser_network_requests` showed every request — static assets
+  and the one `POST /api/scans` — going to `http://localhost:3000` only; confirmed via `grep` on the
+  server's log output that neither test card code ever appeared in it. Zero console errors/warnings
+  throughout. `npm test`/`lint`/`typecheck` all pass (52 tests, 0 lint errors, 0 type errors).
+
 ## Deferred decisions
 
-- **Real ProxID credentials.** Phase 2 implements `HttpIdentityResolver`
-  correctly (ported from `lookup.js`'s `realLookup`) but does not wire it to
-  real Cedarville ProxID credentials/env vars — `MockIdentityResolver` stays
-  the default/working resolver for Phases 0–2. Required env vars for the real
-  resolver (URL template, field paths, timeout, auth) will be documented here
-  once Phase 2 lands.
+- **Real ProxID credentials.** `HttpIdentityResolver` is implemented (ported
+  from `lookup.js`'s `realLookup`) and documented in `README.md` §5
+  (`IDENTITY_API_URL`, `IDENTITY_API_KEY_NAME`, `IDENTITY_API_KEY`, and five
+  optional overrides), but no real Cedarville ProxID values have been set
+  anywhere — `createHttpIdentityResolverFromEnv()` returns `null` until they
+  are, so `MockIdentityResolver` stays the default/working resolver. Setting
+  the real env vars in the deployment environment is a future-session TODO;
+  no code change should be required.
 - **Phases 3–8 not yet planned.** This progress tracker mirrors spec §54's
   phase list for continuity, but no plan/execute pass has been done for
   Phases 3–8. Before planning Phase 3, resolve:
@@ -145,9 +210,10 @@ listed below for continuity but have not been planned in detail yet.
   `package.json`/`tsconfig.json` covers `server/`; `web/` stays
   dependency-free plain ES modules. Revisit if `packages/shared/` becomes
   necessary (spec §6 mentions this directory; not created yet).
-- **Absentee-by-ID enrichment lookup retired, not migrated.** `lookup.js`'s
-  `lookupPerson`/`personByIdUrl` (used by `absentees.js` to enrich "Absent"
-  CSV rows) is being retired in Phase 2, not ported to the server. Canvas
-  NRPS (Phase 4) will supply authoritative names for absent students; until
-  then, absent CSV rows use only whatever fields the uploaded roster CSV
-  already contains.
+- **Absentee-by-ID enrichment lookup retired, not migrated.** The former
+  `lookup.js`'s `lookupPerson`/`personByIdUrl` (used by `absentees.js` to
+  enrich "Absent" CSV rows) was retired in Phase 2, not ported to the server
+  — `absentees.js`'s `computeAbsentRows` is now a synchronous roster-diff.
+  Canvas NRPS (Phase 4) will supply authoritative names for absent students;
+  until then, absent CSV rows use only whatever fields the uploaded roster
+  CSV already contains.

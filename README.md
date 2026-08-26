@@ -1,23 +1,24 @@
 # Classroom Attendance Tracker (WebHID)
 
-A single-page, client-side-only attendance tracking tool for university classrooms. A professor
-connects an HID Global OMNIKEY 5427CK USB card reader, students tap their ID cards, and each scan
-is resolved to a student identity via an external HTTP API and optionally checked against an
-uploaded class roster.
+An attendance tracking tool for university classrooms. A professor connects an HID Global OMNIKEY
+5427CK USB card reader, students tap their ID cards, and each scan is resolved to a student
+identity by the backend's identity resolver and optionally checked against an uploaded class
+roster.
 
-There is no backend, build step, framework, or npm dependency. It is plain HTML/CSS/JavaScript
-(ES modules) that runs entirely in the browser tab. The only network request the app ever makes is
-the one card-lookup API call per scan, described below.
+The browser (`web/`) is plain HTML/CSS/JavaScript (ES modules) with no build step or npm
+dependency, served by a small Node/TypeScript backend (`server/`, Fastify) that also does all card
+lookups -- see §5 below. The only request the browser makes for a scan is a same-origin
+`POST /api/scans` to that backend.
 
 ## 1. Purpose
 
 - Read a student ID card via a WebHID-connected card reader (not keyboard-wedge keystrokes).
-- Resolve the scanned card code to a student identity through your institution's card-lookup API.
+- Resolve the scanned card code to a student identity via the backend's identity resolver.
 - Optionally cross-check the result against an uploaded class roster CSV, flagging unexpected
   students prominently (visually and audibly).
 - Record each scan locally in the browser and let the professor export the session as CSV.
-- Minimize data exposure: no analytics, no telemetry, no third-party libraries, and no roster or
-  attendance data is ever sent anywhere except the one lookup request per scan.
+- Minimize data exposure: no analytics, no telemetry, no third-party libraries in the browser, and
+  no card-lookup credentials ever reach the browser -- see §5.
 
 This app does not claim any specific regulatory compliance (e.g. FERPA) -- it simply keeps data
 local and minimizes what leaves the browser. Compliance is the responsibility of how you deploy
@@ -59,60 +60,40 @@ python3 -m http.server 8000 --directory web
 Either way, the only requirement is that it's reachable at `http://localhost:<port>` or over HTTPS,
 per WebHID's secure-context rule below.
 
-## 5. Configuring the external card-lookup API
+## 5. Configuring the card-lookup identity resolver
 
-Most API-specific configuration lives in **`config.js`**, in the `LOOKUP_CONFIG` object:
+Card lookups happen entirely server-side now (`server/src/identity/`), so no lookup credentials or
+API URL are ever shipped to the browser. The backend picks a resolver at startup:
 
-```js
-export const LOOKUP_CONFIG = {
-  useMock: false,
-  url: 'https://cedarvilledataproxyapi.azurewebsites.net/api/ProxId?id={CARD_CODE}&keyname={KEY_NAME}&key={KEY}',
-  method: 'GET',
-  headers: () => ({ Accept: 'application/json' }),
-  timeoutMs: 5000,
-  universityIdField: 'redwoodId',
-  firstNameField: 'firstName',
-  lastNameField: 'lastName',
-  emailField: 'email',
-};
-```
+- **`MockIdentityResolver`** (the default) fabricates a deterministic pseudo-student per card code,
+  so the whole app can be demoed and tested without a real backend API. Two special-case card codes
+  exercise error states without hardware: a code containing `NOID` simulates a response missing a
+  University ID, and a code containing `ERR` simulates a network failure.
+- **`HttpIdentityResolver`** calls a real institutional card-lookup API (ported from this app's
+  original browser-side `realLookup()` adapter). It's used automatically once its required
+  environment variables are set:
 
-- `url` may contain the literal placeholders `{CARD_CODE}`, `{KEY_NAME}`, and `{KEY}`, each replaced
-  (URI-encoded) at request time: `{CARD_CODE}` with the card code read from the reader, and
-  `{KEY_NAME}`/`{KEY}` with whatever is currently saved in the **Card Lookup API Credentials** panel
-  (see below).
-- `universityIdField` / `firstNameField` / `lastNameField` / `emailField` are field names (or
-  dot-paths, e.g. `"student.universityId"`) read out of the raw JSON response. The ProxID API's
-  primary student identifier is `redwoodId`, so that's what `universityIdField` points at -- it's
-  used as-is everywhere else in the app that talks about a "University ID" (roster matching, record
-  identity, CSV export).
-- All response-shape-specific logic lives in the `mapRawResponseToNormalized()` function inside
-  **`lookup.js`** -- that is the one place to touch if a real API's JSON shape needs custom mapping
-  logic beyond a simple field path (e.g. combining two fields, or a lookup table).
-- To add another normalized field later (e.g. `cohort`, `dorm`, `gender`): add a matching `*Field`
-  entry to `LOOKUP_CONFIG`, then one line inside `mapRawResponseToNormalized()`.
-- Setting `useMock` back to `true` switches to a built-in **mock adapter** (clearly marked in
-  `lookup.js`) that fabricates a deterministic pseudo-student per card code, so the whole app can be
-  demoed and tested without a real backend. Two special-case card codes exercise error states without
-  hardware: a code containing `NOID` simulates a response missing a University ID, and a code
-  containing `ERR` simulates a network failure.
+  | Variable | Required | Default |
+  | --- | --- | --- |
+  | `IDENTITY_API_URL` | yes | -- |
+  | `IDENTITY_API_KEY_NAME` | yes | -- |
+  | `IDENTITY_API_KEY` | yes | -- |
+  | `IDENTITY_API_METHOD` | no | `GET` |
+  | `IDENTITY_API_TIMEOUT_MS` | no | `5000` |
+  | `IDENTITY_API_UNIVERSITY_ID_FIELD` | no | `redwoodId` |
+  | `IDENTITY_API_FIRST_NAME_FIELD` | no | `firstName` |
+  | `IDENTITY_API_LAST_NAME_FIELD` | no | `lastName` |
+  | `IDENTITY_API_EMAIL_FIELD` | no | `email` |
 
-**Credentials are never hardcoded in `config.js`** -- it ships to every browser that loads the page.
-Instead, the API key name and key are entered into the **Card Lookup API Credentials** panel in the
-app itself, held in memory and in a dedicated `localStorage` entry managed by **`credentials.js`**
-(see §10). If either is unset, every lookup fails fast as a `missing-credentials` lookup error
-without making a network request. If a different real API requires authentication that isn't safe to
-expose client-side at all, the API itself needs to be scoped so that only expected campus
-networks/devices can reach it.
+  `IDENTITY_API_URL` may contain the literal placeholders `{CARD_CODE}`, `{KEY_NAME}`, and `{KEY}`,
+  each replaced (URI-encoded) at request time. The `*_FIELD` variables are field names (or
+  dot-paths, e.g. `"student.universityId"`) read out of the raw JSON response.
+- If neither is explicitly selected, the server falls back to `MockIdentityResolver` -- see
+  `docs/canvas-lti/progress.md` for why real ProxID credentials aren't wired up yet.
 
-## 6. CORS requirement
+The `/api/scans` endpoint never logs the raw card code it receives, even in Fastify's request logs.
 
-Because this is a pure browser-side client with no backend proxy, **the external card-lookup API's
-server must send an `Access-Control-Allow-Origin` header permitting this app's origin** (e.g.
-`https://attendance.example.edu`, or `http://localhost:8000` during development). Without correct
-CORS headers, the browser will block the response and every scan will show a lookup error.
-
-## 7. Connecting the card reader
+## 6. Connecting the card reader
 
 1. Click **Connect Card Reader**. This opens the browser's HID device chooser (this must be a
    direct response to the click -- WebHID requires a user gesture).
@@ -128,7 +109,7 @@ CORS headers, the browser will block the response and every scan will show a loo
 If the browser denies permission, no compatible device is found, or `device.open()` fails (e.g. the
 reader is in use by another application), a clear message is shown and the app remains usable.
 
-## 8. Importing a roster
+## 7. Importing a roster
 
 1. In the **Expected Students / Class Roster** panel, click **Load CSV…** and choose a roster file.
    The first row is treated as column headers.
@@ -147,20 +128,24 @@ When a scanned card's University ID matches a roster row, the *entire* matched C
 with that scan record, so the CSV export can include extra roster columns (section, classification,
 etc.) without the app needing to know their names in advance.
 
-## 9. How CSV export works
+## 8. How CSV export works
 
 Click **Download Attendance CSV** to generate and download a CSV of the current session, built
-entirely in the browser via a `Blob` and an object URL (no server round-trip). The column set is
-the union of:
+entirely in the browser via a `Blob` and an object URL (no server round-trip for the CSV itself).
+The column set is the union of:
 
 - base fields (timestamp, raw card code, University ID, roster status, scan status),
-- every field ever returned by the lookup API across all scans (prefixed `lookup.`), and
+- every field ever returned by the identity resolver across all scans (prefixed `lookup.`), and
 - every roster CSV column ever matched across all scans (prefixed `roster.`).
+
+In "Present + Absent" or "Absent only" export mode, roster entries with no matching scan are added
+as additional rows, built entirely from the uploaded roster CSV -- no identity lookup is performed
+for absent students, so this resolves instantly regardless of roster size.
 
 Values containing commas, quotes, or newlines are quoted and escaped per standard CSV conventions.
 The filename is `attendance-YYYY-MM-DD.csv`, using the professor's local date.
 
-## 10. How local persistence works
+## 9. How local persistence works
 
 By default, the app keeps everything **in memory only** -- closing the tab loses the session.
 
@@ -179,23 +164,17 @@ If `localStorage` is unavailable (e.g. a strict private-browsing mode), the app 
 disables the "Remember this session" toggle, shows a notice, and continues working normally
 in-memory-only.
 
-**Card Lookup API Credentials** (key name + key) are saved separately, under their own
-`localStorage` entry managed by `credentials.js`, independent of the "Remember this session" toggle
-above -- they're operational configuration rather than student data, so they persist across visits
-even if a professor never turns "Remember this session" on. Use **Clear Saved Key** in that panel to
-remove them.
-
-## 11. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Likely cause / fix |
 | --- | --- |
 | "This browser does not support WebHID" | Use a recent desktop Chrome or Edge; Firefox/Safari are not supported. |
 | "WebHID requires HTTPS or localhost" | Serve the app over HTTPS or from `http://localhost`. |
 | Reader doesn't appear in the device chooser | Confirm the OMNIKEY is plugged in and check the reader's vendor ID is `0x076B`; try re-plugging the device. |
-| Reader connects but no scans register | Open the **Reader Diagnostics** panel and enable debug mode; tap a card and check whether any raw HID reports appear at all. If reports appear but never parse to a card code, the reader may not be in Custom Report mode -- see section 12. |
+| Reader connects but no scans register | Open the **Reader Diagnostics** panel and enable debug mode; tap a card and check whether any raw HID reports appear at all. If reports appear but never parse to a card code, the reader may not be in Custom Report mode -- see section 11. |
 | Card scans produce garbled or empty card codes | Enable debug mode in Reader Diagnostics and inspect the hex/ASCII output for a real tap; the four offset constants at the top of `omnikey-parser.js` (`LENGTH_BYTE_OFFSET`, `VERSION_BYTE_OFFSET`, `PAYLOAD_START_OFFSET`, `MIN_REPORT_BYTES`) may need adjusting for your firmware. |
-| Every scan shows "Lookup error" | Check `config.js`'s `LOOKUP_CONFIG.url`/fields, confirm the API is reachable, and confirm the API's CORS headers permit this app's origin (see section 6). |
-| "UNEXPECTED STUDENT" for a student who should be on the roster | Confirm the selected University ID column matches the format the lookup API returns (e.g. leading zeroes, whitespace) -- both sides are compared as trimmed strings. |
+| Every scan shows "Lookup error" | Check the server logs for the resolver's error, and confirm the `IDENTITY_API_*` env vars (see section 5) are correct and the API is reachable from the server. |
+| "UNEXPECTED STUDENT" for a student who should be on the roster | Confirm the selected University ID column matches the format the identity resolver returns (e.g. leading zeroes, whitespace) -- both sides are compared as trimmed strings. |
 | No sound on an unexpected scan | Confirm the **Sound alerts** toggle is on; some browsers require at least one page click/interaction before audio can play -- click anywhere on the page once after loading. |
 | "Remember this session" is greyed out | `localStorage` is unavailable in this browsing context (e.g. private browsing with storage disabled). The app continues to work in-memory. |
 
@@ -203,7 +182,7 @@ Open the **Reader Diagnostics** panel (it doubles as a hardware-test mode) at an
 WebHID support status, device details, HID collections/report IDs, raw HID report hex dumps, and an
 error log. Use **Copy Diagnostics** to grab a plain-text dump for a bug report.
 
-## 12. OMNIKEY reader configuration
+## 11. OMNIKEY reader configuration
 
 This app expects the reader to be configured for:
 
@@ -236,18 +215,25 @@ against real hardware (using the Reader Diagnostics debug view to inspect actual
 ## Project structure
 
 ```
-index.html          Markup only.
-styles.css           All styling.
-config.js            Central configuration: HID vendor ID, lookup API settings, tunables.
-omnikey-parser.js     Pure OMNIKEY Custom Report packet parser.
-hid-reader.js         WebHID transport (connect/reconnect/disconnect, raw report handling).
-lookup.js            Card lookup adapter (mock + real fetch), normalizes API responses.
-credentials.js        Card lookup API key name/key: in-memory + localStorage persistence.
-roster.js            Hand-written CSV parser + roster indexing/matching.
-scan-pipeline.js     Scan orchestration: duplicate suppression, record lifecycle, lookup correlation.
-diagnostics.js       In-memory ring-buffer diagnostic/error log.
-csv.js               Attendance CSV export (field union + RFC4180 escaping + download).
-storage.js           Optional localStorage persistence.
-ui.js                All DOM rendering.
-app.js               Wiring: DOM events -> the above modules -> ui.js rendering.
+web/                          Browser app: plain ES modules, no build step, served statically.
+  index.html                   Markup only.
+  styles.css                    All styling.
+  config.js                     Browser-side tunables: HID vendor ID, duplicate-suppress window, etc.
+  omnikey-parser.js              Pure OMNIKEY Custom Report packet parser.
+  hid-reader.js                  WebHID transport (connect/reconnect/disconnect, raw report handling).
+  roster.js                     Hand-written CSV parser + roster indexing/matching.
+  scan-pipeline.js              Scan orchestration: duplicate suppression, record lifecycle, submitScan() correlation.
+  absentees.js                   Synchronous roster-diff for "Absent" CSV export rows.
+  diagnostics.js                In-memory ring-buffer diagnostic/error log.
+  csv.js                        Attendance CSV export (field union + RFC4180 escaping + download).
+  storage.js                    Optional localStorage persistence.
+  ui.js                         All DOM rendering.
+  app.js                        Wiring: DOM events -> the above modules -> ui.js rendering.
+
+server/                       Node/TypeScript backend (Fastify).
+  src/index.ts                  App entrypoint: serves web/ statically, health check, resolver selection.
+  src/routes/scans.ts           POST /api/scans -- validates the request, calls the identity resolver.
+  src/identity/types.ts          IdentityResolver interface + normalized result shape.
+  src/identity/mock-resolver.ts  MockIdentityResolver -- deterministic pseudo-student per card code.
+  src/identity/http-resolver.ts  HttpIdentityResolver -- real institutional card-lookup API client.
 ```

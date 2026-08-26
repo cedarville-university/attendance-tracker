@@ -1,11 +1,38 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
-const lookupCardMock = vi.fn();
-vi.mock('../lookup.js', () => ({
-  lookupCard: (...args) => lookupCardMock(...args),
-}));
-
 const { ScanPipeline } = await import('../scan-pipeline.js');
+
+const lookupCardMock = vi.fn();
+
+/**
+ * Stands in for the browser's fetch('/api/scans', ...) call inside
+ * scan-pipeline.js's submitScan() (the Phase 2 replacement for a direct
+ * lookupCard() import). Delegates to lookupCardMock -- called with the
+ * same cardCode argument lookupCard() used to receive -- and wraps
+ * whatever it resolves to in a minimal fetch Response shape, so every
+ * lookupCardMock.mockReturnValueOnce(...)/expect(lookupCardMock)...
+ * assertion below keeps working unchanged across the transport swap.
+ */
+global.fetch = vi.fn((_url, init) => {
+  const { cardCode } = JSON.parse(init.body);
+  return lookupCardMock(cardCode).then((result) => ({
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    json: () => Promise.resolve(result),
+  }));
+});
+
+/**
+ * Waits for all currently-pending microtasks to drain -- unlike a fixed
+ * number of `await Promise.resolve()` ticks, this doesn't need updating
+ * every time submitScan()'s fetch/json/logEvent chain gains or loses a
+ * promise hop, since a macrotask callback only runs after the microtask
+ * queue is empty.
+ */
+function flushAsync() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 /** A promise whose resolution is controlled externally, to simulate an in-flight async lookup. */
 function createDeferred() {
@@ -64,6 +91,7 @@ function makePipeline({ rosterEnabled = false, rosterIndex = new Map() } = {}) {
 
 beforeEach(() => {
   lookupCardMock.mockReset();
+  global.fetch.mockClear();
 });
 
 afterEach(() => {
@@ -83,8 +111,7 @@ describe('ScanPipeline', () => {
     expect(created.status).toBe('pending');
 
     deferred.resolve(successResult());
-    await deferred.promise;
-    await Promise.resolve(); // let _resolveScan's continuation run
+    await flushAsync(); // let _resolveScan's continuation run
 
     const updated = callbacks.onRecordUpdated.mock.calls.at(-1)[0];
     expect(updated.status).toBe('accepted');
@@ -118,15 +145,13 @@ describe('ScanPipeline', () => {
 
     // A's (older) lookup finally resolves, after B has already become latest.
     deferredA.resolve(successResult({ universityId: '1111111' }));
-    await deferredA.promise;
-    await Promise.resolve();
+    await flushAsync();
 
     expect(callbacks.onLatestScanUpdate).not.toHaveBeenCalled();
 
     // B's (newer) lookup resolves -- this one SHOULD update the latest display.
     deferredB.resolve(successResult({ universityId: '2222222' }));
-    await deferredB.promise;
-    await Promise.resolve();
+    await flushAsync();
 
     expect(callbacks.onLatestScanUpdate).toHaveBeenCalledTimes(1);
     expect(callbacks.onLatestScanUpdate.mock.calls[0][0].universityId).toBe('2222222');
@@ -155,8 +180,7 @@ describe('ScanPipeline', () => {
       .mockReturnValueOnce(deferred2.promise);
 
     pipeline.handleParsedReport(parsedReport('CARD001'));
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushAsync();
 
     expect(callbacks.onRecordUpdated.mock.calls.at(-1)[0].status).toBe('lookup-error');
     expect(pipeline.getStats().lookupErrors).toBe(1);
@@ -169,8 +193,7 @@ describe('ScanPipeline', () => {
     expect(callbacks.onRecordCreated).toHaveBeenCalledTimes(1); // no new row created
 
     deferred2.resolve(successResult());
-    await deferred2.promise;
-    await Promise.resolve();
+    await flushAsync();
 
     expect(pipeline.getStats().totalAccepted).toBe(1);
     expect(pipeline.getStats().lookupErrors).toBe(0);
@@ -237,8 +260,7 @@ describe('ScanPipeline', () => {
     lookupCardMock.mockReturnValueOnce(Promise.resolve(errorResult('timeout')));
 
     pipeline.handleParsedReport(parsedReport('CARD001'));
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushAsync();
 
     const updated = callbacks.onRecordUpdated.mock.calls.at(-1)[0];
     expect(updated.status).toBe('lookup-error');
@@ -252,8 +274,7 @@ describe('ScanPipeline', () => {
     lookupCardMock.mockReturnValueOnce(Promise.resolve(successResult({ universityId: '1000000' })));
 
     pipeline.handleParsedReport(parsedReport('CARD001'));
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushAsync();
 
     const updated = callbacks.onRecordUpdated.mock.calls.at(-1)[0];
     expect(updated.rosterStatus).toBe('unexpected');
@@ -267,8 +288,7 @@ describe('ScanPipeline', () => {
     lookupCardMock.mockReturnValueOnce(Promise.resolve(successResult({ universityId: '1000000' })));
 
     pipeline.handleParsedReport(parsedReport('CARD001'));
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushAsync();
 
     const updated = callbacks.onRecordUpdated.mock.calls.at(-1)[0];
     expect(updated.rosterStatus).toBe('expected');

@@ -1,8 +1,9 @@
 // config.js
 //
-// Central configuration for the attendance tracker. This is the one place
-// a developer should need to edit to point the app at a real institutional
-// card-lookup API, or to retune protocol/UI constants.
+// Central configuration for the attendance tracker's browser-side tunables.
+// Card-lookup API configuration now lives server-side (see
+// server/src/identity/) since Phase 2 moved identity resolution -- and any
+// credentials it needs -- out of the browser entirely.
 
 // ---- HID reader ------------------------------------------------------------
 
@@ -37,64 +38,3 @@ export const DEBUG_MODE_DEFAULT = true;
 // embedded schemaVersion (see storage.js) rather than this key name if the
 // stored shape ever changes incompatibly.
 export const SESSION_STORAGE_KEY = 'attendance-tracker:v1:session';
-
-// ---- Card lookup API --------------------------------------------------------
-//
-// This is the ONLY place API-specific behavior should live. Everything that
-// talks to the external card-lookup API is isolated in lookup.js, which
-// reads its behavior from LOOKUP_CONFIG below.
-//
-// IMPORTANT: The external API's server must send an
-// `Access-Control-Allow-Origin` header permitting this web app's origin
-// (e.g. `https://attendance.example.edu`), since this is a pure
-// browser-side client with no backend proxy to route around CORS.
-//
-// Do NOT put secret API keys, passwords, or other credentials here -- this
-// file ships to every browser that loads the page.
-
-export const LOOKUP_CONFIG = {
-  useMock: false,
-
-  // Cedarville's ProxID lookup proxy. "{CARD_CODE}" is replaced with the
-  // URI-encoded card code read from the reader. "{KEY_NAME}" and "{KEY}"
-  // are replaced with the credentials entered into the "Card Lookup API
-  // Credentials" panel (see credentials.js) -- the real key is never
-  // hardcoded here, since this file ships to every browser that loads the
-  // page.
-  url: 'https://cedarvilledataproxyapi.azurewebsites.net/api/ProxId?id={CARD_CODE}&keyname={KEY_NAME}&key={KEY}',
-  method: 'GET',
-
-  // URL template for looking up a single person directly by University ID
-  // (used to enrich "Absent" roster rows during CSV export -- there is no
-  // scanned card code to look up by for a student who never tapped). Same
-  // host/auth query params as the ProxID endpoint above, and the real API
-  // returns the same field names, so universityIdField/firstNameField/
-  // lastNameField/emailField below apply to both endpoints unchanged.
-  personByIdUrl: 'https://cedarvilledataproxyapi.azurewebsites.net/api/personid?id={UNIVERSITY_ID}&keyname={KEY_NAME}&key={KEY}',
-
-  // Called per-request so headers can include anything computed at request
-  // time (but still no secrets -- browser-side headers are visible to
-  // anyone who opens devtools).
-  headers: () => ({
-    Accept: 'application/json',
-  }),
-
-  // How long to wait for the API before giving up and recording a
-  // lookup-error scan.
-  timeoutMs: 5000,
-
-  // Field name (or dot-path, e.g. "student.universityId") to read the
-  // university ID from the raw JSON response. The ProxID API's primary
-  // student identifier is "redwoodId".
-  universityIdField: 'redwoodId',
-  firstNameField: 'firstName',
-  lastNameField: 'lastName',
-  emailField: 'email',
-};
-
-// ---- Absent-roster lookups --------------------------------------------------
-
-// How many person-by-ID lookups run concurrently when enriching "Absent"
-// rows for a CSV export. Bounded so a large roster doesn't fire dozens of
-// simultaneous requests at the lookup API.
-export const ABSENT_LOOKUP_CONCURRENCY = 4;

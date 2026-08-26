@@ -7,7 +7,7 @@
 // matching, CSV, or storage logic lives in this file -- it delegates to
 // the dedicated modules for all of that.
 
-import { DEBUG_MODE_DEFAULT, ABSENT_LOOKUP_CONCURRENCY } from './config.js';
+import { DEBUG_MODE_DEFAULT } from './config.js';
 import * as diagnostics from './diagnostics.js';
 import { HidReader, isWebHidSupported, isSecureContext } from './hid-reader.js';
 import { loadRosterCsv, buildRosterIndex, normalizeId } from './roster.js';
@@ -15,7 +15,6 @@ import { ScanPipeline } from './scan-pipeline.js';
 import { downloadAttendanceCsv } from './csv.js';
 import { computeAbsentRows } from './absentees.js';
 import * as storage from './storage.js';
-import * as credentials from './credentials.js';
 import * as ui from './ui.js';
 
 const { elements } = ui;
@@ -30,19 +29,6 @@ const rosterState = {
   idColumnHeader: null,
   index: new Map(),
 };
-
-// ---- Export state (session-lifetime only; never persisted) ----------------
-
-// Successful person-by-ID lookups for "Absent" export rows, keyed by
-// normalized university ID. Failed lookups are never cached, so the next
-// export retries them (mirrors ScanPipeline's retry-failed-lookups
-// philosophy).
-const absentLookupCache = new Map();
-let exportInFlight = false;
-// Bumped whenever roster state changes; an in-flight absent-lookup batch
-// checks this to detect it's been superseded and should discard its result
-// rather than downloading a CSV built against a stale roster.
-let exportGeneration = 0;
 
 // ---- Scan pipeline ----------------------------------------------------------
 
@@ -192,31 +178,11 @@ elements.disconnectBtn.addEventListener('click', () => {
   hidReader.disconnect();
 });
 
-// ---- API credentials wiring -----------------------------------------------------
-
-elements.saveCredentialsBtn.addEventListener('click', () => {
-  credentials.setCredentials({ keyName: elements.apiKeyNameInput.value, key: elements.apiKeyInput.value });
-  const saved = credentials.getCredentials();
-  const hasCredentials = !!(saved.keyName && saved.key);
-  ui.setCredentialsStatus(hasCredentials ? 'Saved.' : 'No credentials saved.');
-  ui.setApiKeyWarning(!hasCredentials);
-});
-
-elements.clearCredentialsBtn.addEventListener('click', () => {
-  credentials.clearCredentials();
-  ui.setCredentialsFields({ keyName: '', key: '' });
-  ui.setCredentialsStatus('No credentials saved.');
-  ui.setApiKeyWarning(true);
-});
-
 // ---- Roster wiring ------------------------------------------------------------
 
 // Called after any change to rosterState (load/column-select/clear/enable):
-// refreshes whether the Present/Absent export mode selector is shown, and
-// invalidates any absent-lookup batch already in flight so it discards its
-// result instead of downloading a CSV built against a stale roster.
+// refreshes whether the Present/Absent export mode selector is shown.
 function refreshExportControls() {
-  exportGeneration += 1;
   ui.setExportControlsAvailability({ rosterActive: rosterState.enabled && rosterState.index.size > 0 });
 }
 
@@ -295,56 +261,26 @@ elements.rosterEnableToggle.addEventListener('change', () => {
 
 // ---- Attendance table / export -------------------------------------------------
 
-elements.downloadCsvBtn.addEventListener('click', async () => {
-  if (exportInFlight) return; // defensive; button is also disabled while in flight
-
+elements.downloadCsvBtn.addEventListener('click', () => {
   const rosterActive = rosterState.enabled && rosterState.index.size > 0;
   const mode = rosterActive ? elements.exportModeSelect.value : 'present';
+  const presentRecords = scanPipeline.getRecords();
 
   if (mode === 'present') {
-    const result = downloadAttendanceCsv(scanPipeline.getRecords());
+    const result = downloadAttendanceCsv(presentRecords);
     if (!result.ok) {
       ui.showAppMessage('error', `CSV export failed: ${result.error}`);
     }
     return;
   }
 
-  const myGeneration = ++exportGeneration;
-  exportInFlight = true;
-  ui.setExportInProgress(true);
-  ui.setExportProgressText('Checking roster for absent students…');
-
-  const scannedIds = new Set(
-    scanPipeline
-      .getRecords()
-      .map((record) => record.universityId)
-      .filter(Boolean)
-      .map(normalizeId)
-  );
-
-  const absentRows = await computeAbsentRows({
-    rosterState,
-    scannedIds,
-    cache: absentLookupCache,
-    concurrency: ABSENT_LOOKUP_CONCURRENCY,
-    onProgress: ({ done, total }) => {
-      if (myGeneration !== exportGeneration) return;
-      ui.setExportProgressText(`Looking up ${done} of ${total} absent students…`);
-    },
-    shouldAbort: () => myGeneration !== exportGeneration,
-  });
-
-  exportInFlight = false;
-  ui.setExportInProgress(false);
-  ui.setExportProgressText('');
-
-  if (myGeneration !== exportGeneration) return; // roster changed mid-fetch: discard this result
+  const scannedIds = new Set(presentRecords.map((record) => record.universityId).filter(Boolean).map(normalizeId));
+  const absentRows = computeAbsentRows({ rosterState, scannedIds });
 
   if (absentRows.length === 0) {
     ui.showAppMessage('info', 'No absent students found — everyone on the roster was scanned.');
   }
 
-  const presentRecords = scanPipeline.getRecords();
   const combinedRecords = mode === 'absent' ? absentRows : [...presentRecords, ...absentRows];
 
   const result = downloadAttendanceCsv(combinedRecords);
@@ -532,19 +468,9 @@ function initPreferencesDefaults() {
   }
 }
 
-function initCredentials() {
-  credentials.loadPersistedCredentials();
-  const saved = credentials.getCredentials();
-  ui.setCredentialsFields(saved);
-  const hasCredentials = !!(saved.keyName && saved.key);
-  ui.setCredentialsStatus(hasCredentials ? 'Saved.' : 'No credentials saved.');
-  ui.setApiKeyWarning(!hasCredentials);
-}
-
 async function init() {
   initDiagnosticsSupportInfo();
   initPreferencesDefaults();
-  initCredentials();
   ui.setDiagDeviceInfo(null);
   ui.renderStats(scanPipeline.getStats(), rosterState.enabled);
 
