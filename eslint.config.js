@@ -39,6 +39,15 @@ export default [
         ...globals.node,
       },
     },
+    rules: {
+      // Allow destructuring a property out of an object solely to exclude it from a
+      // `...rest` spread (same reason as the web/**/*.js override above), and allow a
+      // leading underscore to mark a deliberately-unused binding or handler parameter.
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { ignoreRestSiblings: true, argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
+      ],
+    },
   },
   eslintConfigPrettier,
   {
