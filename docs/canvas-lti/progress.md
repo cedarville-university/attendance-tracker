@@ -26,7 +26,10 @@ listed below for continuity but have not been planned in detail yet.
       `/lti/jwks`; OIDC transaction storage; launch validation; application
       sessions; role authorization; full security test matrix (spec §45).
       Exit criterion: valid instructor Canvas launches work, malformed/replayed
-      launches fail.
+      launches fail. **Automated implementation complete** (all 24 §45 matrix
+      cases pass against a mocked Canvas platform) **-- manual real-Canvas
+      Developer Key verification (docs/canvas-installation.md) still pending**;
+      this checkbox stays unchecked until that manual step is confirmed.
 - [ ] **Phase 4 — NRPS** — Canvas token acquisition and roster retrieval;
       uploaded roster replaced as the primary workflow; identity matching
       configuration.
@@ -185,6 +188,35 @@ listed below for continuity but have not been planned in detail yet.
   and the one `POST /api/scans` — going to `http://localhost:3000` only; confirmed via `grep` on the
   server's log output that neither test card code ever appeared in it. Zero console errors/warnings
   throughout. `npm test`/`lint`/`typecheck` all pass (52 tests, 0 lint errors, 0 type errors).
+
+## Phase 3 — what actually happened (automated portion)
+
+- `server/src/lti/`, `server/src/auth/`, `server/src/database/`, and `server/src/config/` added
+  per `docs/superpowers/plans/2026-08-26-canvas-lti-phase3-lti-authentication.md`. Hand-rolled LTI
+  1.3 orchestration on `jose` rather than a maintained LTI framework: the available Node ones own
+  their own datastore, session model, and Express-style routing, which would fight this repo's
+  Fastify + Drizzle conventions and hide the very validation steps spec §45 requires us to test
+  case by case. Drizzle ORM + PostgreSQL via the existing `docker-compose.yml` service.
+- All 24 spec §45 test-matrix cases have a passing automated test against an in-process mock Canvas
+  platform (`server/tests/support/mock-canvas.ts`, a real second Fastify server, not a mocked
+  `fetch`). Every failure case asserts no `app_sessions` row was created: the 21 launch-time
+  failure cases through a `SELECT` count of zero in `server/tests/lti/launch.test.ts`, and case 24
+  (target-link open-redirect) structurally in `server/tests/routes/lti-login.test.ts`, since
+  `/lti/login` rejects before writing an OIDC transaction and has no session-creation path at all.
+  Cases 1 and 12 are success cases and do create a session.
+- `GET /lti/jwks` publishes this app's own public signing keys (active + previous, env-configured
+  or an ephemeral dev fallback); `POST /lti/login` and `POST /lti/launch` implement the full OIDC
+  login/launch flow; `GET /api/me` returns the spec §25.1 bootstrap shape.
+- **`POST /api/scans` is deliberately left unauthenticated in Phase 3**, exactly as Phase 2 shipped
+  it. Phase 3 adds endpoints beside it and introduces no new exposure; the existing browser UI and
+  the standalone dev mode (spec §51, which performs no LTI launch) both still call it without a
+  session. Phase 5 retires it in favour of `POST /api/attendance-sessions/{id}/scans` behind
+  `requireSession` + `requireCsrf` and migrates the UI at the same time.
+- **Not yet done:** the manual real-Canvas Developer Key setup and instructor/learner launch
+  verification in `docs/canvas-installation.md`. `server/src/lti/roles.ts`'s
+  `AUTHORIZED_INSTRUCTOR_ROLE_URIS` set is written from the standard 1EdTech role vocabulary but is
+  explicitly flagged there as unverified against a real Canvas launch payload until that manual
+  step runs.
 
 ## Deferred decisions
 
