@@ -247,3 +247,70 @@ describe('validateAudienceAndLifetime', () => {
     expect(result).toEqual({ ok: false, reason: 'future_issued_token' });
   });
 });
+
+import { createHash } from 'node:crypto';
+import { validateNonceClaimsAndRole } from '../../src/lti/launch.js';
+import type { ConsumedTransaction } from '../../src/lti/oidc-transactions.js';
+
+function hashForTest(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function transactionFor(nonce: string, deploymentId = 'deploy-1'): ConsumedTransaction {
+  return {
+    id: 'txn-1',
+    registrationId: 'reg-1',
+    deploymentId,
+    nonceHash: hashForTest(nonce),
+    targetLinkUri: 'https://app.test/index.html',
+  };
+}
+
+function claimsPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    sub: 'user-1',
+    nonce: 'real-nonce',
+    'https://purl.imsglobal.org/spec/lti/claim/version': '1.3.0',
+    'https://purl.imsglobal.org/spec/lti/claim/message_type': 'LtiResourceLinkRequest',
+    'https://purl.imsglobal.org/spec/lti/claim/deployment_id': 'deploy-1',
+    'https://purl.imsglobal.org/spec/lti/claim/context': { id: 'course-1' },
+    'https://purl.imsglobal.org/spec/lti/claim/roles': ['http://purl.imsglobal.org/vocab/lis/v2/membership#Instructor'],
+    ...overrides,
+  };
+}
+
+describe('validateNonceClaimsAndRole', () => {
+  it('accepts a matching nonce with valid claims and an instructor role', () => {
+    const result = validateNonceClaimsAndRole(claimsPayload(), transactionFor('real-nonce'));
+    expect(result.ok).toBe(true);
+  });
+
+  it("§45 case 6: rejects a nonce that does not match the transaction's stored nonce", () => {
+    const result = validateNonceClaimsAndRole(claimsPayload({ nonce: 'wrong-nonce' }), transactionFor('real-nonce'));
+    expect(result).toEqual({ ok: false, reason: 'nonce_mismatch' });
+  });
+
+  it("§45 case 17 (claim-level variant): rejects when the claimed deployment_id doesn't match the transaction's", () => {
+    const result = validateNonceClaimsAndRole(
+      claimsPayload({ 'https://purl.imsglobal.org/spec/lti/claim/deployment_id': 'other-deploy' }),
+      transactionFor('real-nonce', 'deploy-1'),
+    );
+    expect(result).toEqual({ ok: false, reason: 'wrong_deployment' });
+  });
+
+  it('§45 case 20: propagates missing_context from claims validation', () => {
+    const { 'https://purl.imsglobal.org/spec/lti/claim/context': _context, ...withoutContext } = claimsPayload();
+    const result = validateNonceClaimsAndRole(withoutContext, transactionFor('real-nonce'));
+    expect(result).toEqual({ ok: false, reason: 'missing_context' });
+  });
+
+  it('§45 case 22: rejects a learner-only role', () => {
+    const result = validateNonceClaimsAndRole(
+      claimsPayload({
+        'https://purl.imsglobal.org/spec/lti/claim/roles': ['http://purl.imsglobal.org/vocab/lis/v2/membership#Learner'],
+      }),
+      transactionFor('real-nonce'),
+    );
+    expect(result).toEqual({ ok: false, reason: 'learner_only_role' });
+  });
+});

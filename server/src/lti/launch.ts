@@ -1,9 +1,12 @@
 import { decodeProtectedHeader, jwtVerify, importJWK, type JWTPayload } from 'jose';
+import { createHash } from 'node:crypto';
 import type { Database } from '../database/client.js';
 import { consumeOidcTransaction, type ConsumedTransaction } from './oidc-transactions.js';
 import { findRegistrationById, findDeploymentByBusinessId } from './registrations.js';
 import type { LtiRegistration, LtiDeployment } from './types.js';
 import type { JwksCache } from './jwks-cache.js';
+import { validateLtiClaims, type ValidatedLtiClaims } from './claims.js';
+import { authorizeInstructorRole } from './roles.js';
 
 export type LaunchFailureReason =
   | 'missing_state'
@@ -147,4 +150,43 @@ export function validateAudienceAndLifetime(
   }
 
   return { ok: true };
+}
+
+function hashToken(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+export interface NonceClaimsRoleResult {
+  claims: ValidatedLtiClaims;
+  roles: string[];
+}
+
+export type ValidateNonceClaimsAndRoleResult =
+  | { ok: true; result: NonceClaimsRoleResult }
+  | { ok: false; reason: LaunchFailureReason };
+
+export function validateNonceClaimsAndRole(
+  payload: JWTPayload,
+  transaction: ConsumedTransaction,
+): ValidateNonceClaimsAndRoleResult {
+  if (typeof payload.nonce !== 'string' || hashToken(payload.nonce) !== transaction.nonceHash) {
+    return { ok: false, reason: 'nonce_mismatch' };
+  }
+
+  const claimsResult = validateLtiClaims(payload);
+  if (!claimsResult.ok) {
+    return { ok: false, reason: claimsResult.reason };
+  }
+  const claims = claimsResult.claims;
+
+  if (claims['https://purl.imsglobal.org/spec/lti/claim/deployment_id'] !== transaction.deploymentId) {
+    return { ok: false, reason: 'wrong_deployment' };
+  }
+
+  const roles = claims['https://purl.imsglobal.org/spec/lti/claim/roles'];
+  if (!authorizeInstructorRole(roles)) {
+    return { ok: false, reason: 'learner_only_role' };
+  }
+
+  return { ok: true, result: { claims, roles } };
 }
