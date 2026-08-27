@@ -116,4 +116,29 @@ describe('findOrCreateCourse', () => {
 
     expect(second.id).toBe(first.id);
   });
+
+  it('dedupes concurrent first-time calls for the same (deploymentId, ltiContextId) without throwing', async () => {
+    const { db } = getTestDb();
+    const { institution, deployment } = await seedRow();
+
+    const params = {
+      institutionId: institution.id,
+      deploymentId: deployment.id,
+      ltiContextId: 'course-concurrent',
+      label: 'CS102',
+      title: 'Data Structures',
+    };
+
+    const results = await Promise.all([
+      findOrCreateCourse(db, params),
+      findOrCreateCourse(db, params),
+      findOrCreateCourse(db, params),
+      findOrCreateCourse(db, params),
+      findOrCreateCourse(db, params),
+    ]);
+
+    const ids = results.map((r) => r.id);
+    expect(new Set(ids).size).toBe(1);
+    expect(ids[0]).toBeTruthy();
+  });
 });
