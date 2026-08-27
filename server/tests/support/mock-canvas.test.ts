@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { jwtVerify, importJWK } from 'jose';
+import { jwtVerify, importJWK, decodeProtectedHeader } from 'jose';
 import { MockCanvasPlatform } from './mock-canvas.js';
 
 describe('MockCanvasPlatform', () => {
@@ -48,5 +48,21 @@ describe('MockCanvasPlatform', () => {
 
     expect(payload['https://purl.imsglobal.org/spec/lti/claim/context']).toBeUndefined();
     expect(payload['https://purl.imsglobal.org/spec/lti/claim/roles']).toBeUndefined();
+  });
+
+  it('mintIdToken alg override rewrites the protected header for the unsupported_algorithm case', async () => {
+    platform = new MockCanvasPlatform();
+    await platform.start();
+
+    const token = await platform.mintIdToken({ nonce: 'n1' }, { alg: 'RS384' });
+
+    const header = decodeProtectedHeader(token);
+    expect(header.alg).toBe('RS384');
+    expect(header.kid).toBe('default-kid');
+
+    const segments = token.split('.');
+    expect(segments).toHaveLength(3);
+    const decodedPayload = JSON.parse(Buffer.from(segments[1], 'base64url').toString('utf8')) as { nonce?: string };
+    expect(decodedPayload.nonce).toBe('n1');
   });
 });

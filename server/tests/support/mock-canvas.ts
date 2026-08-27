@@ -104,6 +104,23 @@ export class MockCanvasPlatform {
       ];
     }
 
-    return new SignJWT(payload).setProtectedHeader({ alg: options.alg ?? 'RS256', kid }).sign(entry.privateKey);
+    const signed = await new SignJWT(payload).setProtectedHeader({ alg: 'RS256', kid }).sign(entry.privateKey);
+
+    if (options.alg && options.alg !== 'RS256') {
+      // The key is generated for RS256, so we always sign RS256 and then rewrite
+      // ONLY the protected-header segment to advertise the requested `alg`. The
+      // returned token therefore carries an RS256 signature under a deliberately
+      // mismatched `alg` header. It exists solely to exercise verifyLaunch's
+      // pre-signature algorithm-allowlist rejection (spec §13.2 / §45 case 16,
+      // `unsupported_algorithm`) and is NOT a validly `options.alg`-signed token.
+      // Note: `alg: 'none'` would likewise produce a header-only rewrite with a
+      // signature segment still present (not a true unsecured JWT). No Phase 3
+      // caller needs a genuine unsecured JWT; flag for later phases if one does.
+      const [, encodedPayload, signature] = signed.split('.');
+      const encodedHeader = Buffer.from(JSON.stringify({ alg: options.alg, kid })).toString('base64url');
+      return `${encodedHeader}.${encodedPayload}.${signature}`;
+    }
+
+    return signed;
   }
 }
