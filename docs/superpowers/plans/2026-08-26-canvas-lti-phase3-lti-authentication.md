@@ -4,7 +4,7 @@
 
 **Goal:** Implement Canvas LTI 1.3 login/launch authentication (`/lti/login`, `/lti/launch`, `/lti/jwks`), application sessions, CSRF protection, and `GET /api/me`, so that a valid instructor Canvas launch creates a working session and every malformed/replayed/unauthorized launch is rejected before any session is created.
 
-**Architecture:** Hand-rolled LTI 1.3 orchestration on top of `jose` (no maintained LTI framework — see design doc decision #1). PostgreSQL via Drizzle ORM stores institutions/registrations/deployments/OIDC transactions/courses/app sessions. Two independent JWKS surfaces: `jwks-cache.ts` verifies inbound Canvas launch JWTs against Canvas's platform JWKS; `signing-keys.ts` + `/lti/jwks` publish this app's own public keys (used starting Phase 4/6, but built now as it's part of the LTI registration). Opaque, server-side, hashed-at-rest application sessions (no client-readable JWT session token). All new routes follow the existing `registerXRoute(app, deps)` convention from `server/src/routes/scans.ts`.
+**Architecture:** Hand-rolled LTI 1.3 orchestration on top of `jose`. No maintained Node LTI 1.3 framework was adopted because the available ones (`ltijs` and friends) own their own datastore, session model, and Express-style routing, which would fight this repo's Fastify + Drizzle conventions and hide exactly the validation steps spec §45 requires us to test case-by-case; `jose` gives us JWT verification without taking over anything else. PostgreSQL via Drizzle ORM stores institutions/registrations/deployments/OIDC transactions/courses/app sessions. Two independent JWKS surfaces: `jwks-cache.ts` verifies inbound Canvas launch JWTs against Canvas's platform JWKS; `signing-keys.ts` + `/lti/jwks` publish this app's own public keys (used starting Phase 4/6, but built now as it's part of the LTI registration). Opaque, server-side, hashed-at-rest application sessions (no client-readable JWT session token). All new routes follow the existing `registerXRoute(app, deps)` convention from `server/src/routes/scans.ts`.
 
 **Tech Stack:** Fastify 5, `jose` (JWT sign/verify), `drizzle-orm` + `pg` (PostgreSQL), `zod` (validation), `@fastify/cookie`, `@fastify/formbody`, `@fastify/helmet`, `@fastify/rate-limit`, Vitest, TypeScript (ES2022/NodeNext/strict).
 
@@ -18,10 +18,11 @@
 - Store only **hashes** of `state`, `nonce`, and the application session token — never the raw values (spec §12.2, §14).
 - Never log: `id_token`, session cookies, CSRF tokens, or any signing/private key material (spec §31.8).
 - `/lti/jwks` must only ever expose `{kid, kty, use, alg, n, e}` — no private key fields (`d`, `p`, `q`, `dp`, `dq`, `qi`) ever appear in that response (spec §17).
-- Every one of the 24 §45 test-matrix failure cases must assert that **no `app_sessions` row was created** as a result of the failed attempt.
+- Every §45 test-matrix **failure** case must assert that **no `app_sessions` row was created** as a result of the failed attempt. Concretely: cases 1 and 12 are success cases (a valid launch, and an unknown `kid` that a JWKS refresh resolves), so they legitimately create a session; case 24 (target-link open-redirect attempt) is rejected at **login** time by `/lti/login`, which has no session-creation code path at all, so Task 14 asserts no OIDC transaction is created instead; every one of the remaining 21 failure cases is asserted end-to-end through `verifyLaunch` in Task 23's sweep (or its dedicated tests for cases 2 and 7) with a `SELECT * FROM app_sessions` count of zero.
 - Session cookie `Secure` flag must be conditional on `APP_BASE_URL` starting with `https://` (breaks local HTTP dev otherwise).
 - `npm test`, `npm run lint`, and `npm run typecheck` must stay clean after every task.
 - Local Postgres for tests/dev is the existing `docker-compose.yml` service — user/password/db all `attendance_tracker`, port 5432. Start it with `docker compose up -d` before running any task that touches the database.
+- From Task 4 onward **`npm test` requires a running Postgres** — Vitest's `globalSetup` migrates the test database before any test file runs, including the 52 existing Phase 0-2 server tests and the `web/tests/**` browser tests, none of which touch the database themselves. `npm test` uses `TEST_DATABASE_URL`, which defaults to a **separate** `attendance_tracker_test` database (created automatically by the global setup) so the suite's `TRUNCATE`s never wipe the `DATABASE_URL` dev database. Task 27 documents both variables in `README.md`. CI is out of scope for this plan (there is no CI workflow in this repo yet — it arrives in Phase 7 per spec §40).
 
 ---
 
@@ -37,7 +38,7 @@ server/src/config/env.ts                              # zod-validated environmen
 server/src/database/schema.ts                         # Drizzle table definitions
 server/src/database/client.ts                         # Pool + drizzle() factory + applyMigrations()
 server/src/database/seed-registration.ts               # CLI: upsert institution/registration/deployment
-server/src/lti/types.ts                                # LtiRegistration/LtiDeployment/LaunchClaims types
+server/src/lti/types.ts                                # LtiInstitution/LtiRegistration/LtiDeployment/EnabledDeployment types
 server/src/lti/signing-keys.ts                          # this app's own RSA signing keys (active/previous)
 server/src/lti/jwks-route.ts                            # buildJwksResponse() -- public fields only
 server/src/lti/registrations.ts                         # findEnabledDeployment/findRegistrationById/etc.
@@ -60,7 +61,9 @@ server/tests/support/db.ts                              # test DB connection, mi
 server/tests/support/mock-canvas.ts                       # in-process fake Canvas platform (JWKS + mintIdToken)
 server/tests/support/mock-canvas.test.ts                  # self-test: harness's tokens verify against its JWKS
 server/tests/support/seed.ts                              # seedInstitutionAndRegistration()
-server/tests/support/global-setup.ts                       # Vitest globalSetup: runs migrations once
+server/tests/support/global-setup.ts                       # Vitest globalSetup: creates + migrates the test DB once
+server/tests/config/env.test.ts
+server/tests/database/migrations.test.ts
 server/tests/database/schema.test.ts
 server/tests/lti/signing-keys.test.ts
 server/tests/lti/jwks-route.test.ts
@@ -77,6 +80,7 @@ server/tests/routes/lti-jwks.test.ts
 server/tests/routes/lti-login.test.ts
 server/tests/routes/lti-launch.test.ts
 server/tests/routes/me.test.ts
+server/tests/routes/hardening.test.ts                    # helmet CSP / Permissions-Policy / rate-limit config
 
 docs/canvas-installation.md                              # manual Canvas Developer Key setup steps
 ```
@@ -84,38 +88,69 @@ docs/canvas-installation.md                              # manual Canvas Develop
 Modified files:
 
 ```
-package.json                  # + jose, drizzle-orm, pg, @fastify/cookie, @fastify/formbody,
+package.json                  # + jose@^6, drizzle-orm, pg, @fastify/cookie, @fastify/formbody,
                                #   @fastify/helmet, @fastify/rate-limit; devDeps + drizzle-kit, @types/pg
-vitest.config.ts              # + globalSetup
-server/src/index.ts           # wire env/db/signing-keys/all new routes/helmet/rate-limit
+package-lock.json             # regenerated by the installs above
+eslint.config.js              # + @typescript-eslint/no-unused-vars override for server/**/*.ts
+vitest.config.ts              # + globalSetup, + singleFork pool (shared test DB is truncated per file)
+server/src/index.ts           # wire env/db/signing-keys/all new routes/helmet/rate-limit/Permissions-Policy
+README.md                     # Phase 3 env var table + "tests require Postgres" note
 docs/canvas-lti/progress.md   # Phase 3 status note (not marked done -- manual verification pending)
 ```
 
 ---
 
-## Task 1: Install npm dependencies
+## Task 1: Install npm dependencies + widen the server lint rule
 
 **Files:**
-- Modify: `package.json`, `package-lock.json`
+- Modify: `package.json`, `package-lock.json`, `eslint.config.js`
 
 - [ ] **Step 1: Install runtime dependencies**
 
-Run: `npm install jose drizzle-orm pg @fastify/cookie @fastify/formbody @fastify/helmet @fastify/rate-limit`
+Run: `npm install jose@^6 drizzle-orm pg @fastify/cookie @fastify/formbody @fastify/helmet @fastify/rate-limit`
+
+`jose` is pinned to the v6 major deliberately. v6 is the first major whose `importPKCS8`/`generateKeyPair`/`importJWK` return a Web Crypto `CryptoKey`, which is what `ToolSigningKey.privateKey: CryptoKey` (Task 6) is typed as; on v5 those return jose's own `KeyLike`, which is not assignable to `CryptoKey` and fails `npm run typecheck`. Do not let a `^` range float this back to v5.
 
 - [ ] **Step 2: Install dev dependencies**
 
 Run: `npm install --save-dev drizzle-kit @types/pg`
 
-- [ ] **Step 3: Verify install**
+- [ ] **Step 3: Widen `@typescript-eslint/no-unused-vars` for `server/**/*.ts`**
 
-Run: `npm run typecheck`
-Expected: passes (no new `.ts` files reference the new packages yet, so this just confirms nothing broke).
+`@typescript-eslint/no-unused-vars` defaults to `ignoreRestSiblings: false` with no `argsIgnorePattern`/`varsIgnorePattern`, so several tests and hooks later in this plan (`const { DATABASE_URL, ...rest }` in Task 2, `const { iss, ...missingIss }` in Task 14, the `_context`/`_roles` omit-destructures in Tasks 16 and 22, the `_request` hook parameter in Task 27) would each fail `npm run lint`. The existing `web/**/*.js` block already carries the equivalent override; mirror it for the TypeScript side.
 
-- [ ] **Step 4: Commit**
+Edit the existing `server/**/*.ts` block in `eslint.config.js` (the one that only sets `languageOptions.globals`, **not** the `tseslint.configs.recommended` spread above it) so it reads:
+
+```js
+  {
+    files: ['server/**/*.ts'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
+    rules: {
+      // Allow destructuring a property out of an object solely to exclude it from a
+      // `...rest` spread (same reason as the web/**/*.js override above), and allow a
+      // leading underscore to mark a deliberately-unused binding or handler parameter.
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { ignoreRestSiblings: true, argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
+      ],
+    },
+  },
+```
+
+- [ ] **Step 4: Verify install and lint config**
+
+Run: `npm run typecheck && npm run lint`
+Expected: both pass (no new `.ts` files reference the new packages yet, so this just confirms nothing broke and that `eslint.config.js` is still syntactically valid).
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add package.json package-lock.json
-git commit -m "chore: add LTI auth dependencies (jose, drizzle-orm, pg, fastify plugins)"
+git add package.json package-lock.json eslint.config.js
+git commit -m "chore: add LTI auth dependencies (jose v6, drizzle-orm, pg, fastify plugins) and widen server lint rule"
 ```
 
 ---
@@ -127,7 +162,7 @@ git commit -m "chore: add LTI auth dependencies (jose, drizzle-orm, pg, fastify 
 - Test: `server/tests/config/env.test.ts`
 
 **Interfaces:**
-- Produces: `loadEnv(source?: NodeJS.ProcessEnv): Env`, `parseAllowedTargetLinkUris(env: Env): string[]`, `type Env`.
+- Produces: `loadEnv(source?: Record<string, string | undefined>): Env` (defaults to `process.env`), `parseAllowedTargetLinkUris(env: Env): string[]`, `type Env`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -293,6 +328,11 @@ export const oidcTransactions = pgTable(
     registrationId: uuid('registration_id')
       .notNull()
       .references(() => ltiRegistrations.id),
+    // NOTE: `oidcTransactions.deploymentId` is Canvas's *business* deployment ID (the opaque
+    // string Canvas puts in the launch JWT's deployment_id claim), stored as text. It is NOT the
+    // `lti_deployments.id` row UUID. `appSessions.deploymentId` below is the opposite: a row UUID
+    // FK. Look up one from the other with findDeploymentByBusinessId() (Task 9). Test helpers use
+    // the naming precedent `SeededRegistration.deploymentRowId` (Task 11) for the UUID.
     deploymentId: text('deployment_id').notNull(),
     stateHash: text('state_hash').notNull(),
     nonceHash: text('nonce_hash').notNull(),
@@ -331,6 +371,9 @@ export const appSessions = pgTable(
     institutionId: uuid('institution_id')
       .notNull()
       .references(() => institutions.id),
+    // NOTE: unlike `oidcTransactions.deploymentId` (Canvas's business deployment ID, text), this
+    // column is the `lti_deployments.id` **row UUID** FK. Same property name, different meaning --
+    // when wiring the two together always convert explicitly via findDeploymentByBusinessId().
     deploymentId: uuid('deployment_id')
       .notNull()
       .references(() => ltiDeployments.id),
@@ -349,6 +392,8 @@ export const appSessions = pgTable(
   (t) => [unique().on(t.sessionTokenHash)],
 );
 ```
+
+Note: the `courses` table deliberately **omits** three columns spec §26 lists — `nrps_url`, `ags_lineitems_url`, and `last_launched_at`. `nrps_url` and `ags_lineitems_url` come from the launch JWT's NRPS/AGS service claims, which nothing reads until Phase 4 (NRPS) and Phase 6 (AGS); `last_launched_at` is only meaningful once Phase 5's persistent attendance surfaces course activity. All three are added by Phase 4's migration via `ALTER TABLE`, so adding them now would mean shipping three permanently-null columns and a migration Phase 4 would have to work around.
 
 Note: `app_sessions.display_name` is a deliberate one-column addition beyond spec §26's literal list. Spec §26 doesn't give `app_sessions` a name column, but `GET /api/me`'s required response shape (§25.1) includes `user.displayName`, and NRPS-sourced names don't exist until Phase 4. This column is nullable and populated from the launch JWT's optional `name` claim, falling back to `lti_subject` when absent (wired in Task 23).
 
@@ -385,12 +430,12 @@ git commit -m "feat: add Drizzle schema for LTI institutions/registrations/deplo
 ## Task 4: Database client + test DB support
 
 **Files:**
-- Create: `server/src/database/client.ts`, `server/tests/support/db.ts`, `server/tests/support/global-setup.ts`
+- Create: `server/src/database/client.ts`, `server/tests/support/db.ts`, `server/tests/support/global-setup.ts`, `server/tests/database/migrations.test.ts`
 - Modify: `vitest.config.ts`
 
 **Interfaces:**
 - Produces: `createDbClient(databaseUrl: string): DbClient`, `type DbClient = { db: Database; pool: Pool }`, `type Database`, `applyMigrations(client: DbClient): Promise<void>`.
-- Produces (test support): `getTestDb(): DbClient`, `resetDb(): Promise<void>`, `closeTestDb(): Promise<void>`.
+- Produces (test support): `TEST_DATABASE_URL: string`, `getTestDb(): DbClient`, `migrate(): Promise<void>`, `resetDb(): Promise<void>`, `closeTestDb(): Promise<void>`.
 
 - [ ] **Step 1: Write `database/client.ts`**
 
@@ -422,8 +467,14 @@ export async function applyMigrations(client: DbClient): Promise<void> {
 import { sql } from 'drizzle-orm';
 import { createDbClient, applyMigrations, type DbClient } from '../../src/database/client.js';
 
-const TEST_DATABASE_URL =
-  process.env.TEST_DATABASE_URL ?? 'postgres://attendance_tracker:attendance_tracker@localhost:5432/attendance_tracker';
+// Deliberately a DIFFERENT database from the docker-compose default `attendance_tracker` that
+// DATABASE_URL points at: resetDb() below TRUNCATEs every table, so if the test suite shared the
+// dev database, `npm test` would silently wipe whatever the developer had seeded there (including
+// Task 28's manual smoke-test registration). The global setup creates this database if it does
+// not exist yet, so no manual `createdb` step is needed.
+export const TEST_DATABASE_URL =
+  process.env.TEST_DATABASE_URL ??
+  'postgres://attendance_tracker:attendance_tracker@localhost:5432/attendance_tracker_test';
 
 let client: DbClient | undefined;
 
@@ -464,8 +515,35 @@ export async function closeTestDb(): Promise<void> {
 
 ```ts
 // server/tests/support/global-setup.ts
+import { Client } from 'pg';
+import { TEST_DATABASE_URL, migrate, closeTestDb } from './db.js';
+
+// `npm test` must never touch the developer's DATABASE_URL database, so TEST_DATABASE_URL points at
+// a separate `attendance_tracker_test` database. Create it on first run against a fresh
+// `docker compose up -d` so no manual `createdb` step is required.
+async function ensureTestDatabaseExists(): Promise<void> {
+  const target = new URL(TEST_DATABASE_URL);
+  const databaseName = decodeURIComponent(target.pathname.replace(/^\//, ''));
+
+  const adminUrl = new URL(TEST_DATABASE_URL);
+  adminUrl.pathname = '/postgres';
+
+  const admin = new Client({ connectionString: adminUrl.toString() });
+  await admin.connect();
+  try {
+    const existing = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [databaseName]);
+    if (existing.rowCount === 0) {
+      // A database name cannot be a bound parameter. `databaseName` comes from developer
+      // configuration (TEST_DATABASE_URL), never from request input, and is quoted defensively.
+      await admin.query(`CREATE DATABASE "${databaseName.replace(/"/g, '""')}"`);
+    }
+  } finally {
+    await admin.end();
+  }
+}
+
 export async function setup(): Promise<void> {
-  const { migrate, closeTestDb } = await import('./db.js');
+  await ensureTestDatabaseExists();
   await migrate();
   await closeTestDb();
 }
@@ -481,20 +559,68 @@ export default defineConfig({
   test: {
     include: ['web/tests/**/*.test.js', 'server/tests/**/*.test.ts'],
     globalSetup: ['server/tests/support/global-setup.ts'],
+    // Every DB-touching test file calls resetDb() in beforeEach, which TRUNCATEs all six tables in
+    // the one shared test database. Vitest 3 runs test FILES in parallel by default, so without
+    // this one file's TRUNCATE would delete another file's in-flight rows and produce
+    // nondeterministic failures that look like implementation bugs. Run the files serially in a
+    // single fork instead; the suite is small and DB-bound, so the wall-clock cost is minimal.
+    poolOptions: {
+      forks: {
+        singleFork: true,
+      },
+    },
   },
 });
 ```
 
-- [ ] **Step 5: Verify migrations apply cleanly**
+- [ ] **Step 5: Write a real migration-verification test**
 
-Run: `docker compose up -d && npx vitest run server/tests/database/` (no test files yet — this just proves `globalSetup` runs without error)
-Expected: "No test files found" is fine; there must be **no error** from the global setup step itself. If it errors, fix `applyMigrations`/`DATABASE_URL` before proceeding.
+This asserts something rather than relying on "No test files found" (which Vitest treats as a failing run and which would not prove `globalSetup` executed at all).
 
-- [ ] **Step 6: Commit**
+```ts
+// server/tests/database/migrations.test.ts
+import { afterAll, describe, it, expect } from 'vitest';
+import { sql } from 'drizzle-orm';
+import { getTestDb, closeTestDb } from '../support/db.js';
+
+afterAll(async () => {
+  await closeTestDb();
+});
+
+describe('test-database global setup', () => {
+  it('creates the test database and applies every Phase 3 migration to it', async () => {
+    const { db } = getTestDb();
+    const result = await db.execute(
+      sql`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name`,
+    );
+    const tableNames = (result.rows as { table_name: string }[]).map((row) => row.table_name);
+
+    expect(tableNames).toEqual(
+      expect.arrayContaining([
+        'app_sessions',
+        'courses',
+        'institutions',
+        'lti_deployments',
+        'lti_registrations',
+        'oidc_transactions',
+      ]),
+    );
+  });
+});
+```
+
+- [ ] **Step 6: Run the verification test**
+
+Run: `docker compose up -d && npx vitest run server/tests/database/migrations.test.ts`
+Expected: PASS (1 test). If it fails, fix `applyMigrations`/`ensureTestDatabaseExists`/`TEST_DATABASE_URL` before proceeding — every later task depends on this working.
+
+Also confirm the dev database was left alone: `psql postgres://attendance_tracker:attendance_tracker@localhost:5432/postgres -c '\l'` should now list **both** `attendance_tracker` and `attendance_tracker_test`.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add server/src/database/client.ts server/tests/support/db.ts server/tests/support/global-setup.ts vitest.config.ts
-git commit -m "feat: add Drizzle DB client and test-database migration/reset support"
+git add server/src/database/client.ts server/tests/support/db.ts server/tests/support/global-setup.ts server/tests/database/migrations.test.ts vitest.config.ts
+git commit -m "feat: add Drizzle DB client and isolated test-database migration/reset support"
 ```
 
 ---
@@ -512,13 +638,16 @@ import { beforeEach, afterAll, describe, it, expect } from 'vitest';
 import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { institutions, ltiRegistrations, ltiDeployments, courses, appSessions, oidcTransactions } from '../../src/database/schema.js';
 
+// File scope, not inside a describe: the pg pool in tests/support/db.ts is module-level and shared
+// by every describe in this file, so closing it from inside one describe would leave any later
+// describe's re-created pool open (Vitest then warns about a hanging process).
+afterAll(async () => {
+  await closeTestDb();
+});
+
 describe('schema smoke test', () => {
   beforeEach(async () => {
     await resetDb();
-  });
-
-  afterAll(async () => {
-    await closeTestDb();
   });
 
   it('can insert and read a full row chain across every Phase 3 table', async () => {
@@ -556,7 +685,7 @@ describe('schema smoke test', () => {
         deploymentId: deployment.deploymentId,
         stateHash: 'state-hash-smoke',
         nonceHash: 'nonce-hash-smoke',
-        targetLinkUri: 'https://smoke.test/lti/launch',
+        targetLinkUri: 'https://smoke.test/index.html',
         expiresAt: new Date(Date.now() + 5 * 60 * 1000),
       })
       .returning();
@@ -718,12 +847,19 @@ export async function loadSigningKeysFromEnv(json: string | undefined): Promise<
   const raw = JSON.parse(json) as RawSigningKeyConfig[];
   return Promise.all(
     raw.map(async (entry) => {
-      const privateKey = await importPKCS8(entry.privateKeyPkcs8Pem, 'RS256');
+      // `extractable: true` is REQUIRED: importPKCS8 defaults to extractable:false, and
+      // toPublicJwk() below calls exportJWK() on this key to derive the public JWK that
+      // GET /lti/jwks publishes. Without it, exportJWK throws at boot and /lti/jwks never works.
+      // (The ephemeral path above passes the same flag to generateKeyPair for the same reason.)
+      const privateKey = await importPKCS8(entry.privateKeyPkcs8Pem, 'RS256', { extractable: true });
       return { kid: entry.kid, status: entry.status, privateKey, publicJwk: await toPublicJwk(privateKey, entry.kid) };
     }),
   );
 }
 
+// Consumed by Phase 4's Canvas service-token client, which signs the `client_assertion` JWT for the
+// OAuth2 token endpoint with the active key. Phase 3 itself only publishes the public halves at
+// GET /lti/jwks, so within this plan this function is exercised only by its own unit test.
 export function getActiveSigningKey(keys: ToolSigningKey[]): ToolSigningKey {
   const active = keys.find((k) => k.status === 'active');
   if (!active) {
@@ -737,6 +873,8 @@ export function getActiveSigningKey(keys: ToolSigningKey[]): ToolSigningKey {
 
 Run: `npx vitest run server/tests/lti/signing-keys.test.ts`
 Expected: PASS (3 tests)
+
+**Deferred (spec §17.2):** the spec asks for a *configurable overlap/retention period* (it suggests seven days) after which a `previous` public key stops being published. Phase 3 does not implement a timer or a retention column: rotation is entirely env-driven, so the operator controls the overlap by leaving the old key in `LTI_TOOL_SIGNING_KEYS_JSON` with `status: 'previous'` and removing that entry once the overlap has elapsed. The spec's hard requirements — publish active + previous, sign only with active, rotate without code changes — are all met. A scheduled/automatic retention policy is deferred to Phase 8 hardening; note it in `docs/canvas-installation.md`-adjacent operations docs when Phase 7/8 add them.
 
 - [ ] **Step 5: Commit**
 
@@ -890,7 +1028,7 @@ git commit -m "feat: add GET /lti/jwks route"
 
 **Interfaces:**
 - Consumes: `Database` (Task 4), `institutions`/`ltiRegistrations`/`ltiDeployments`/`courses` (Task 3).
-- Produces: `interface LtiInstitution/LtiRegistration/LtiDeployment/EnabledDeployment/LaunchClaims` (types.ts); `findEnabledDeployment(db, iss, clientId, deploymentId): Promise<EnabledDeployment | null>`, `findRegistrationById(db, id): Promise<LtiRegistration | null>`, `findDeploymentByBusinessId(db, registrationId, deploymentId): Promise<LtiDeployment | null>`, `findOrCreateCourse(db, params): Promise<{ id: string }>`.
+- Produces: `interface LtiInstitution/LtiRegistration/LtiDeployment/EnabledDeployment` (types.ts); `findEnabledDeployment(db, iss, clientId, deploymentId): Promise<EnabledDeployment | null>`, `findRegistrationById(db, id): Promise<LtiRegistration | null>`, `findDeploymentByBusinessId(db, registrationId, deploymentId): Promise<LtiDeployment | null>`, `findOrCreateCourse(db, params): Promise<{ id: string }>`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -932,12 +1070,16 @@ async function seedRow(overrides: { deploymentEnabled?: boolean } = {}) {
   return { institution, registration, deployment };
 }
 
+// File scope, not inside the first describe: db.ts's pg pool is module-level and shared by every
+// describe below, so closing it from inside one describe would leave the pools the later describes
+// re-create open (Vitest then warns about a hanging process).
+afterAll(async () => {
+  await closeTestDb();
+});
+
 describe('findEnabledDeployment', () => {
   beforeEach(async () => {
     await resetDb();
-  });
-  afterAll(async () => {
-    await closeTestDb();
   });
 
   it('returns null when no matching registration exists', async () => {
@@ -1053,21 +1195,10 @@ export interface EnabledDeployment {
   deployment: LtiDeployment;
 }
 
-export interface LtiContextClaim {
-  id: string;
-  label?: string;
-  title?: string;
-}
-
-export interface LaunchClaims {
-  sub: string;
-  nonce: string;
-  'https://purl.imsglobal.org/spec/lti/claim/version': string;
-  'https://purl.imsglobal.org/spec/lti/claim/message_type': string;
-  'https://purl.imsglobal.org/spec/lti/claim/deployment_id': string;
-  'https://purl.imsglobal.org/spec/lti/claim/context': LtiContextClaim;
-  'https://purl.imsglobal.org/spec/lti/claim/roles': string[];
-}
+// NOTE: this file deliberately does NOT declare a hand-written `LaunchClaims`/`LtiContextClaim`
+// pair. The launch JWT's claim shape has exactly one source of truth: the zod schema in
+// `lti/claims.ts` (Task 16) and its inferred `ValidatedLtiClaims` type. A parallel hand-written
+// interface would be a second, unenforced definition that could drift from the validator.
 ```
 
 - [ ] **Step 4: Write `lti/registrations.ts`**
@@ -1529,12 +1660,15 @@ async function seedRegistrationId(): Promise<string> {
   return registration.id;
 }
 
+// File scope so the shared module-level pg pool in db.ts is closed exactly once, after every
+// describe in this file has finished (see the same note in registrations.test.ts).
+afterAll(async () => {
+  await closeTestDb();
+});
+
 describe('createOidcTransaction / consumeOidcTransaction', () => {
   beforeEach(async () => {
     await resetDb();
-  });
-  afterAll(async () => {
-    await closeTestDb();
   });
 
   it('creates a transaction with 256-bit state/nonce and consumes it successfully once', async () => {
@@ -1544,7 +1678,7 @@ describe('createOidcTransaction / consumeOidcTransaction', () => {
     const created = await createOidcTransaction(db, {
       registrationId,
       deploymentId: 'deploy-1',
-      targetLinkUri: 'https://app.test/lti/launch',
+      targetLinkUri: 'https://app.test/index.html',
       ttlSeconds: 300,
     });
 
@@ -1571,7 +1705,7 @@ describe('createOidcTransaction / consumeOidcTransaction', () => {
     const created = await createOidcTransaction(db, {
       registrationId,
       deploymentId: 'deploy-1',
-      targetLinkUri: 'https://app.test/lti/launch',
+      targetLinkUri: 'https://app.test/index.html',
       ttlSeconds: -1, // already expired
     });
 
@@ -1585,7 +1719,7 @@ describe('createOidcTransaction / consumeOidcTransaction', () => {
     const created = await createOidcTransaction(db, {
       registrationId,
       deploymentId: 'deploy-1',
-      targetLinkUri: 'https://app.test/lti/launch',
+      targetLinkUri: 'https://app.test/index.html',
       ttlSeconds: 300,
     });
 
@@ -1906,6 +2040,8 @@ git commit -m "feat: add login redirect builder with exact-match target_link_uri
 - Create: `server/src/routes/lti-login.ts`
 - Test: `server/tests/routes/lti-login.test.ts`
 
+Covers §45 case **24 (target-link open-redirect attempt)** at the route level — this is the one §45 case that is a login-time rejection rather than a launch-time one, so it is the one case whose "no `app_sessions` row" guarantee is asserted here (no transaction created, no session code path reachable) instead of in Task 23's launch sweep.
+
 **Interfaces:**
 - Consumes: `buildLoginRedirect`, `LoginDeps` (Task 13).
 - Produces: `registerLtiLoginRoute(app: FastifyInstance, deps: LoginDeps): void`.
@@ -1981,14 +2117,22 @@ describe('GET/POST /lti/login', () => {
     expect(response.statusCode).toBe(400);
   });
 
-  it('§45 case 24: returns 400 for a disallowed target_link_uri, never redirecting to it', async () => {
-    const app = buildTestApp(makeDeps());
+  it('§45 case 24: returns 400 for a disallowed target_link_uri, never redirecting to it, and creating no OIDC transaction', async () => {
+    const deps = makeDeps();
+    const app = buildTestApp(deps);
     const query = new URLSearchParams({ ...QUERY, target_link_uri: 'https://evil.test/x' }).toString();
 
     const response = await app.inject({ method: 'GET', url: `/lti/login?${query}` });
 
     expect(response.statusCode).toBe(400);
     expect(response.headers.location).toBeUndefined();
+    // Case 24 is the one §45 case that is rejected at LOGIN time, before any launch exists. The
+    // matrix-wide "no app_sessions row" invariant is satisfied here structurally rather than by a
+    // database count: /lti/login never creates a session (only /lti/launch does), and the
+    // allowlist check runs before anything is written, so no oidc_transactions row is created
+    // either. These two assertions pin exactly that.
+    expect(deps.createTransaction).not.toHaveBeenCalled();
+    expect(deps.findEnabledDeployment).not.toHaveBeenCalled();
   });
 });
 ```
@@ -2422,9 +2566,12 @@ Expected: FAIL with "Cannot find module '../../src/lti/roles.js'"
 ```ts
 // server/src/lti/roles.ts
 // Standard 1EdTech LTI context-role and institution-role URIs recognized as instructor/administrator.
-// MUST be verified against a real Canvas launch payload during this plan's manual Canvas
-// Developer Key verification (Task 24's docs/canvas-installation.md) before being trusted as
-// load-bearing security logic -- see design doc "Risks / open items".
+// This set was written from the published 1EdTech role vocabulary, NOT from an observed Canvas
+// launch, so it is the highest-risk assumption in this phase: if Canvas emits a role URI outside
+// this set for a real instructor, every legitimate launch 403s, and if it emits one of these for a
+// non-teacher, an unauthorized user gets in. It MUST therefore be verified against a real Canvas
+// launch payload during the manual Canvas Developer Key verification in
+// docs/canvas-installation.md (step 5) before this is trusted as load-bearing security logic.
 export const AUTHORIZED_INSTRUCTOR_ROLE_URIS = new Set<string>([
   'http://purl.imsglobal.org/vocab/lis/v2/membership#Instructor',
   'http://purl.imsglobal.org/vocab/lis/v2/membership#Administrator',
@@ -2502,12 +2649,15 @@ async function seedCourseId(): Promise<{ institutionId: string; deploymentRowId:
   return { institutionId: institution.id, deploymentRowId: deployment.id, courseId: course.id };
 }
 
+// File scope so the shared module-level pg pool in db.ts is closed exactly once, after every
+// describe in this file has finished (see the same note in registrations.test.ts).
+afterAll(async () => {
+  await closeTestDb();
+});
+
 describe('createSession / findValidSession / revokeSession', () => {
   beforeEach(async () => {
     await resetDb();
-  });
-  afterAll(async () => {
-    await closeTestDb();
   });
 
   it('creates a session, stores only its hash, and finds it back by the raw token', async () => {
@@ -2752,6 +2902,14 @@ import { createOidcTransaction } from '../../src/lti/oidc-transactions.js';
 import { ltiDeployments } from '../../src/database/schema.js';
 import { resolveTransactionContext } from '../../src/lti/launch.js';
 
+// File scope, NOT inside a describe: Tasks 20-23 append four more describes to this same file, and
+// db.ts's pg pool is module-level and shared by all of them. Closing it from inside the first
+// describe would leave the pool the later describes re-create open (Vitest then warns about a
+// hanging process). Do not move this into a describe when appending the later blocks.
+afterAll(async () => {
+  await closeTestDb();
+});
+
 describe('resolveTransactionContext', () => {
   let platform: MockCanvasPlatform;
 
@@ -2762,9 +2920,6 @@ describe('resolveTransactionContext', () => {
   });
   afterEach(async () => {
     await platform.stop();
-  });
-  afterAll(async () => {
-    await closeTestDb();
   });
 
   it('§45 case 3: propagates unknown_state', async () => {
@@ -2778,7 +2933,7 @@ describe('resolveTransactionContext', () => {
     const created = await createOidcTransaction(db, {
       registrationId: seeded.registrationId,
       deploymentId: seeded.deploymentId,
-      targetLinkUri: 'https://app.test/lti/launch',
+      targetLinkUri: 'https://app.test/index.html',
       ttlSeconds: -1,
     });
     expect(await resolveTransactionContext(db, created.state)).toEqual({ ok: false, reason: 'expired_state' });
@@ -2790,7 +2945,7 @@ describe('resolveTransactionContext', () => {
     const created = await createOidcTransaction(db, {
       registrationId: seeded.registrationId,
       deploymentId: seeded.deploymentId,
-      targetLinkUri: 'https://app.test/lti/launch',
+      targetLinkUri: 'https://app.test/index.html',
       ttlSeconds: 300,
     });
 
@@ -2804,7 +2959,7 @@ describe('resolveTransactionContext', () => {
     const created = await createOidcTransaction(db, {
       registrationId: seeded.registrationId,
       deploymentId: seeded.deploymentId,
-      targetLinkUri: 'https://app.test/lti/launch',
+      targetLinkUri: 'https://app.test/index.html',
       ttlSeconds: 300,
     });
 
@@ -2823,7 +2978,7 @@ describe('resolveTransactionContext', () => {
     const created = await createOidcTransaction(db, {
       registrationId: seeded.registrationId,
       deploymentId: seeded.deploymentId,
-      targetLinkUri: 'https://app.test/lti/launch',
+      targetLinkUri: 'https://app.test/index.html',
       ttlSeconds: 300,
     });
 
@@ -2871,12 +3026,16 @@ export type LaunchFailureReason =
   | 'learner_only_role'
   | 'tampered_token';
 // NOTE on 'nonce_replay' (§45 case 7): nonce and state are minted and consumed together as a
-// single OIDC transaction row (design doc §12.2/§13.7), so nonce single-use is enforced by the
-// exact same atomic UPDATE that enforces state single-use. A full replay of a captured
-// (state, id_token) pair is therefore caught as 'reused_state' in resolveTransactionContext,
-// before nonce is even re-compared. This literal is kept in the union to document the distinct
-// threat from spec §45 case 7; Task 22's test for that case exercises the full-replay scenario and
-// asserts the resulting reason is 'reused_state', with this comment as the citation for why.
+// single OIDC transaction row (spec §12.2 and §13.7), so nonce single-use is enforced by the exact
+// same atomic UPDATE that enforces state single-use. That makes case 7 split into two concrete
+// attacks, and neither of them can ever produce a distinct 'nonce_replay' reason:
+//   (a) replaying a captured (state, id_token) PAIR -- caught as 'reused_state' in
+//       resolveTransactionContext, before the nonce is even re-compared;
+//   (b) pairing an OLD captured nonce with a FRESH state (the genuinely distinct threat) --
+//       the fresh transaction row has a different nonce_hash, so validateNonceClaimsAndRole
+//       rejects it as 'nonce_mismatch'.
+// Task 23 has a test for each. This literal is kept in the union purely so a reader grepping for
+// spec §45 case 7 lands on this explanation; no code path returns it, and no test expects it.
 
 export interface TransactionContext {
   transaction: ConsumedTransaction;
@@ -3238,7 +3397,7 @@ export function validateAudienceAndLifetime(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run server/tests/lti/launch.test.ts`
-Expected: PASS (18 tests total: 11 previous + 7 new)
+Expected: PASS (17 tests total: 11 previous + 6 new)
 
 - [ ] **Step 5: Commit**
 
@@ -3279,7 +3438,7 @@ function transactionFor(nonce: string, deploymentId = 'deploy-1'): ConsumedTrans
     registrationId: 'reg-1',
     deploymentId,
     nonceHash: hashForTest(nonce),
-    targetLinkUri: 'https://app.test/lti/launch',
+    targetLinkUri: 'https://app.test/index.html',
   };
 }
 
@@ -3336,7 +3495,7 @@ describe('validateNonceClaimsAndRole', () => {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `npx vitest run server/tests/lti/launch.test.ts`
-Expected: FAIL with "validateNonceClaimsAndRole is not a function" (previous 18 tests still pass)
+Expected: FAIL with "validateNonceClaimsAndRole is not a function" (previous 17 tests still pass)
 
 - [ ] **Step 3: Append to `lti/launch.ts`**
 
@@ -3394,7 +3553,7 @@ export function validateNonceClaimsAndRole(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run server/tests/lti/launch.test.ts`
-Expected: PASS (23 tests total: 18 previous + 5 new)
+Expected: PASS (22 tests total: 17 previous + 5 new)
 
 - [ ] **Step 5: Commit**
 
@@ -3411,19 +3570,30 @@ git commit -m "feat: add launch nonce/claims/deployment-claim/role validation (l
 - Modify: `server/src/lti/launch.ts`
 - Test: `server/tests/lti/launch.test.ts`
 
-Covers §45 case **1 (valid launch)**, case **2 (missing state)**, case **7 (nonce replay, as the full-launch-replay scenario)**, plus a closing sweep re-confirming representative failure cases end-to-end with the "no session created" assertion required for all 24 cases.
+Covers §45 case **1 (valid launch)**, case **2 (missing state)**, case **7 (nonce replay — both the full-(state, id_token)-pair replay and the distinct fresh-state/stale-nonce variant)**, plus a closing sweep that drives **every remaining §45 failure case reachable through `verifyLaunch`** end-to-end and asserts zero `app_sessions` rows for each.
+
+Between this task's dedicated tests and its sweep, all 21 launch-time §45 failure cases (3, 4, 5, 6, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, plus 2 and 7) carry the "no session created" assertion required by the Global Constraints. Case 1 and case 12 are success cases; case 24 is login-time and is asserted in Task 14.
 
 **Interfaces:**
 - Consumes: `resolveTransactionContext` (Task 19), `verifyJwtSignature` (Task 20), `validateAudienceAndLifetime` (Task 21), `validateNonceClaimsAndRole` (Task 22), `findOrCreateCourse` (Task 9), `createSession`/`CreatedSession` (Task 18).
-- Produces: `interface VerifyLaunchInput { state: string | undefined; idToken: string | undefined }`, `interface VerifyLaunchDeps { db: Database; jwksCache: JwksCache; clockSkewSeconds: number; sessionTtlHours: number }`, `type VerifyLaunchResult = { ok: true; session: CreatedSession; courseId: string; roles: string[] } | { ok: false; reason: LaunchFailureReason }`, `verifyLaunch(input: VerifyLaunchInput, deps: VerifyLaunchDeps): Promise<VerifyLaunchResult>` — **this is the function Task 24's route wiring calls.**
+- Produces: `interface VerifyLaunchInput { state: string | undefined; idToken: string | undefined }`, `interface VerifyLaunchDeps { db: Database; jwksCache: JwksCache; clockSkewSeconds: number; sessionTtlHours: number }`, `type VerifyLaunchResult = { ok: true; session: CreatedSession; courseId: string; roles: string[]; targetLinkUri: string } | { ok: false; reason: LaunchFailureReason }`, `verifyLaunch(input: VerifyLaunchInput, deps: VerifyLaunchDeps): Promise<VerifyLaunchResult>` — **this is the function Task 24's route wiring calls.**
+- `targetLinkUri` is the value the matching OIDC transaction stored at login time (spec §12.1/§14). Task 24's route redirects to it, which is why it has to survive out of this function rather than being dropped after `consumeOidcTransaction` returns it.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
 // append to server/tests/lti/launch.test.ts
-// New imports needed for this block (everything else reuses imports already added in Tasks 19-22):
+// New imports needed for this block (everything else -- eq, ltiDeployments, getTestDb, resetDb,
+// seedInstitutionAndRegistration, MockCanvasPlatform, createOidcTransaction, JwksCache --
+// reuses imports already added in Tasks 19-22):
 import { appSessions } from '../../src/database/schema.js';
-import { verifyLaunch, type VerifyLaunchDeps } from '../../src/lti/launch.js';
+import { consumeOidcTransaction } from '../../src/lti/oidc-transactions.js';
+import {
+  verifyLaunch,
+  type VerifyLaunchDeps,
+  type VerifyLaunchInput,
+  type LaunchFailureReason,
+} from '../../src/lti/launch.js';
 
 describe('verifyLaunch (full orchestration)', () => {
   let platform: MockCanvasPlatform;
@@ -3438,22 +3608,19 @@ describe('verifyLaunch (full orchestration)', () => {
   afterEach(async () => {
     await platform.stop();
   });
-  afterAll(async () => {
-    await closeTestDb();
-  });
 
   async function countSessions(): Promise<number> {
     const { db } = getTestDb();
     return (await db.select().from(appSessions)).length;
   }
 
-  async function setUpValidTransaction() {
+  async function setUpValidTransaction(targetLinkUri = 'https://app.test/index.html') {
     const { db } = getTestDb();
     const seeded = await seedInstitutionAndRegistration(db, platform);
     const created = await createOidcTransaction(db, {
       registrationId: seeded.registrationId,
       deploymentId: seeded.deploymentId,
-      targetLinkUri: 'https://app.test/lti/launch',
+      targetLinkUri,
       ttlSeconds: 300,
     });
     return { seeded, created };
@@ -3473,8 +3640,23 @@ describe('verifyLaunch (full orchestration)', () => {
     if (result.ok) {
       expect(result.roles).toContain('http://purl.imsglobal.org/vocab/lis/v2/membership#Instructor');
       expect(result.courseId).toBeTruthy();
+      // The transaction's stored target_link_uri survives out of verifyLaunch so Task 24's route
+      // can redirect to it instead of hardcoding one page (spec §12.1/§14).
+      expect(result.targetLinkUri).toBe('https://app.test/index.html');
     }
     expect(await countSessions()).toBe(1);
+  });
+
+  it('returns the transaction\'s own target_link_uri, not a hardcoded default', async () => {
+    const { created } = await setUpValidTransaction('https://app.test/scanner.html');
+    const idToken = await platform.mintIdToken({ nonce: created.nonce });
+
+    const result = await verifyLaunch({ state: created.state, idToken }, deps());
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.targetLinkUri).toBe('https://app.test/scanner.html');
+    }
   });
 
   it('§45 case 2: rejects a request missing state or id_token, creating no session', async () => {
@@ -3483,7 +3665,7 @@ describe('verifyLaunch (full orchestration)', () => {
     expect(await countSessions()).toBe(0);
   });
 
-  it('§45 case 7: a full replay of a captured (state, id_token) pair is rejected on the second attempt, creating no second session', async () => {
+  it('§45 case 7 (pair replay): a full replay of a captured (state, id_token) pair is rejected on the second attempt, creating no second session', async () => {
     const { created } = await setUpValidTransaction();
     const idToken = await platform.mintIdToken({ nonce: created.nonce });
 
@@ -3495,43 +3677,249 @@ describe('verifyLaunch (full orchestration)', () => {
     expect(await countSessions()).toBe(1); // still just the one session from the first (legitimate) attempt
   });
 
-  it('every remaining representative §45 failure case rejects end-to-end and creates no session', async () => {
-    const scenarios: Array<{ name: string; build: () => Promise<{ state: string | undefined; idToken: string | undefined }> }> = [
-      {
-        name: 'case 9: audience_mismatch',
-        build: async () => {
-          const { created } = await setUpValidTransaction();
-          return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce, aud: 'someone-else' }) };
-        },
-      },
-      {
-        name: 'case 16: unsupported_algorithm',
-        build: async () => {
-          const { created } = await setUpValidTransaction();
-          return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce }, { alg: 'RS384' }) };
-        },
-      },
-      {
-        name: 'case 22: learner_only_role',
-        build: async () => {
-          const { created } = await setUpValidTransaction();
-          return {
-            state: created.state,
-            idToken: await platform.mintIdToken({
-              nonce: created.nonce,
-              roles: ['http://purl.imsglobal.org/vocab/lis/v2/membership#Learner'],
-            }),
-          };
-        },
-      },
-    ];
+  it('§45 case 7 (stale nonce on a fresh state): an old captured nonce paired with a brand-new state is rejected, creating no session', async () => {
+    const { db } = getTestDb();
+    // This is the variant a pair-replay test cannot reach: the attacker starts a *legitimate* new
+    // login (so `state` is fresh and unconsumed) but presents an id_token minted for an earlier
+    // transaction's nonce. state single-use does not catch it; the nonce comparison must.
+    const { seeded, created: stale } = await setUpValidTransaction();
+    const staleNonceToken = await platform.mintIdToken({ nonce: stale.nonce });
 
-    for (const scenario of scenarios) {
-      await resetDb();
-      const input = await scenario.build();
-      const result = await verifyLaunch(input, deps());
-      expect(result.ok, scenario.name).toBe(false);
-      expect(await countSessions(), scenario.name).toBe(0);
+    const fresh = await createOidcTransaction(db, {
+      registrationId: seeded.registrationId,
+      deploymentId: seeded.deploymentId,
+      targetLinkUri: 'https://app.test/index.html',
+      ttlSeconds: 300,
+    });
+
+    const result = await verifyLaunch({ state: fresh.state, idToken: staleNonceToken }, deps());
+
+    expect(result).toEqual({ ok: false, reason: 'nonce_mismatch' });
+    expect(await countSessions()).toBe(0);
+  });
+
+  it('every §45 failure case reachable through verifyLaunch rejects end-to-end with the documented reason and creates no session', async () => {
+    // A second platform with its own key material, used only by the invalid_signature scenario.
+    const impostor = new MockCanvasPlatform();
+    await impostor.start();
+
+    try {
+      const scenarios: Array<{
+        name: string;
+        expectedReason: LaunchFailureReason;
+        build: () => Promise<VerifyLaunchInput>;
+      }> = [
+        {
+          name: 'case 3: unknown_state',
+          expectedReason: 'unknown_state',
+          build: async () => ({ state: 'never-issued-state-value', idToken: await platform.mintIdToken() }),
+        },
+        {
+          name: 'case 4: expired_state',
+          expectedReason: 'expired_state',
+          build: async () => {
+            const { db } = getTestDb();
+            const seeded = await seedInstitutionAndRegistration(db, platform);
+            const created = await createOidcTransaction(db, {
+              registrationId: seeded.registrationId,
+              deploymentId: seeded.deploymentId,
+              targetLinkUri: 'https://app.test/index.html',
+              ttlSeconds: -1,
+            });
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce }) };
+          },
+        },
+        {
+          name: 'case 5: reused_state',
+          expectedReason: 'reused_state',
+          build: async () => {
+            const { db } = getTestDb();
+            const { created } = await setUpValidTransaction();
+            const idToken = await platform.mintIdToken({ nonce: created.nonce });
+            await consumeOidcTransaction(db, created.state); // burn it outside verifyLaunch
+            return { state: created.state, idToken };
+          },
+        },
+        {
+          name: 'case 6: nonce_mismatch',
+          expectedReason: 'nonce_mismatch',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: 'not-the-issued-nonce' }) };
+          },
+        },
+        {
+          name: 'case 8: unknown_issuer',
+          expectedReason: 'unknown_issuer',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            // Signed by the registration's real platform key, so the signature check passes and the
+            // iss comparison is genuinely what rejects it.
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce, iss: 'https://evil.test' }) };
+          },
+        },
+        {
+          name: 'case 9: audience_mismatch',
+          expectedReason: 'audience_mismatch',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce, aud: 'someone-else' }) };
+          },
+        },
+        {
+          name: 'case 10: invalid_azp',
+          expectedReason: 'invalid_azp',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return {
+              state: created.state,
+              idToken: await platform.mintIdToken({ nonce: created.nonce, aud: ['mock-client-id', 'another-client'] }),
+            };
+          },
+        },
+        {
+          name: 'case 11: invalid_signature',
+          expectedReason: 'invalid_signature',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            // The impostor publishes its own 'default-kid', so the kid resolves against the real
+            // platform's JWKS and the RSA verification -- not the kid lookup -- is what fails.
+            return { state: created.state, idToken: await impostor.mintIdToken({ nonce: created.nonce }) };
+          },
+        },
+        {
+          name: 'case 13: unknown_kid (still missing after one JWKS refetch)',
+          expectedReason: 'unknown_kid',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            const idToken = await platform.mintIdToken({ nonce: created.nonce });
+            return { state: created.state, idToken: withHeaderKid(idToken, 'never-published') };
+          },
+        },
+        {
+          name: 'case 14: expired_token',
+          expectedReason: 'expired_token',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            const now = Math.floor(Date.now() / 1000);
+            return {
+              state: created.state,
+              idToken: await platform.mintIdToken({ nonce: created.nonce, iat: now - 10000, exp: now - 9000 }),
+            };
+          },
+        },
+        {
+          name: 'case 15: future_issued_token',
+          expectedReason: 'future_issued_token',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            const now = Math.floor(Date.now() / 1000);
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce, iat: now + 10000 }) };
+          },
+        },
+        {
+          name: 'case 16: unsupported_algorithm',
+          expectedReason: 'unsupported_algorithm',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce }, { alg: 'RS384' }) };
+          },
+        },
+        {
+          name: 'case 17a: wrong_deployment (deployment disabled between login and launch)',
+          expectedReason: 'wrong_deployment',
+          build: async () => {
+            const { db } = getTestDb();
+            const { seeded, created } = await setUpValidTransaction();
+            const idToken = await platform.mintIdToken({ nonce: created.nonce });
+            await db.update(ltiDeployments).set({ enabled: false }).where(eq(ltiDeployments.id, seeded.deploymentRowId));
+            return { state: created.state, idToken };
+          },
+        },
+        {
+          name: 'case 17b: wrong_deployment (deployment_id claim does not match the transaction)',
+          expectedReason: 'wrong_deployment',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return {
+              state: created.state,
+              idToken: await platform.mintIdToken({ nonce: created.nonce, deploymentId: 'some-other-deployment' }),
+            };
+          },
+        },
+        {
+          name: 'case 18: wrong_version',
+          expectedReason: 'wrong_version',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce, version: '1.1.0' }) };
+          },
+        },
+        {
+          name: 'case 19: wrong_message_type',
+          expectedReason: 'wrong_message_type',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return {
+              state: created.state,
+              idToken: await platform.mintIdToken({ nonce: created.nonce, messageType: 'LtiDeepLinkingRequest' }),
+            };
+          },
+        },
+        {
+          name: 'case 20: missing_context',
+          expectedReason: 'missing_context',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce, contextId: null }) };
+          },
+        },
+        {
+          name: 'case 21: missing_roles',
+          expectedReason: 'missing_roles',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce, roles: null }) };
+          },
+        },
+        {
+          name: 'case 22: learner_only_role',
+          expectedReason: 'learner_only_role',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return {
+              state: created.state,
+              idToken: await platform.mintIdToken({
+                nonce: created.nonce,
+                roles: ['http://purl.imsglobal.org/vocab/lis/v2/membership#Learner'],
+              }),
+            };
+          },
+        },
+        {
+          name: 'case 23: tampered_token',
+          expectedReason: 'tampered_token',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            const idToken = await platform.mintIdToken({ nonce: created.nonce });
+            const [, payloadSegment, signatureSegment] = idToken.split('.');
+            // Same deterministic corruption as Task 20's unit test: a header segment that decodes
+            // to text JSON.parse cannot parse, so decodeProtectedHeader throws reliably.
+            const tamperedHeader = Buffer.from('not valid json').toString('base64url');
+            return { state: created.state, idToken: `${tamperedHeader}.${payloadSegment}.${signatureSegment}` };
+          },
+        },
+      ];
+
+      for (const scenario of scenarios) {
+        await resetDb();
+        const input = await scenario.build();
+        const result = await verifyLaunch(input, deps());
+        expect(result, scenario.name).toEqual({ ok: false, reason: scenario.expectedReason });
+        expect(await countSessions(), scenario.name).toBe(0);
+      }
+    } finally {
+      await impostor.stop();
     }
   });
 });
@@ -3540,7 +3928,7 @@ describe('verifyLaunch (full orchestration)', () => {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `npx vitest run server/tests/lti/launch.test.ts`
-Expected: FAIL with "verifyLaunch is not a function" (previous 23 tests still pass)
+Expected: FAIL with "verifyLaunch is not a function" (previous 22 tests still pass)
 
 - [ ] **Step 3: Append to `lti/launch.ts`**
 
@@ -3567,7 +3955,7 @@ export interface VerifyLaunchDeps {
 }
 
 export type VerifyLaunchResult =
-  | { ok: true; session: CreatedSession; courseId: string; roles: string[] }
+  | { ok: true; session: CreatedSession; courseId: string; roles: string[]; targetLinkUri: string }
   | { ok: false; reason: LaunchFailureReason };
 
 export async function verifyLaunch(input: VerifyLaunchInput, deps: VerifyLaunchDeps): Promise<VerifyLaunchResult> {
@@ -3600,6 +3988,8 @@ export async function verifyLaunch(input: VerifyLaunchInput, deps: VerifyLaunchD
   const context = claims['https://purl.imsglobal.org/spec/lti/claim/context'];
   const course = await findOrCreateCourse(deps.db, {
     institutionId: registration.institutionId,
+    // `deployment.id` is the lti_deployments ROW UUID, which is what courses.deployment_id FKs to.
+    // Do NOT pass transaction.deploymentId here -- that is Canvas's business deployment ID string.
     deploymentId: deployment.id,
     ltiContextId: context.id,
     label: context.label,
@@ -3610,6 +4000,7 @@ export async function verifyLaunch(input: VerifyLaunchInput, deps: VerifyLaunchD
 
   const session = await createSession(deps.db, {
     institutionId: registration.institutionId,
+    // Row UUID again, for the same reason: app_sessions.deployment_id is a FK to lti_deployments.id.
     deploymentId: deployment.id,
     ltiSubject: claims.sub,
     displayName,
@@ -3618,14 +4009,18 @@ export async function verifyLaunch(input: VerifyLaunchInput, deps: VerifyLaunchD
     ttlHours: deps.sessionTtlHours,
   });
 
-  return { ok: true, session, courseId: course.id, roles };
+  // The target_link_uri was already validated against the exact-match allowlist at login time
+  // (lti/login.ts) before this transaction row was ever written, and it is read back from that row
+  // rather than from anything in the current request -- so handing it to the route as a redirect
+  // destination introduces no open-redirect surface (spec §12.1, §45 case 24).
+  return { ok: true, session, courseId: course.id, roles, targetLinkUri: transaction.targetLinkUri };
 }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run server/tests/lti/launch.test.ts`
-Expected: PASS (27 tests total: 23 previous + 4 new)
+Expected: PASS (28 tests total: 22 previous + 6 new). The sweep is a single `it` that iterates 20 scenarios, so a failure inside it reports the failing scenario's `name` as the assertion message.
 
 - [ ] **Step 5: Run the full test suite so far**
 
@@ -3675,6 +4070,12 @@ function buildTestApp(deps: LtiLaunchRouteDeps) {
   return app;
 }
 
+// File scope so the shared module-level pg pool in db.ts is closed exactly once (see the same note
+// in registrations.test.ts).
+afterAll(async () => {
+  await closeTestDb();
+});
+
 describe('POST /lti/launch', () => {
   let platform: MockCanvasPlatform;
   let jwksCache: JwksCache;
@@ -3688,26 +4089,23 @@ describe('POST /lti/launch', () => {
   afterEach(async () => {
     await platform.stop();
   });
-  afterAll(async () => {
-    await closeTestDb();
-  });
 
   function deps(): LtiLaunchRouteDeps {
     return { db: getTestDb().db, jwksCache, clockSkewSeconds: 120, sessionTtlHours: 8, appBaseUrl: 'https://app.test' };
   }
 
-  async function setUpValidTransaction() {
+  async function setUpValidTransaction(targetLinkUri = 'https://app.test/index.html') {
     const { db } = getTestDb();
     const seeded = await seedInstitutionAndRegistration(db, platform);
     return createOidcTransaction(db, {
       registrationId: seeded.registrationId,
       deploymentId: seeded.deploymentId,
-      targetLinkUri: 'https://app.test/lti/launch',
+      targetLinkUri,
       ttlSeconds: 300,
     });
   }
 
-  it('redirects 303 and sets a Secure, HttpOnly session cookie on a valid launch', async () => {
+  it('redirects 303 to the transaction\'s target_link_uri and sets a Secure, HttpOnly session cookie on a valid launch', async () => {
     const created = await setUpValidTransaction();
     const idToken = await platform.mintIdToken({ nonce: created.nonce });
     const app = buildTestApp(deps());
@@ -3720,13 +4118,31 @@ describe('POST /lti/launch', () => {
     });
 
     expect(response.statusCode).toBe(303);
-    expect(response.headers.location).toBe('/index.html');
+    expect(response.headers.location).toBe('https://app.test/index.html');
     const cookieHeader = response.headers['set-cookie'];
     expect(cookieHeader).toBeDefined();
     const cookieString = Array.isArray(cookieHeader) ? cookieHeader.join(';') : String(cookieHeader);
     expect(cookieString).toContain('attendance_session=');
     expect(cookieString).toContain('HttpOnly');
     expect(cookieString).toContain('Secure');
+  });
+
+  it('redirects to the SECOND allowlist entry when that is what the launch targeted', async () => {
+    // ALLOWED_TARGET_LINK_URIS is a multi-entry list (see Task 2), so a launch aimed at
+    // /scanner.html must land on /scanner.html, not on whichever entry happens to be first.
+    const created = await setUpValidTransaction('https://app.test/scanner.html');
+    const idToken = await platform.mintIdToken({ nonce: created.nonce });
+    const app = buildTestApp(deps());
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/lti/launch',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: new URLSearchParams({ state: created.state, id_token: idToken }).toString(),
+    });
+
+    expect(response.statusCode).toBe(303);
+    expect(response.headers.location).toBe('https://app.test/scanner.html');
   });
 
   it('§45 case 22 at the route level: returns 403 (not 400) for a learner-only launch, and creates no session', async () => {
@@ -3826,7 +4242,12 @@ export function registerLtiLaunchRoute(app: FastifyInstance, deps: LtiLaunchRout
     }
 
     reply.setCookie(SESSION_COOKIE_NAME, result.session.token, buildSessionCookieOptions(deps.appBaseUrl, deps.sessionTtlHours));
-    return reply.redirect('/index.html', 303);
+    // `result.targetLinkUri` is the value the matching OIDC transaction stored at login time, and
+    // /lti/login only ever stores a value that passed the exact-match ALLOWED_TARGET_LINK_URIS
+    // allowlist (spec §12.1). That allowlist -- not this line -- is what makes redirecting to a
+    // launch-supplied destination safe; never redirect to a target_link_uri read out of the
+    // current request. Hardcoding one page here would silently break multi-entry allowlists.
+    return reply.redirect(result.targetLinkUri, 303);
   });
 }
 ```
@@ -3834,7 +4255,7 @@ export function registerLtiLaunchRoute(app: FastifyInstance, deps: LtiLaunchRout
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run server/tests/routes/lti-launch.test.ts`
-Expected: PASS (4 tests)
+Expected: PASS (5 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -3853,7 +4274,7 @@ git commit -m "feat: add POST /lti/launch route with cookie set and error-code m
 
 **Interfaces:**
 - Consumes: `findValidSession`/`AppSession` (Task 18), `SESSION_COOKIE_NAME` (Task 18).
-- Produces (`csrf.ts`): `verifyCsrfToken(sessionCsrfSecret: string, providedToken: string | undefined): boolean`, `verifyOrigin(expectedOrigin: string, providedOrigin: string | undefined): boolean`.
+- Produces (`csrf.ts`): `verifyCsrfToken(sessionCsrfSecret: string, providedToken: string | undefined): boolean`, `verifyOrigin(expectedOrigin: string, providedOrigin: string | undefined): boolean`, `isRejectedMutationContentType(contentTypeHeader: string | undefined): boolean`.
 - Produces (`middleware.ts`): `createRequireSession(db: Database): (request, reply) => Promise<void>` (decorates `request.appSession`), `createRequireCsrf(expectedOrigin: string): (request, reply) => Promise<void>`.
 
 - [ ] **Step 1: Write the failing test**
@@ -3862,13 +4283,14 @@ git commit -m "feat: add POST /lti/launch route with cookie set and error-code m
 // server/tests/auth/csrf-middleware.test.ts
 import Fastify from 'fastify';
 import fastifyCookie from '@fastify/cookie';
+import fastifyFormbody from '@fastify/formbody';
 import { beforeEach, afterAll, describe, it, expect } from 'vitest';
 import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { institutions, ltiRegistrations, ltiDeployments, courses } from '../../src/database/schema.js';
 import { createSession } from '../../src/auth/session.js';
 import { createRequireSession, createRequireCsrf } from '../../src/auth/middleware.js';
 import { SESSION_COOKIE_NAME } from '../../src/auth/cookies.js';
-import { verifyCsrfToken, verifyOrigin } from '../../src/auth/csrf.js';
+import { verifyCsrfToken, verifyOrigin, isRejectedMutationContentType } from '../../src/auth/csrf.js';
 import type { Database } from '../../src/database/client.js';
 
 async function seedSessionCourse() {
@@ -3904,6 +4326,11 @@ async function seedSessionCourse() {
 function buildTestApp(db: Database) {
   const app = Fastify({ logger: false });
   app.register(fastifyCookie);
+  // Registered here for the same reason it is registered app-wide in index.ts: POST /lti/launch
+  // needs to parse Canvas's `form_post` response. Its presence is exactly why requireCsrf must
+  // reject form-encoded bodies itself (spec §15) -- without formbody, Fastify would 415 before the
+  // preHandler ever ran and the content-type test below would prove nothing.
+  app.register(fastifyFormbody);
   const requireSession = createRequireSession(db);
   const requireCsrf = createRequireCsrf('https://app.test');
   app.get('/protected', { preHandler: requireSession }, async () => ({ ok: true }));
@@ -3911,12 +4338,15 @@ function buildTestApp(db: Database) {
   return app;
 }
 
+// File scope so the shared module-level pg pool in db.ts is closed exactly once, after every
+// describe in this file has finished (see the same note in registrations.test.ts).
+afterAll(async () => {
+  await closeTestDb();
+});
+
 describe('requireSession', () => {
   beforeEach(async () => {
     await resetDb();
-  });
-  afterAll(async () => {
-    await closeTestDb();
   });
 
   it('returns 401 with no session cookie', async () => {
@@ -4027,9 +4457,39 @@ describe('requireCsrf', () => {
 
     expect(response.statusCode).toBe(200);
   });
+
+  it('spec §15: returns 403 for a form-encoded mutation even when Origin and CSRF token are both correct', async () => {
+    const { db } = getTestDb();
+    const { institutionId, deploymentRowId, courseId } = await seedSessionCourse();
+    const created = await createSession(db, {
+      institutionId,
+      deploymentId: deploymentRowId,
+      ltiSubject: 'user-1',
+      displayName: null,
+      courseId,
+      roles: ['Instructor'],
+      ttlHours: 8,
+    });
+    const app = buildTestApp(db);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/mutate',
+      cookies: { [SESSION_COOKIE_NAME]: created.token },
+      headers: {
+        origin: 'https://app.test',
+        'x-csrf-token': created.csrfSecret,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: new URLSearchParams({ anything: '1' }).toString(),
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: 'form_encoded_mutation_rejected' });
+  });
 });
 
-describe('verifyCsrfToken / verifyOrigin (unit)', () => {
+describe('verifyCsrfToken / verifyOrigin / isRejectedMutationContentType (unit)', () => {
   it('rejects when no token is provided', () => {
     expect(verifyCsrfToken('secret', undefined)).toBe(false);
   });
@@ -4042,6 +4502,14 @@ describe('verifyCsrfToken / verifyOrigin (unit)', () => {
     expect(verifyOrigin('https://app.test', 'https://app.test')).toBe(true);
     expect(verifyOrigin('https://app.test', 'https://app.test.evil.com')).toBe(false);
     expect(verifyOrigin('https://app.test', undefined)).toBe(false);
+  });
+
+  it('isRejectedMutationContentType flags form encodings, ignoring parameters and case, and allows JSON', () => {
+    expect(isRejectedMutationContentType('application/x-www-form-urlencoded')).toBe(true);
+    expect(isRejectedMutationContentType('Application/X-WWW-Form-Urlencoded; charset=UTF-8')).toBe(true);
+    expect(isRejectedMutationContentType('multipart/form-data; boundary=----abc')).toBe(true);
+    expect(isRejectedMutationContentType('application/json')).toBe(false);
+    expect(isRejectedMutationContentType(undefined)).toBe(false);
   });
 });
 ```
@@ -4068,6 +4536,21 @@ export function verifyCsrfToken(sessionCsrfSecret: string, providedToken: string
 export function verifyOrigin(expectedOrigin: string, providedOrigin: string | undefined): boolean {
   return providedOrigin === expectedOrigin;
 }
+
+// Spec §15: "Reject form-encoded mutation endpoints except the LTI launch endpoint itself."
+// `@fastify/formbody` is registered app-wide so POST /lti/launch can parse Canvas's `form_post`
+// response mode, which means every other POST would otherwise also accept a form body -- and a
+// cross-site HTML <form> can be submitted without JavaScript and without a preflight. Blocking the
+// two form encodings on CSRF-protected routes removes that class of request entirely. POST
+// /lti/launch does NOT use requireCsrf (it is authenticated by the signed id_token, not by a
+// session cookie), so it is unaffected by this check.
+const REJECTED_MUTATION_MEDIA_TYPES = new Set(['application/x-www-form-urlencoded', 'multipart/form-data']);
+
+export function isRejectedMutationContentType(contentTypeHeader: string | undefined): boolean {
+  if (!contentTypeHeader) return false;
+  const mediaType = contentTypeHeader.split(';')[0].trim().toLowerCase();
+  return REJECTED_MUTATION_MEDIA_TYPES.has(mediaType);
+}
 ```
 
 - [ ] **Step 4: Write `auth/middleware.ts`**
@@ -4077,7 +4560,7 @@ export function verifyOrigin(expectedOrigin: string, providedOrigin: string | un
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Database } from '../database/client.js';
 import { findValidSession, type AppSession } from './session.js';
-import { verifyCsrfToken, verifyOrigin } from './csrf.js';
+import { verifyCsrfToken, verifyOrigin, isRejectedMutationContentType } from './csrf.js';
 import { SESSION_COOKIE_NAME } from './cookies.js';
 
 declare module 'fastify' {
@@ -4086,15 +4569,22 @@ declare module 'fastify' {
   }
 }
 
+// NOTE on the `reply.code(...).send(...); return;` pattern used throughout this file: these are
+// Fastify preHandler hooks declared as `Promise<void>`, and a Fastify hook signals "stop here, the
+// response is already sent" by *sending*, not by returning the reply object. Writing
+// `return reply.code(401).send(...)` returns a FastifyReply from a `Promise<void>` function and
+// fails `npm run typecheck` with TS2322 ("Type 'FastifyReply' is not assignable to type 'void'").
 export function createRequireSession(db: Database) {
   return async function requireSession(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     const token = request.cookies?.[SESSION_COOKIE_NAME];
     if (!token) {
-      return reply.code(401).send({ error: 'unauthenticated' });
+      reply.code(401).send({ error: 'unauthenticated' });
+      return;
     }
     const session = await findValidSession(db, token);
     if (!session) {
-      return reply.code(401).send({ error: 'unauthenticated' });
+      reply.code(401).send({ error: 'unauthenticated' });
+      return;
     }
     request.appSession = session;
   };
@@ -4104,13 +4594,21 @@ export function createRequireCsrf(expectedOrigin: string) {
   return async function requireCsrf(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     const session = request.appSession;
     if (!session) {
-      return reply.code(401).send({ error: 'unauthenticated' });
+      reply.code(401).send({ error: 'unauthenticated' });
+      return;
+    }
+    // Spec §15: form-encoded bodies are never acceptable on a CSRF-protected mutation. The LTI
+    // launch endpoint is the documented exception and does not use this preHandler.
+    if (isRejectedMutationContentType(request.headers['content-type'])) {
+      reply.code(403).send({ error: 'form_encoded_mutation_rejected' });
+      return;
     }
     const origin = request.headers.origin;
     const csrfHeader = request.headers['x-csrf-token'];
     const providedToken = Array.isArray(csrfHeader) ? csrfHeader[0] : csrfHeader;
     if (!verifyOrigin(expectedOrigin, origin) || !verifyCsrfToken(session.csrfSecret, providedToken)) {
-      return reply.code(403).send({ error: 'csrf_check_failed' });
+      reply.code(403).send({ error: 'csrf_check_failed' });
+      return;
     }
   };
 }
@@ -4119,7 +4617,7 @@ export function createRequireCsrf(expectedOrigin: string) {
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `npx vitest run server/tests/auth/csrf-middleware.test.ts`
-Expected: PASS (9 tests)
+Expected: PASS (11 tests)
 
 - [ ] **Step 6: Commit**
 
@@ -4136,7 +4634,7 @@ git commit -m "feat: add CSRF verification and requireSession/requireCsrf Fastif
 - Create: `server/src/routes/me.ts`
 - Test: `server/tests/routes/me.test.ts`
 
-Implements spec §25.1's exact response shape. Per the design doc, this route uses `requireSession` only (no CSRF check — it's a same-origin authenticated GET bootstrap endpoint, and CSRF applies to state-changing requests per spec §15).
+Implements spec §25.1's exact response shape. This route uses `requireSession` only, with **no** `requireCsrf`, and that is deliberate: spec §15 scopes CSRF protection to *state-changing* requests, and `/api/me` is a read-only GET. It is also the bootstrap endpoint that *hands the browser its CSRF token* in the first place ("the browser frontend receives its CSRF token through a same-origin authenticated bootstrap endpoint", §15), so requiring that token to fetch it would be circular and the page could never make its first mutation.
 
 **Interfaces:**
 - Consumes: `createRequireSession` (Task 25), `AppSession` (Task 18).
@@ -4194,12 +4692,15 @@ function buildTestApp(db: Database) {
   return app;
 }
 
+// File scope so the shared module-level pg pool in db.ts is closed exactly once (see the same note
+// in registrations.test.ts).
+afterAll(async () => {
+  await closeTestDb();
+});
+
 describe('GET /api/me', () => {
   beforeEach(async () => {
     await resetDb();
-  });
-  afterAll(async () => {
-    await closeTestDb();
   });
 
   it("returns the documented §25.1 shape, sourced from the launch session and course", async () => {
@@ -4343,39 +4844,98 @@ Wires every module built in Tasks 1-26 into the real Fastify app, and adds the t
 **Interfaces:**
 - Consumes: every `registerXRoute` function and every dependency-builder from this entire plan.
 
-- [ ] **Step 1: Write the failing test for the two new plugin behaviors**
+- [ ] **Step 1: Write the configuration-pinning test for the security-header and rate-limit behaviors**
+
+This test is **not** a red/green TDD cycle. It drives no new application logic — it pins the exact plugin configuration that Step 4 wires into `server/src/index.ts`, so that a later edit which drops a CSP directive, the `Permissions-Policy` header, or the rate limit fails loudly here.
 
 ```ts
 // server/tests/routes/hardening.test.ts
-import Fastify from 'fastify';
+import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyHelmet from '@fastify/helmet';
 import fastifyRateLimit from '@fastify/rate-limit';
 import { describe, it, expect } from 'vitest';
 
+// buildCspDirectives + buildHardenedApp mirror, line for line, the helmet configuration and the
+// Permissions-Policy hook in server/src/index.ts (Step 4 below). Keep the two in sync.
+function buildCspDirectives(appBaseUrl: string, canvasOidcOrigins: string[]): Record<string, string[] | null> {
+  const directives: Record<string, string[] | null> = {
+    defaultSrc: ["'self'"],
+    scriptSrc: ["'self'"],
+    styleSrc: ["'self'"],
+    connectSrc: ["'self'"],
+    objectSrc: ["'none'"],
+    baseUri: ["'none'"],
+    // Spec §31.3 asks for `form-action 'self' <configured Canvas OIDC destinations>`. The app's own
+    // origin is covered by 'self'; the extra entries are the origins of the oidc_auth_endpoint
+    // values in lti_registrations, because /lti/login sends the browser on to the platform's
+    // authorization endpoint and Canvas form-POSTs the launch back.
+    formAction: ["'self'", ...canvasOidcOrigins],
+    frameAncestors: ["'none'"],
+  };
+  if (!appBaseUrl.startsWith('https://')) {
+    // Helmet's default CSP includes `upgrade-insecure-requests`, which makes the browser rewrite
+    // every http://localhost:3000 request to https:// and breaks local HTTP development. `null` is
+    // helmet's documented way to remove one of its own default directives.
+    directives.upgradeInsecureRequests = null;
+  }
+  return directives;
+}
+
+async function buildHardenedApp(appBaseUrl: string, canvasOidcOrigins: string[]): Promise<FastifyInstance> {
+  const app = Fastify({ logger: false });
+  await app.register(fastifyHelmet, {
+    contentSecurityPolicy: { directives: buildCspDirectives(appBaseUrl, canvasOidcOrigins) },
+  });
+  // Spec §31.2. Helmet does not set Permissions-Policy, and this app is a WebHID card scanner, so
+  // it must explicitly grant `hid` to its own origin (and to nothing embedded).
+  app.addHook('onRequest', async (_request, reply) => {
+    reply.header('Permissions-Policy', 'hid=(self)');
+  });
+  app.get('/probe', async () => ({ ok: true }));
+  return app;
+}
+
 describe('security headers (helmet, spec §31.2/§31.3)', () => {
   it('sets a restrictive CSP with frame-ancestors none, plus X-Content-Type-Options', async () => {
-    const app = Fastify({ logger: false });
-    await app.register(fastifyHelmet, {
-      contentSecurityPolicy: {
-        directives: {
-          defaultSrc: ["'self'"],
-          scriptSrc: ["'self'"],
-          styleSrc: ["'self'"],
-          connectSrc: ["'self'"],
-          objectSrc: ["'none'"],
-          baseUri: ["'none'"],
-          formAction: ["'self'"],
-          frameAncestors: ["'none'"],
-        },
-      },
-    });
-    app.get('/probe', async () => ({ ok: true }));
+    const app = await buildHardenedApp('https://app.test', ['https://canvas.test']);
 
     const response = await app.inject({ method: 'GET', url: '/probe' });
 
-    expect(response.headers['content-security-policy']).toContain("frame-ancestors 'none'");
-    expect(response.headers['content-security-policy']).toContain("object-src 'none'");
+    const csp = String(response.headers['content-security-policy']);
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("object-src 'none'");
+    expect(csp).toContain("base-uri 'none'");
+    expect(csp).toContain("frame-ancestors 'none'");
     expect(response.headers['x-content-type-options']).toBe('nosniff');
+  });
+
+  it("names the configured Canvas OIDC destinations in form-action, not just the app's own origin", async () => {
+    const app = await buildHardenedApp('https://app.test', ['https://canvas.test', 'https://canvas-beta.test']);
+
+    const response = await app.inject({ method: 'GET', url: '/probe' });
+
+    expect(String(response.headers['content-security-policy'])).toContain(
+      "form-action 'self' https://canvas.test https://canvas-beta.test",
+    );
+  });
+
+  it('sets Permissions-Policy: hid=(self) so the WebHID scanner keeps working (spec §31.2)', async () => {
+    const app = await buildHardenedApp('https://app.test', ['https://canvas.test']);
+
+    const response = await app.inject({ method: 'GET', url: '/probe' });
+
+    expect(response.headers['permissions-policy']).toBe('hid=(self)');
+  });
+
+  it('omits upgrade-insecure-requests for an http APP_BASE_URL, keeps it for https', async () => {
+    const httpApp = await buildHardenedApp('http://localhost:3000', ['https://canvas.test']);
+    const httpsApp = await buildHardenedApp('https://app.test', ['https://canvas.test']);
+
+    const httpResponse = await httpApp.inject({ method: 'GET', url: '/probe' });
+    const httpsResponse = await httpsApp.inject({ method: 'GET', url: '/probe' });
+
+    expect(String(httpResponse.headers['content-security-policy'])).not.toContain('upgrade-insecure-requests');
+    expect(String(httpsResponse.headers['content-security-policy'])).toContain('upgrade-insecure-requests');
   });
 });
 
@@ -4396,15 +4956,18 @@ describe('rate limiting (spec §31.10: 30 requests/minute/IP on /lti/login and /
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run it — it should pass immediately**
 
 Run: `npx vitest run server/tests/routes/hardening.test.ts`
-Expected: FAIL — `@fastify/helmet`/`@fastify/rate-limit` were installed in Task 1 but this is the first test exercising their configuration; if it fails on an unrelated error, fix before proceeding, otherwise this step simply confirms the plugins are usable.
+Expected: PASS (5 tests). There is no red phase for this file: it exercises `@fastify/helmet` and `@fastify/rate-limit` (installed in Task 1) plus one Fastify hook, and pins configuration rather than driving new application logic. If it *fails*, that is a real signal — the plugin versions behave differently from what Step 4's `index.ts` config assumes — so fix the configuration in both this file and Step 4 before proceeding.
 
-- [ ] **Step 3: Run test to verify it passes**
+- [ ] **Step 3: Note the deliberate `/api/scans` decision before wiring**
 
-Run: `npx vitest run server/tests/routes/hardening.test.ts`
-Expected: PASS (2 tests)
+Nothing to run for this step; it records a decision that Step 4's wiring makes visible. Spec §25 eventually puts scanning behind a session, but **Phase 3 deliberately leaves `POST /api/scans` unauthenticated, exactly as Phase 2 shipped it.** Do **not** add `requireSession`/`requireCsrf` to that route in this phase. Rationale, to be repeated in `docs/canvas-lti/progress.md` in Task 28:
+
+- Phase 3 introduces **no new exposure** — the route is already public on `main`, and this phase only adds endpoints alongside it.
+- The existing browser UI calls it without a session, and the standalone dev mode (spec §51) has no LTI launch at all; gating it now would break both before there is a replacement.
+- Phase 5 retires it in favor of `POST /api/attendance-sessions/{id}/scans` behind `requireSession` + `requireCsrf`, which is the point at which the UI is migrated too. Adding auth here would be work Phase 5 immediately deletes.
 
 - [ ] **Step 4: Rewrite `server/src/index.ts`**
 
@@ -4413,6 +4976,7 @@ Expected: PASS (2 tests)
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import Fastify from 'fastify';
+import { eq } from 'drizzle-orm';
 import fastifyStatic from '@fastify/static';
 import fastifyCookie from '@fastify/cookie';
 import fastifyFormbody from '@fastify/formbody';
@@ -4423,6 +4987,7 @@ import { MockIdentityResolver } from './identity/mock-resolver.js';
 import { createHttpIdentityResolverFromEnv } from './identity/http-resolver.js';
 import { loadEnv, parseAllowedTargetLinkUris } from './config/env.js';
 import { createDbClient, applyMigrations } from './database/client.js';
+import { ltiRegistrations } from './database/schema.js';
 import { loadSigningKeysFromEnv } from './lti/signing-keys.js';
 import { createDefaultJwksCache } from './lti/jwks-cache.js';
 import { createAllowlist } from './lti/login.js';
@@ -4446,22 +5011,48 @@ const signingKeys = await loadSigningKeysFromEnv(env.LTI_TOOL_SIGNING_KEYS_JSON)
 const jwksCache = createDefaultJwksCache();
 const allowedTargetLinkUris = createAllowlist(parseAllowedTargetLinkUris(env));
 
+// Spec §31.3's form-action directive wants the *configured Canvas OIDC destinations*, and spec §11
+// forbids deriving a Canvas endpoint from a hostname -- so read them from lti_registrations, which
+// is where the real, discovery-sourced endpoints live. Read once at boot; a newly seeded
+// registration needs a restart, which is already true of every other boot-time config here.
+const registrationRows = await db
+  .select({ oidcAuthEndpoint: ltiRegistrations.oidcAuthEndpoint })
+  .from(ltiRegistrations)
+  .where(eq(ltiRegistrations.enabled, true));
+const canvasOidcOrigins = [...new Set(registrationRows.map((row) => new URL(row.oidcAuthEndpoint).origin))];
+
+const cspDirectives: Record<string, string[] | null> = {
+  defaultSrc: ["'self'"],
+  scriptSrc: ["'self'"],
+  styleSrc: ["'self'"],
+  connectSrc: ["'self'"],
+  objectSrc: ["'none'"],
+  baseUri: ["'none'"],
+  // 'self' already covers APP_BASE_URL; the extra entries are the Canvas authorization endpoints
+  // /lti/login redirects the browser to and that form-POST the launch back to /lti/launch.
+  formAction: ["'self'", ...canvasOidcOrigins],
+  frameAncestors: ["'none'"],
+};
+if (!env.APP_BASE_URL.startsWith('https://')) {
+  // Helmet's default CSP adds `upgrade-insecure-requests`, which rewrites every
+  // http://localhost:3000 request to https:// and breaks local HTTP dev. `null` removes one of
+  // helmet's own defaults.
+  cspDirectives.upgradeInsecureRequests = null;
+}
+
 const app = Fastify({ logger: true });
 
 await app.register(fastifyHelmet, {
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
-      styleSrc: ["'self'"],
-      connectSrc: ["'self'"],
-      objectSrc: ["'none'"],
-      baseUri: ["'none'"],
-      formAction: ["'self'", env.APP_BASE_URL],
-      frameAncestors: ["'none'"],
-    },
-  },
+  contentSecurityPolicy: { directives: cspDirectives },
 });
+
+// Spec §31.2. Helmet does not set Permissions-Policy, and this app is a WebHID card scanner: the
+// scanner page needs `hid`, and nothing embedded should get it. Mirrored by
+// server/tests/routes/hardening.test.ts.
+app.addHook('onRequest', async (_request, reply) => {
+  reply.header('Permissions-Policy', 'hid=(self)');
+});
+
 await app.register(fastifyCookie);
 await app.register(fastifyFormbody);
 await app.register(fastifyStatic, { root: webRoot });
@@ -4500,6 +5091,13 @@ app.get('/health', async () => ({ status: 'ok' }));
 // Falls back to the Mock resolver whenever the real HTTP resolver's required env vars aren't set
 // -- see docs/canvas-lti/progress.md's "Deferred decisions" section for why that's the case.
 const identityResolver = createHttpIdentityResolverFromEnv() ?? new MockIdentityResolver();
+// DELIBERATE: POST /api/scans stays UNAUTHENTICATED in Phase 3 -- no requireSession, no
+// requireCsrf, no rate limit. It is registered on the root `app`, outside the rate-limited plugin
+// scope above, exactly as Phase 2 shipped it. Phase 3 adds endpoints beside it and introduces no
+// new exposure; the existing browser UI and the standalone dev mode (spec §51, which never
+// performs an LTI launch) both still call it without a session. Phase 5 retires this route in
+// favour of POST /api/attendance-sessions/{id}/scans behind requireSession + requireCsrf, and
+// migrates the UI at the same time. Do not add auth here.
 registerScansRoute(app, identityResolver);
 
 const port = Number(process.env.PORT ?? 3000);
@@ -4525,6 +5123,16 @@ Insert this new section immediately before the existing `## Project structure` h
 | `CLOCK_SKEW_SECONDS` | no | `120` | Allowed clock skew when validating a Canvas launch JWT's `exp`/`nbf`/`iat`. |
 | `LOGIN_TRANSACTION_TTL_SECONDS` | no | `300` | How long an `/lti/login`-issued `state`/`nonce` transaction remains valid before it's rejected as expired. |
 | `APP_SESSION_TTL_HOURS` | no | `8` | How long an application session (created at `/lti/launch`) remains valid. |
+| `TEST_DATABASE_URL` | no (tests only) | `postgres://attendance_tracker:attendance_tracker@localhost:5432/attendance_tracker_test` | Database `npm test` uses. Deliberately a **different** database from `DATABASE_URL`: the suite `TRUNCATE`s every table between test files, so sharing one would wipe your dev data. Created automatically on first `npm test` if it doesn't exist. |
+
+### Running the tests
+
+`npm test` requires the `docker-compose.yml` PostgreSQL service to be running (`docker compose up -d`). Vitest's
+`globalSetup` creates and migrates the test database once before **any** test file runs -- including
+the Phase 0-2 server tests and the `web/tests/**` browser tests, none of which touch the database
+themselves. If Postgres is not up, the whole suite fails at global setup with a connection error
+rather than a test assertion. Test files run serially (`poolOptions.forks.singleFork`) because they
+share that one test database.
 
 ```
 
@@ -4537,6 +5145,9 @@ Expected: all pass (every Phase 0-3 test green, zero lint errors, zero type erro
 
 Run (in a separate terminal, with a real `.env`-equivalent export of `DATABASE_URL`/`APP_BASE_URL`/`ALLOWED_TARGET_LINK_URIS` set): `npm run dev`
 Expected: server boots without throwing, `curl http://localhost:3000/health` returns `{"status":"ok"}`, `curl http://localhost:3000/lti/jwks` returns a JWKS document with no `d` field.
+
+Then check the headers actually land on a real response: `curl -sI http://localhost:3000/health`
+Expected: a `permissions-policy: hid=(self)` line, an `x-content-type-options: nosniff` line, and a `content-security-policy` line that contains `frame-ancestors 'none'` and does **not** contain `upgrade-insecure-requests` (because `APP_BASE_URL` is `http://localhost:3000` here).
 
 - [ ] **Step 8: Commit**
 
@@ -4728,6 +5339,8 @@ npx tsx server/src/database/seed-registration.ts \
 ```
 Expected: prints three "Created ..." lines and exits 0. Running the exact same command again prints "Found existing ..." for all three, still exits 0.
 
+Note on database separation: this smoke seed writes to the **dev** database named by `DATABASE_URL` (`attendance_tracker`). Step 5's `npm test` run uses `TEST_DATABASE_URL`, which Task 4 pointed at the separate `attendance_tracker_test` database, so the suite's `TRUNCATE`s do **not** delete these rows. If you ever override `TEST_DATABASE_URL` to point at the dev database, expect this seed to disappear the next time you run `npm test`.
+
 - [ ] **Step 3: Write `docs/canvas-installation.md`**
 
 ```markdown
@@ -4743,7 +5356,14 @@ document is only for the real-Canvas verification step required by this plan's D
 1. In Canvas, go to **Admin → Developer Keys → + Developer Key → + LTI Key**, and choose **Manual
    Entry** (this project does not implement dynamic registration in Phase 3; deep linking is an
    explicit non-goal per the spec).
-2. **Redirect URIs / Target Link URI**: `https://<APP_BASE_URL>/lti/launch`.
+2. **Redirect URIs**: `https://<APP_BASE_URL>/lti/launch` (this is where Canvas form-POSTs the
+   signed `id_token`).
+   **Target Link URI**: `https://<APP_BASE_URL>/index.html` — **not** `/lti/launch`. Canvas copies
+   this value into the launch's `target_link_uri`, and `/lti/launch` redirects the browser to it
+   after a successful launch (`POST /lti/launch` → 303 → this URL). Pointing it at `/lti/launch`
+   would redirect the launch endpoint back to itself. Whatever you put here must also appear
+   verbatim in `ALLOWED_TARGET_LINK_URIS` (step 5.1 below), which is the exact-match allowlist that
+   makes that redirect safe.
    **OIDC Initiation URL**: `https://<APP_BASE_URL>/lti/login`.
    **JWK Method**: Public JWK URL → `https://<APP_BASE_URL>/lti/jwks`.
    **Privacy Level**: `Name Only`.
@@ -4782,8 +5402,11 @@ instance of this app is using.
 
 ## 5. Verify the launch
 
-1. Set `ALLOWED_TARGET_LINK_URIS` to include `https://<APP_BASE_URL>/index.html` (the scanner page
-   `/lti/launch` redirects to on success), and `LTI_TOOL_SIGNING_KEYS_JSON` if this isn't a
+1. Set `ALLOWED_TARGET_LINK_URIS` to include the exact **Target Link URI** you configured in step
+   1.2 — `https://<APP_BASE_URL>/index.html` — since that is the page `/lti/launch` redirects to on
+   success. (The list may hold several entries, e.g. `/index.html,/scanner.html`; a launch is
+   redirected to whichever one Canvas sent, not to the first.) Also set
+   `LTI_TOOL_SIGNING_KEYS_JSON` if this isn't a
    throwaway dev instance (otherwise a restart rotates the signing key and Canvas's cached JWKS
    fetch may briefly go stale).
 2. From the test course, launch **Attendance** as an instructor.
@@ -4832,14 +5455,25 @@ Then append a new subsection right after the existing "## Phase 2 — what actua
 
 - `server/src/lti/`, `server/src/auth/`, `server/src/database/`, and `server/src/config/` added
   per `docs/superpowers/plans/2026-08-26-canvas-lti-phase3-lti-authentication.md`. Hand-rolled LTI
-  1.3 orchestration on `jose` (no maintained LTI framework -- see that plan's design doc for why);
-  Drizzle ORM + PostgreSQL via the existing `docker-compose.yml` service.
+  1.3 orchestration on `jose` rather than a maintained LTI framework: the available Node ones own
+  their own datastore, session model, and Express-style routing, which would fight this repo's
+  Fastify + Drizzle conventions and hide the very validation steps spec §45 requires us to test
+  case by case. Drizzle ORM + PostgreSQL via the existing `docker-compose.yml` service.
 - All 24 spec §45 test-matrix cases have a passing automated test against an in-process mock Canvas
   platform (`server/tests/support/mock-canvas.ts`, a real second Fastify server, not a mocked
-  `fetch`). Every failure case asserts no `app_sessions` row was created.
+  `fetch`). Every failure case asserts no `app_sessions` row was created: the 21 launch-time
+  failure cases through a `SELECT` count of zero in `server/tests/lti/launch.test.ts`, and case 24
+  (target-link open-redirect) structurally in `server/tests/routes/lti-login.test.ts`, since
+  `/lti/login` rejects before writing an OIDC transaction and has no session-creation path at all.
+  Cases 1 and 12 are success cases and do create a session.
 - `GET /lti/jwks` publishes this app's own public signing keys (active + previous, env-configured
   or an ephemeral dev fallback); `POST /lti/login` and `POST /lti/launch` implement the full OIDC
   login/launch flow; `GET /api/me` returns the spec §25.1 bootstrap shape.
+- **`POST /api/scans` is deliberately left unauthenticated in Phase 3**, exactly as Phase 2 shipped
+  it. Phase 3 adds endpoints beside it and introduces no new exposure; the existing browser UI and
+  the standalone dev mode (spec §51, which performs no LTI launch) both still call it without a
+  session. Phase 5 retires it in favour of `POST /api/attendance-sessions/{id}/scans` behind
+  `requireSession` + `requireCsrf` and migrates the UI at the same time.
 - **Not yet done:** the manual real-Canvas Developer Key setup and instructor/learner launch
   verification in `docs/canvas-installation.md`. `server/src/lti/roles.ts`'s
   `AUTHORIZED_INSTRUCTOR_ROLE_URIS` set is written from the standard 1EdTech role vocabulary but is
@@ -4863,12 +5497,22 @@ git commit -m "docs: add seed-registration CLI, Canvas Developer Key setup guide
 
 ## Definition of Done for this plan
 
-- [ ] All 24 §45 test-matrix cases pass automatically against the mock Canvas platform (Tasks 12, 15-23).
-- [ ] `npm test`, `npm run lint`, `npm run typecheck` are all clean.
+- [ ] All 24 §45 test-matrix cases pass automatically against the mock Canvas platform. Coverage lives in Tasks 12 and 15-23 for the 21 launch-time cases plus the two success cases, and in Tasks 13 and 14 for case 24 (target-link open-redirect), which is a login-time rejection.
+- [ ] Every §45 **failure** case asserts that no `app_sessions` row was created — the 21 launch-time ones via a zero-row count in Task 23's dedicated tests and sweep, and case 24 via Task 14's "no transaction created, no session code path" assertions. (Cases 1 and 12 are success cases and legitimately create one session each.)
+- [ ] `npm test`, `npm run lint`, `npm run typecheck` are all clean — with Postgres running, and with `npm test` writing only to `attendance_tracker_test`, never to the dev database.
 - [ ] `GET /lti/jwks` never exposes private key material (Tasks 7, 8).
 - [ ] Learner-only launches return HTTP 403 and create no session (Tasks 17, 22-24).
 - [ ] Every other failure case returns HTTP 400 and creates no session.
 - [ ] `GET /api/me` returns the exact spec §25.1 shape and leaks no secrets (Task 26).
-- [ ] Security headers and rate limiting are wired into the real app (Task 27).
+- [ ] Security headers (CSP incl. Canvas OIDC `form-action`, `Permissions-Policy: hid=(self)`, no `upgrade-insecure-requests` on http) and rate limiting are wired into the real app (Task 27).
+- [ ] A successful launch redirects to the transaction's own `target_link_uri`, so every entry in a multi-entry `ALLOWED_TARGET_LINK_URIS` is reachable (Tasks 23, 24).
 - [ ] `docs/canvas-installation.md` and `seed-registration.ts` exist and work against local Postgres (Task 28).
+
+**Explicitly deferred out of this plan (documented, not implemented):**
+
+- Spec §31.9's *request correlation ID on error responses*. Every error payload this plan produces is already a bare `{ error: '<reason>' }` with no stack trace, SQL, hostname, secret, or JWT in it, which satisfies the rest of §31.9. Attaching Fastify's `request.id` would mean touching the error shape of all five new routes plus `scans.ts`, and re-asserting it across every route test — for a diagnostic that only pays off once structured logging and log aggregation exist. Deferred to Phase 8 hardening, alongside the logging work.
+- Spec §17.2's *configurable overlap/retention period* for previous signing keys — rotation stays env-driven in Phase 3 (see Task 6).
+- Spec §26's `courses.nrps_url` / `ags_lineitems_url` / `last_launched_at` — added by Phase 4's migration (see Task 3).
+- Authentication on `POST /api/scans` — deliberately unchanged in Phase 3; Phase 5 replaces the route (see Task 27 Step 3).
+
 - [ ] **Not part of this plan's automated tasks, and required before Phase 3 can be checked off in `docs/canvas-lti/progress.md`:** the manual real-Canvas Developer Key launch verification described in `docs/canvas-installation.md` — this is the checkpoint to run with the user next, using their test/beta Canvas instance.
