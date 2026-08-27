@@ -5,7 +5,7 @@ import { seedInstitutionAndRegistration } from '../support/seed.js';
 import { MockCanvasPlatform } from '../support/mock-canvas.js';
 import { createOidcTransaction } from '../../src/lti/oidc-transactions.js';
 import { ltiDeployments } from '../../src/database/schema.js';
-import { resolveTransactionContext } from '../../src/lti/launch.js';
+import { resolveTransactionContext, validateAudienceAndLifetime } from '../../src/lti/launch.js';
 import { JwksCache } from '../../src/lti/jwks-cache.js';
 import { verifyJwtSignature } from '../../src/lti/launch.js';
 import type { LtiRegistration } from '../../src/lti/types.js';
@@ -185,5 +185,65 @@ describe('verifyJwtSignature', () => {
 
     const result = await verifyJwtSignature(tamperedToken, registrationFor(platform), jwksCache, 120);
     expect(result).toEqual({ ok: false, reason: 'tampered_token' });
+  });
+});
+
+describe('validateAudienceAndLifetime', () => {
+  const registration = {
+    id: 'reg-1',
+    institutionId: 'inst-1',
+    issuer: 'https://canvas.test',
+    clientId: 'client-1',
+    oidcAuthEndpoint: 'https://canvas.test/authorize',
+    tokenEndpoint: 'https://canvas.test/token',
+    tokenAudience: 'https://canvas.test/token',
+    platformJwksUri: 'https://canvas.test/jwks',
+    enabled: true,
+  };
+
+  function payload(overrides: Record<string, unknown> = {}) {
+    const now = Math.floor(Date.now() / 1000);
+    return { iss: 'https://canvas.test', aud: 'client-1', iat: now, exp: now + 3600, ...overrides };
+  }
+
+  it('accepts a payload whose iss/aud/iat all match', () => {
+    expect(validateAudienceAndLifetime(payload(), registration, 120)).toEqual({ ok: true });
+  });
+
+  it('§45 case 8: rejects a mismatched issuer', () => {
+    const result = validateAudienceAndLifetime(payload({ iss: 'https://evil.test' }), registration, 120);
+    expect(result).toEqual({ ok: false, reason: 'unknown_issuer' });
+  });
+
+  it('§45 case 9: rejects when aud does not contain this registration\'s client_id', () => {
+    const result = validateAudienceAndLifetime(payload({ aud: 'someone-elses-client' }), registration, 120);
+    expect(result).toEqual({ ok: false, reason: 'audience_mismatch' });
+  });
+
+  it('§45 case 10: rejects a multi-value aud with a missing/wrong azp', () => {
+    const missingAzp = validateAudienceAndLifetime(payload({ aud: ['client-1', 'another-client'] }), registration, 120);
+    expect(missingAzp).toEqual({ ok: false, reason: 'invalid_azp' });
+
+    const wrongAzp = validateAudienceAndLifetime(
+      payload({ aud: ['client-1', 'another-client'], azp: 'another-client' }),
+      registration,
+      120,
+    );
+    expect(wrongAzp).toEqual({ ok: false, reason: 'invalid_azp' });
+  });
+
+  it('accepts a multi-value aud when azp correctly identifies this client', () => {
+    const result = validateAudienceAndLifetime(
+      payload({ aud: ['client-1', 'another-client'], azp: 'client-1' }),
+      registration,
+      120,
+    );
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('§45 case 15: rejects a JWT whose iat is implausibly far in the future', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const result = validateAudienceAndLifetime(payload({ iat: now + 10000 }), registration, 120);
+    expect(result).toEqual({ ok: false, reason: 'future_issued_token' });
   });
 });

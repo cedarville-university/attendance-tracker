@@ -119,3 +119,32 @@ export async function verifyJwtSignature(
     return { ok: false, reason: 'invalid_signature' };
   }
 }
+
+export type ValidateAudienceResult = { ok: true } | { ok: false; reason: LaunchFailureReason };
+
+export function validateAudienceAndLifetime(
+  payload: JWTPayload,
+  registration: LtiRegistration,
+  clockSkewSeconds: number,
+): ValidateAudienceResult {
+  if (payload.iss !== registration.issuer) {
+    return { ok: false, reason: 'unknown_issuer' };
+  }
+
+  const audiences = Array.isArray(payload.aud) ? payload.aud : payload.aud ? [payload.aud] : [];
+  if (!audiences.includes(registration.clientId)) {
+    return { ok: false, reason: 'audience_mismatch' };
+  }
+  if (audiences.length > 1 && (typeof payload.azp !== 'string' || payload.azp !== registration.clientId)) {
+    return { ok: false, reason: 'invalid_azp' };
+  }
+
+  // verifyJwtSignature's jwtVerify call already rejected exp/nbf outside clockSkewSeconds; iat is
+  // not validated by jose at all, so an implausibly-future-issued token is only caught here.
+  const now = Math.floor(Date.now() / 1000);
+  if (typeof payload.iat !== 'number' || payload.iat - clockSkewSeconds > now) {
+    return { ok: false, reason: 'future_issued_token' };
+  }
+
+  return { ok: true };
+}
