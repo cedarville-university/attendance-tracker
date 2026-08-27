@@ -212,6 +212,28 @@ parsing logic lives entirely in `omnikey-parser.js`, is documented inline, and e
 assumptions as small named constants at the top of the file so they can be adjusted after testing
 against real hardware (using the Reader Diagnostics debug view to inspect actual raw reports).
 
+## 12. LTI authentication environment variables (Phase 3)
+
+| Variable | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `DATABASE_URL` | yes | -- | PostgreSQL connection string (Drizzle/`pg`). Local dev: `postgres://attendance_tracker:attendance_tracker@localhost:5432/attendance_tracker` (matches `docker-compose.yml`). |
+| `APP_BASE_URL` | yes | -- | This app's own public base URL, e.g. `https://attendance.example.edu`. Used to build the LTI `redirect_uri` and to decide whether the session cookie is marked `Secure` (only when this starts with `https://`). |
+| `ALLOWED_TARGET_LINK_URIS` | yes | -- | Comma-separated exact-match allowlist of `target_link_uri` values `/lti/login` is allowed to redirect to. |
+| `LTI_TOOL_SIGNING_KEYS_JSON` | no | unset -> an ephemeral key is generated at boot | JSON array of `{ kid, privateKeyPkcs8Pem, status: 'active' \| 'previous' }` for this app's own RSA signing keys, published at `GET /lti/jwks`. Leave unset only for local dev -- production must set this so keys survive a restart, and MUST NOT be committed to Git. |
+| `CLOCK_SKEW_SECONDS` | no | `120` | Allowed clock skew when validating a Canvas launch JWT's `exp`/`nbf`/`iat`. |
+| `LOGIN_TRANSACTION_TTL_SECONDS` | no | `300` | How long an `/lti/login`-issued `state`/`nonce` transaction remains valid before it's rejected as expired. |
+| `APP_SESSION_TTL_HOURS` | no | `8` | How long an application session (created at `/lti/launch`) remains valid. |
+| `TEST_DATABASE_URL` | no (tests only) | `postgres://attendance_tracker:attendance_tracker@localhost:5432/attendance_tracker_test` | Database `npm test` uses. Deliberately a **different** database from `DATABASE_URL`: the suite `TRUNCATE`s every table between test files, so sharing one would wipe your dev data. Created automatically on first `npm test` if it doesn't exist. |
+
+### Running the tests
+
+`npm test` requires the `docker-compose.yml` PostgreSQL service to be running (`docker compose up -d`). Vitest's
+`globalSetup` creates and migrates the test database once before **any** test file runs -- including
+the Phase 0-2 server tests and the `web/tests/**` browser tests, none of which touch the database
+themselves. If Postgres is not up, the whole suite fails at global setup with a connection error
+rather than a test assertion. Test files run serially (`poolOptions.forks.singleFork`) because they
+share that one test database.
+
 ## Project structure
 
 ```
