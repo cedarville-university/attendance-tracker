@@ -1,7 +1,9 @@
+import { decodeProtectedHeader, jwtVerify, importJWK, type JWTPayload } from 'jose';
 import type { Database } from '../database/client.js';
 import { consumeOidcTransaction, type ConsumedTransaction } from './oidc-transactions.js';
 import { findRegistrationById, findDeploymentByBusinessId } from './registrations.js';
 import type { LtiRegistration, LtiDeployment } from './types.js';
+import type { JwksCache } from './jwks-cache.js';
 
 export type LaunchFailureReason =
   | 'missing_state'
@@ -64,4 +66,56 @@ export async function resolveTransactionContext(db: Database, state: string): Pr
   }
 
   return { ok: true, context: { transaction: consumed.transaction, registration, deployment } };
+}
+
+export type VerifyJwtSignatureResult = { ok: true; payload: JWTPayload } | { ok: false; reason: LaunchFailureReason };
+
+export async function verifyJwtSignature(
+  idToken: string,
+  registration: LtiRegistration,
+  jwksCache: JwksCache,
+  clockSkewSeconds: number,
+): Promise<VerifyJwtSignatureResult> {
+  let header;
+  try {
+    header = decodeProtectedHeader(idToken);
+  } catch {
+    return { ok: false, reason: 'tampered_token' };
+  }
+
+  if (header.alg !== 'RS256') {
+    return { ok: false, reason: 'unsupported_algorithm' };
+  }
+  if (!header.kid) {
+    return { ok: false, reason: 'unknown_kid' };
+  }
+
+  const jwk = await jwksCache.getKey(registration.id, registration.platformJwksUri, header.kid);
+  if (!jwk) {
+    return { ok: false, reason: 'unknown_kid' };
+  }
+
+  let publicKey;
+  try {
+    publicKey = await importJWK(jwk, 'RS256');
+  } catch {
+    return { ok: false, reason: 'unknown_kid' };
+  }
+
+  try {
+    const verified = await jwtVerify(idToken, publicKey, {
+      algorithms: ['RS256'],
+      clockTolerance: clockSkewSeconds,
+    });
+    return { ok: true, payload: verified.payload };
+  } catch (err) {
+    const code = (err as { code?: string; claim?: string })?.code;
+    if (code === 'ERR_JWT_EXPIRED') {
+      return { ok: false, reason: 'expired_token' };
+    }
+    if (code === 'ERR_JWT_CLAIM_VALIDATION_FAILED' && (err as { claim?: string }).claim === 'nbf') {
+      return { ok: false, reason: 'future_issued_token' };
+    }
+    return { ok: false, reason: 'invalid_signature' };
+  }
 }
