@@ -314,3 +314,344 @@ describe('validateNonceClaimsAndRole', () => {
     expect(result).toEqual({ ok: false, reason: 'learner_only_role' });
   });
 });
+
+// New imports needed for this block (everything else -- eq, ltiDeployments, getTestDb, resetDb,
+// seedInstitutionAndRegistration, MockCanvasPlatform, createOidcTransaction, JwksCache --
+// reuses imports already added in Tasks 19-22):
+import { appSessions } from '../../src/database/schema.js';
+import { consumeOidcTransaction } from '../../src/lti/oidc-transactions.js';
+import {
+  verifyLaunch,
+  type VerifyLaunchDeps,
+  type VerifyLaunchInput,
+  type LaunchFailureReason,
+} from '../../src/lti/launch.js';
+
+describe('verifyLaunch (full orchestration)', () => {
+  let platform: MockCanvasPlatform;
+  let jwksCache: JwksCache;
+
+  beforeEach(async () => {
+    await resetDb();
+    platform = new MockCanvasPlatform();
+    await platform.start();
+    jwksCache = new JwksCache({ fetchJwks: (uri) => fetch(uri).then((r) => r.json()) });
+  });
+  afterEach(async () => {
+    await platform.stop();
+  });
+
+  async function countSessions(): Promise<number> {
+    const { db } = getTestDb();
+    return (await db.select().from(appSessions)).length;
+  }
+
+  async function setUpValidTransaction(targetLinkUri = 'https://app.test/index.html') {
+    const { db } = getTestDb();
+    const seeded = await seedInstitutionAndRegistration(db, platform);
+    const created = await createOidcTransaction(db, {
+      registrationId: seeded.registrationId,
+      deploymentId: seeded.deploymentId,
+      targetLinkUri,
+      ttlSeconds: 300,
+    });
+    return { seeded, created };
+  }
+
+  function deps(): VerifyLaunchDeps {
+    return { db: getTestDb().db, jwksCache, clockSkewSeconds: 120, sessionTtlHours: 8 };
+  }
+
+  it('§45 case 1: a fully valid launch succeeds and creates exactly one session', async () => {
+    const { created } = await setUpValidTransaction();
+    const idToken = await platform.mintIdToken({ nonce: created.nonce });
+
+    const result = await verifyLaunch({ state: created.state, idToken }, deps());
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.roles).toContain('http://purl.imsglobal.org/vocab/lis/v2/membership#Instructor');
+      expect(result.courseId).toBeTruthy();
+      // The transaction's stored target_link_uri survives out of verifyLaunch so Task 24's route
+      // can redirect to it instead of hardcoding one page (spec §12.1/§14).
+      expect(result.targetLinkUri).toBe('https://app.test/index.html');
+    }
+    expect(await countSessions()).toBe(1);
+  });
+
+  it('returns the transaction\'s own target_link_uri, not a hardcoded default', async () => {
+    const { created } = await setUpValidTransaction('https://app.test/scanner.html');
+    const idToken = await platform.mintIdToken({ nonce: created.nonce });
+
+    const result = await verifyLaunch({ state: created.state, idToken }, deps());
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.targetLinkUri).toBe('https://app.test/scanner.html');
+    }
+  });
+
+  it('§45 case 2: rejects a request missing state or id_token, creating no session', async () => {
+    expect(await verifyLaunch({ state: undefined, idToken: 'anything' }, deps())).toEqual({ ok: false, reason: 'missing_state' });
+    expect(await verifyLaunch({ state: 'anything', idToken: undefined }, deps())).toEqual({ ok: false, reason: 'missing_state' });
+    expect(await countSessions()).toBe(0);
+  });
+
+  it('§45 case 7 (pair replay): a full replay of a captured (state, id_token) pair is rejected on the second attempt, creating no second session', async () => {
+    const { created } = await setUpValidTransaction();
+    const idToken = await platform.mintIdToken({ nonce: created.nonce });
+
+    const first = await verifyLaunch({ state: created.state, idToken }, deps());
+    expect(first.ok).toBe(true);
+
+    const second = await verifyLaunch({ state: created.state, idToken }, deps());
+    expect(second).toEqual({ ok: false, reason: 'reused_state' });
+    expect(await countSessions()).toBe(1); // still just the one session from the first (legitimate) attempt
+  });
+
+  it('§45 case 7 (stale nonce on a fresh state): an old captured nonce paired with a brand-new state is rejected, creating no session', async () => {
+    const { db } = getTestDb();
+    // This is the variant a pair-replay test cannot reach: the attacker starts a *legitimate* new
+    // login (so `state` is fresh and unconsumed) but presents an id_token minted for an earlier
+    // transaction's nonce. state single-use does not catch it; the nonce comparison must.
+    const { seeded, created: stale } = await setUpValidTransaction();
+    const staleNonceToken = await platform.mintIdToken({ nonce: stale.nonce });
+
+    const fresh = await createOidcTransaction(db, {
+      registrationId: seeded.registrationId,
+      deploymentId: seeded.deploymentId,
+      targetLinkUri: 'https://app.test/index.html',
+      ttlSeconds: 300,
+    });
+
+    const result = await verifyLaunch({ state: fresh.state, idToken: staleNonceToken }, deps());
+
+    expect(result).toEqual({ ok: false, reason: 'nonce_mismatch' });
+    expect(await countSessions()).toBe(0);
+  });
+
+  it('every §45 failure case reachable through verifyLaunch rejects end-to-end with the documented reason and creates no session', async () => {
+    // A second platform with its own key material, used only by the invalid_signature scenario.
+    const impostor = new MockCanvasPlatform();
+    await impostor.start();
+
+    try {
+      const scenarios: Array<{
+        name: string;
+        expectedReason: LaunchFailureReason;
+        build: () => Promise<VerifyLaunchInput>;
+      }> = [
+        {
+          name: 'case 3: unknown_state',
+          expectedReason: 'unknown_state',
+          build: async () => ({ state: 'never-issued-state-value', idToken: await platform.mintIdToken() }),
+        },
+        {
+          name: 'case 4: expired_state',
+          expectedReason: 'expired_state',
+          build: async () => {
+            const { db } = getTestDb();
+            const seeded = await seedInstitutionAndRegistration(db, platform);
+            const created = await createOidcTransaction(db, {
+              registrationId: seeded.registrationId,
+              deploymentId: seeded.deploymentId,
+              targetLinkUri: 'https://app.test/index.html',
+              ttlSeconds: -1,
+            });
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce }) };
+          },
+        },
+        {
+          name: 'case 5: reused_state',
+          expectedReason: 'reused_state',
+          build: async () => {
+            const { db } = getTestDb();
+            const { created } = await setUpValidTransaction();
+            const idToken = await platform.mintIdToken({ nonce: created.nonce });
+            await consumeOidcTransaction(db, created.state); // burn it outside verifyLaunch
+            return { state: created.state, idToken };
+          },
+        },
+        {
+          name: 'case 6: nonce_mismatch',
+          expectedReason: 'nonce_mismatch',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: 'not-the-issued-nonce' }) };
+          },
+        },
+        {
+          name: 'case 8: unknown_issuer',
+          expectedReason: 'unknown_issuer',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            // Signed by the registration's real platform key, so the signature check passes and the
+            // iss comparison is genuinely what rejects it.
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce, iss: 'https://evil.test' }) };
+          },
+        },
+        {
+          name: 'case 9: audience_mismatch',
+          expectedReason: 'audience_mismatch',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce, aud: 'someone-else' }) };
+          },
+        },
+        {
+          name: 'case 10: invalid_azp',
+          expectedReason: 'invalid_azp',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return {
+              state: created.state,
+              idToken: await platform.mintIdToken({ nonce: created.nonce, aud: ['mock-client-id', 'another-client'] }),
+            };
+          },
+        },
+        {
+          name: 'case 11: invalid_signature',
+          expectedReason: 'invalid_signature',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            // The impostor publishes its own 'default-kid', so the kid resolves against the real
+            // platform's JWKS and the RSA verification -- not the kid lookup -- is what fails.
+            return { state: created.state, idToken: await impostor.mintIdToken({ nonce: created.nonce }) };
+          },
+        },
+        {
+          name: 'case 13: unknown_kid (still missing after one JWKS refetch)',
+          expectedReason: 'unknown_kid',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            const idToken = await platform.mintIdToken({ nonce: created.nonce });
+            return { state: created.state, idToken: withHeaderKid(idToken, 'never-published') };
+          },
+        },
+        {
+          name: 'case 14: expired_token',
+          expectedReason: 'expired_token',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            const now = Math.floor(Date.now() / 1000);
+            return {
+              state: created.state,
+              idToken: await platform.mintIdToken({ nonce: created.nonce, iat: now - 10000, exp: now - 9000 }),
+            };
+          },
+        },
+        {
+          name: 'case 15: future_issued_token',
+          expectedReason: 'future_issued_token',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            const now = Math.floor(Date.now() / 1000);
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce, iat: now + 10000 }) };
+          },
+        },
+        {
+          name: 'case 16: unsupported_algorithm',
+          expectedReason: 'unsupported_algorithm',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce }, { alg: 'RS384' }) };
+          },
+        },
+        {
+          name: 'case 17a: wrong_deployment (deployment disabled between login and launch)',
+          expectedReason: 'wrong_deployment',
+          build: async () => {
+            const { db } = getTestDb();
+            const { seeded, created } = await setUpValidTransaction();
+            const idToken = await platform.mintIdToken({ nonce: created.nonce });
+            await db.update(ltiDeployments).set({ enabled: false }).where(eq(ltiDeployments.id, seeded.deploymentRowId));
+            return { state: created.state, idToken };
+          },
+        },
+        {
+          name: 'case 17b: wrong_deployment (deployment_id claim does not match the transaction)',
+          expectedReason: 'wrong_deployment',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return {
+              state: created.state,
+              idToken: await platform.mintIdToken({ nonce: created.nonce, deploymentId: 'some-other-deployment' }),
+            };
+          },
+        },
+        {
+          name: 'case 18: wrong_version',
+          expectedReason: 'wrong_version',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce, version: '1.1.0' }) };
+          },
+        },
+        {
+          name: 'case 19: wrong_message_type',
+          expectedReason: 'wrong_message_type',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return {
+              state: created.state,
+              idToken: await platform.mintIdToken({ nonce: created.nonce, messageType: 'LtiDeepLinkingRequest' }),
+            };
+          },
+        },
+        {
+          name: 'case 20: missing_context',
+          expectedReason: 'missing_context',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce, contextId: null }) };
+          },
+        },
+        {
+          name: 'case 21: missing_roles',
+          expectedReason: 'missing_roles',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return { state: created.state, idToken: await platform.mintIdToken({ nonce: created.nonce, roles: null }) };
+          },
+        },
+        {
+          name: 'case 22: learner_only_role',
+          expectedReason: 'learner_only_role',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            return {
+              state: created.state,
+              idToken: await platform.mintIdToken({
+                nonce: created.nonce,
+                roles: ['http://purl.imsglobal.org/vocab/lis/v2/membership#Learner'],
+              }),
+            };
+          },
+        },
+        {
+          name: 'case 23: tampered_token',
+          expectedReason: 'tampered_token',
+          build: async () => {
+            const { created } = await setUpValidTransaction();
+            const idToken = await platform.mintIdToken({ nonce: created.nonce });
+            const [, payloadSegment, signatureSegment] = idToken.split('.');
+            // Same deterministic corruption as Task 20's unit test: a header segment that decodes
+            // to text JSON.parse cannot parse, so decodeProtectedHeader throws reliably.
+            const tamperedHeader = Buffer.from('not valid json').toString('base64url');
+            return { state: created.state, idToken: `${tamperedHeader}.${payloadSegment}.${signatureSegment}` };
+          },
+        },
+      ];
+
+      for (const scenario of scenarios) {
+        await resetDb();
+        const input = await scenario.build();
+        const result = await verifyLaunch(input, deps());
+        expect(result, scenario.name).toEqual({ ok: false, reason: scenario.expectedReason });
+        expect(await countSessions(), scenario.name).toBe(0);
+      }
+    } finally {
+      await impostor.stop();
+    }
+  });
+});

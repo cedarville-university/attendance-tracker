@@ -2,7 +2,8 @@ import { decodeProtectedHeader, jwtVerify, importJWK, type JWTPayload } from 'jo
 import { createHash } from 'node:crypto';
 import type { Database } from '../database/client.js';
 import { consumeOidcTransaction, type ConsumedTransaction } from './oidc-transactions.js';
-import { findRegistrationById, findDeploymentByBusinessId } from './registrations.js';
+import { findRegistrationById, findDeploymentByBusinessId, findOrCreateCourse } from './registrations.js';
+import { createSession, type CreatedSession } from '../auth/session.js';
 import type { LtiRegistration, LtiDeployment } from './types.js';
 import type { JwksCache } from './jwks-cache.js';
 import { validateLtiClaims, type ValidatedLtiClaims } from './claims.js';
@@ -189,4 +190,78 @@ export function validateNonceClaimsAndRole(
   }
 
   return { ok: true, result: { claims, roles } };
+}
+
+export interface VerifyLaunchInput {
+  state: string | undefined;
+  idToken: string | undefined;
+}
+
+export interface VerifyLaunchDeps {
+  db: Database;
+  jwksCache: JwksCache;
+  clockSkewSeconds: number;
+  sessionTtlHours: number;
+}
+
+export type VerifyLaunchResult =
+  | { ok: true; session: CreatedSession; courseId: string; roles: string[]; targetLinkUri: string }
+  | { ok: false; reason: LaunchFailureReason };
+
+export async function verifyLaunch(input: VerifyLaunchInput, deps: VerifyLaunchDeps): Promise<VerifyLaunchResult> {
+  if (!input.state || !input.idToken) {
+    return { ok: false, reason: 'missing_state' };
+  }
+
+  const contextResult = await resolveTransactionContext(deps.db, input.state);
+  if (!contextResult.ok) {
+    return { ok: false, reason: contextResult.reason };
+  }
+  const { transaction, registration, deployment } = contextResult.context;
+
+  const signatureResult = await verifyJwtSignature(input.idToken, registration, deps.jwksCache, deps.clockSkewSeconds);
+  if (!signatureResult.ok) {
+    return { ok: false, reason: signatureResult.reason };
+  }
+
+  const audienceResult = validateAudienceAndLifetime(signatureResult.payload, registration, deps.clockSkewSeconds);
+  if (!audienceResult.ok) {
+    return { ok: false, reason: audienceResult.reason };
+  }
+
+  const claimsRoleResult = validateNonceClaimsAndRole(signatureResult.payload, transaction);
+  if (!claimsRoleResult.ok) {
+    return { ok: false, reason: claimsRoleResult.reason };
+  }
+  const { claims, roles } = claimsRoleResult.result;
+
+  const context = claims['https://purl.imsglobal.org/spec/lti/claim/context'];
+  const course = await findOrCreateCourse(deps.db, {
+    institutionId: registration.institutionId,
+    // `deployment.id` is the lti_deployments ROW UUID, which is what courses.deployment_id FKs to.
+    // Do NOT pass transaction.deploymentId here -- that is Canvas's business deployment ID string.
+    deploymentId: deployment.id,
+    ltiContextId: context.id,
+    label: context.label,
+    title: context.title,
+  });
+
+  const displayName = typeof signatureResult.payload.name === 'string' ? signatureResult.payload.name : null;
+
+  const session = await createSession(deps.db, {
+    institutionId: registration.institutionId,
+    // Row UUID again, for the same reason: app_sessions.deployment_id is a FK to lti_deployments.id.
+    deploymentId: deployment.id,
+    ltiSubject: claims.sub,
+    displayName,
+    courseId: course.id,
+    roles,
+    ttlHours: deps.sessionTtlHours,
+  });
+
+  // The target_link_uri was already validated against the exact-match allowlist at login time
+  // (lti/login.ts) before this transaction row was ever written, and it is read back from that row
+  // rather than from anything in the current request -- so handing it to the route as a redirect
+  // destination introduces no open-redirect surface (spec §12.1, §45 case 24).
+  return { ok: true, session, courseId: course.id, roles, targetLinkUri: transaction.targetLinkUri };
 }
