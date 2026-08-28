@@ -180,3 +180,33 @@ export async function closeAttendanceSession(
     });
   });
 }
+
+export async function reopenAttendanceSession(
+  db: Database,
+  sessionId: string,
+  actorLtiUserId: string,
+  reason?: string,
+  requestId?: string,
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [session] = await tx.select().from(attendanceSessions).where(eq(attendanceSessions.id, sessionId));
+    if (!session) throw new Error(`Attendance session ${sessionId} not found.`);
+    if (session.state !== 'closed') throw new SessionNotClosedError(); // Q7 state guard
+
+    const [course] = await tx.select().from(courses).where(eq(courses.id, session.courseId)); // B5
+
+    await tx.update(attendanceSessions).set({ state: 'reopened', closedAt: null, updatedAt: new Date() }).where(eq(attendanceSessions.id, sessionId));
+
+    await tx.insert(auditEvents).values({
+      institutionId: course.institutionId,
+      courseId: session.courseId,
+      attendanceSessionId: sessionId,
+      actorLtiUserId,
+      eventType: 'attendance_session_reopened',
+      targetType: 'attendance_session',
+      targetId: sessionId,
+      newValue: { reason: reason ?? null },
+      requestId: requestId ?? null,
+    });
+  });
+}

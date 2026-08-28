@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { seedInstitutionAndCourse } from '../support/seed.js';
 import { MockCanvasPlatform } from '../support/mock-canvas.js';
-import { createAttendanceSession, closeAttendanceSession } from '../../src/attendance/session-lifecycle.js';
+import { createAttendanceSession, closeAttendanceSession, reopenAttendanceSession } from '../../src/attendance/session-lifecycle.js';
 import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents } from '../../src/database/schema.js';
 import type { ToolSigningKey } from '../../src/lti/signing-keys.js';
 
@@ -150,5 +150,40 @@ describe('closeAttendanceSession', () => {
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'closed' }).returning();
 
     await expect(closeAttendanceSession(db, session.id, 'instructor-1')).rejects.toMatchObject({ code: 'session_already_closed' });
+  });
+});
+
+describe('reopenAttendanceSession', () => {
+  it('sets state=reopened, clears closedAt, and writes an audit event including reason + requestId', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'closed', closedAt: new Date() }).returning();
+
+    await reopenAttendanceSession(db, session.id, 'instructor-1', 'Student reported a missed scan', 'req-reopen');
+
+    const [reopened] = await db.select().from(attendanceSessions).where(eq(attendanceSessions.id, session.id));
+    expect(reopened.state).toBe('reopened');
+    expect(reopened.closedAt).toBeNull();
+
+    const events = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'attendance_session_reopened'));
+    expect(events).toHaveLength(1);
+    expect(events[0].actorLtiUserId).toBe('instructor-1');
+    expect(events[0].requestId).toBe('req-reopen');
+    expect(events[0].newValue).toMatchObject({ reason: 'Student reported a missed scan' });
+  });
+
+  it('reopened is a scan-accepting state (not closed)', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'closed' }).returning();
+    await reopenAttendanceSession(db, session.id, 'instructor-1');
+
+    const [reopened] = await db.select().from(attendanceSessions).where(eq(attendanceSessions.id, session.id));
+    expect(reopened.state).not.toBe('closed');
+  });
+
+  it('rejects reopening a session that is not closed with a 409-mapped error (state guard, Q7)', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
+
+    await expect(reopenAttendanceSession(db, session.id, 'instructor-1')).rejects.toMatchObject({ code: 'session_not_closed' });
   });
 });
