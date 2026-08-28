@@ -224,6 +224,13 @@ export interface RefreshCourseRosterDeps {
   maxRateLimitRetries?: number;
 }
 
+/**
+ * Fetches and normalizes a course's roster via NRPS (spec §18).
+ *
+ * Never throws on transient Canvas failures (token acquisition, NRPS fetch, rate limiting) —
+ * these are returned as { ok: false, error }. However, failures to persist the successfully-fetched
+ * roster are database/infrastructure errors and will propagate as exceptions (surfaced by the caller as HTTP 500).
+ */
 export async function refreshCourseRoster(
   db: Database,
   courseId: string,
@@ -282,6 +289,7 @@ export async function refreshCourseRoster(
     if (pages.ok) {
       const members = pages.members.map((raw) => normalizeMember(raw, rosterConfig));
       const fetchedAt = new Date().toISOString();
+      // DB persistence failure is deliberate (not a transient Canvas error) and propagates as exception
       await upsertCourseMembers(db, courseId, members);
       return { ok: true, members, fetchedAt };
     }
