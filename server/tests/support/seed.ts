@@ -37,7 +37,9 @@ export async function seedInstitutionAndRegistration(
       issuer: platform.issuer,
       clientId,
       oidcAuthEndpoint: 'https://mock-canvas.test/api/lti/authorize_redirect',
-      tokenEndpoint: 'https://mock-canvas.test/login/oauth2/token',
+      // Point at the live mock so tests that actually acquire a client-credentials token
+      // (refreshCourseRoster) reach it -- mirrors platformJwksUri already using the live port.
+      tokenEndpoint: platform.tokenUrl,
       tokenAudience: 'https://mock-canvas.test/login/oauth2/token',
       platformJwksUri: platform.jwksUri,
       enabled: true,

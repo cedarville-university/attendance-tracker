@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { fetchRawMembershipPages } from '../../src/lti/nrps.js';
 import { MockCanvasPlatform } from '../support/mock-canvas.js';
 
@@ -151,5 +151,113 @@ describe('normalizeMember', () => {
     expect(a.institutionalId).toBe('DUP1');
     expect(b.institutionalId).toBe('DUP1');
     expect(a.ltiUserId).not.toBe(b.ltiUserId);
+  });
+});
+
+import { refreshCourseRoster } from '../../src/lti/nrps.js';
+import { eq } from 'drizzle-orm';
+import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
+import { seedInstitutionAndCourse } from '../support/seed.js';
+import { loadSigningKeysFromEnv, getActiveSigningKey, type ToolSigningKey } from '../../src/lti/signing-keys.js';
+import { courseMembers } from '../../src/database/schema.js';
+
+// This file already has a MockCanvasPlatform in an outer describe; the refresh suite uses its own so
+// the two lifecycles stay independent. Close the shared pg pool once, at file scope.
+afterAll(async () => {
+  await closeTestDb();
+});
+
+describe('refreshCourseRoster', () => {
+  let platform: MockCanvasPlatform;
+  let signingKey: ToolSigningKey;
+
+  beforeAll(async () => {
+    platform = new MockCanvasPlatform();
+    await platform.start();
+    // Exercises the REAL getActiveSigningKey(keys) -- synchronous, takes the loaded array.
+    signingKey = getActiveSigningKey(await loadSigningKeysFromEnv(undefined));
+  });
+  afterAll(async () => {
+    await platform.stop();
+  });
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  it('fetches, normalizes, and persists the roster (mock serves plain http)', async () => {
+    const { db } = getTestDb();
+    const { courseId } = await seedInstitutionAndCourse(db, platform, { nrpsUrl: platform.nrpsUrlFor('course-a') });
+    platform.setCourseMembers('course-a', [
+      { user_id: 'u1', status: 'Active', roles: ['http://purl.imsglobal.org/vocab/lis/v2/membership#Learner'], lis_person_sourcedid: '001' },
+    ]);
+    platform.setPageSize(1);
+
+    const result = await refreshCourseRoster(db, courseId, { signingKey, sleepImpl: async () => {} });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.members).toHaveLength(1);
+      expect(result.members[0].institutionalId).toBe('001');
+    }
+    expect(await db.select().from(courseMembers).where(eq(courseMembers.courseId, courseId))).toHaveLength(1);
+  });
+
+  it('retries once after clearing the token cache on an expired token, then succeeds', async () => {
+    const { db } = getTestDb();
+    const { courseId } = await seedInstitutionAndCourse(db, platform, { nrpsUrl: platform.nrpsUrlFor('course-b') });
+    platform.setCourseMembers('course-b', [{ user_id: 'u1', status: 'Active', roles: [] }]);
+
+    const first = await refreshCourseRoster(db, courseId, { signingKey, sleepImpl: async () => {} });
+    expect(first.ok).toBe(true);
+
+    // Capture the token our cache is now holding via a spying fetchImpl, expire exactly that token on
+    // the mock, then refresh again -- refreshCourseRoster clears its cache on the 401 and re-auths.
+    let captured: string | undefined;
+    const spyFetch: typeof fetch = async (input, init) => {
+      const auth = new Headers(init?.headers).get('authorization');
+      if (auth?.startsWith('Bearer ') && typeof input === 'string' && input.includes('/nrps/')) {
+        captured = auth.slice('Bearer '.length);
+      }
+      return fetch(input as string, init);
+    };
+    await refreshCourseRoster(db, courseId, { signingKey, fetchImpl: spyFetch, sleepImpl: async () => {} });
+    expect(captured).toBeDefined();
+
+    platform.expireAccessToken(captured!);
+    const retried = await refreshCourseRoster(db, courseId, { signingKey, sleepImpl: async () => {} });
+    expect(retried.ok).toBe(true);
+  });
+
+  it('retries after a 429, honoring Retry-After, then succeeds', async () => {
+    const { db } = getTestDb();
+    const { courseId } = await seedInstitutionAndCourse(db, platform, { nrpsUrl: platform.nrpsUrlFor('course-c') });
+    platform.setCourseMembers('course-c', [{ user_id: 'u1', status: 'Active', roles: [] }]);
+    platform.rateLimitNextRequest('course-c');
+
+    const result = await refreshCourseRoster(db, courseId, { signingKey, sleepImpl: async () => {} });
+    expect(result.ok).toBe(true);
+  });
+
+  it('fails with invalid-service-url when the course has no nrpsUrl', async () => {
+    const { db } = getTestDb();
+    const { courseId } = await seedInstitutionAndCourse(db, platform, { nrpsUrl: null });
+
+    const result = await refreshCourseRoster(db, courseId, { signingKey, sleepImpl: async () => {} });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe('invalid-service-url');
+  });
+
+  it('returns a non-throwing network error when token acquisition fails', async () => {
+    const { db } = getTestDb();
+    const { courseId } = await seedInstitutionAndCourse(db, platform, { nrpsUrl: platform.nrpsUrlFor('course-d') });
+    const deadFetch: typeof fetch = async () => {
+      throw new Error('connect ECONNREFUSED');
+    };
+    const result = await refreshCourseRoster(db, courseId, { signingKey, fetchImpl: deadFetch, sleepImpl: async () => {} });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe('network');
+      expect(result.error.retryable).toBe(true);
+    }
   });
 });
