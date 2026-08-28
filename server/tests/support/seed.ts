@@ -61,7 +61,7 @@ export interface SeededCourse extends SeededRegistration {
 export async function seedInstitutionAndCourse(
   db: Database,
   platform: MockCanvasPlatform,
-  overrides: SeedOverrides & { nrpsUrl?: string | null } = {},
+  overrides: SeedOverrides & { nrpsUrl?: string | null; agsLineitemsUrl?: string | null } = {},
 ): Promise<SeededCourse> {
   const seeded = await seedInstitutionAndRegistration(db, platform, overrides);
   const [course] = await db
@@ -73,6 +73,7 @@ export async function seedInstitutionAndCourse(
       label: 'TEST-101',
       title: 'Test Course',
       nrpsUrl: overrides.nrpsUrl ?? null,
+      agsLineitemsUrl: overrides.agsLineitemsUrl ?? null,
     })
     .returning();
   return { ...seeded, courseId: course.id };

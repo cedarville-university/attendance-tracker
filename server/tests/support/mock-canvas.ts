@@ -1,5 +1,5 @@
 import fastifyFormbody from '@fastify/formbody';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { SignJWT, generateKeyPair, exportJWK } from 'jose';
 import { randomUUID } from 'node:crypto';
 import type { NrpsRawMember } from '../../src/lti/roster-config.js';
@@ -46,9 +46,98 @@ export class MockCanvasPlatform {
   private breakNextPage = new Set<string>();
   private nrpsPageSize = 50;
 
+  // --- Phase 6: AGS line items + scores ---
+  private lineItems = new Map<string, Array<{ id: string; scoreMaximum: number; label: string; resourceId: string; tag: string }>>();
+  private lineItemScores = new Map<string, Array<Record<string, unknown>>>(); // keyed by lineItemId (trailing segment)
+  private agsFailOnce: 'rate-limited' | 'server-error' | 'client-error' | 'auth' | null = null;
+  // Score-route-only one-shot, so a worker test can fail the score POST without failing
+  // ensureLineItem's GET/POST in the same pass.
+  private agsScoreFailOnce: 'rate-limited' | 'server-error' | 'client-error' | null = null;
+
   constructor() {
     this.app = Fastify({ logger: false });
     this.app.register(fastifyFormbody);
+
+    // Canvas AGS requires vendor content types Fastify's default JSON parser ignores.
+    this.app.addContentTypeParser(
+      ['application/vnd.ims.lis.v2.lineitem+json', 'application/vnd.ims.lis.v1.score+json'],
+      { parseAs: 'string' },
+      (_req, body, done) => {
+        try {
+          done(null, body ? JSON.parse(body as string) : {});
+        } catch (err) {
+          done(err as Error);
+        }
+      },
+    );
+
+    const agsAuthOk = (request: FastifyRequest): boolean => {
+      const auth = request.headers.authorization ?? '';
+      const token = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : '';
+      return this.issuedTokens.has(token) && !this.expiredTokens.has(token);
+    };
+    // Returns a reply if a one-shot failure is armed; caller returns it. Consumes the injection.
+    const consumeAgsFailure = (reply: FastifyReply): FastifyReply | null => {
+      const kind = this.agsFailOnce;
+      if (!kind) return null;
+      this.agsFailOnce = null;
+      if (kind === 'rate-limited') {
+        reply.header('retry-after', '1');
+        return reply.code(429).send({ error: 'rate_limited' });
+      }
+      if (kind === 'server-error') return reply.code(500).send({ error: 'server_error' });
+      if (kind === 'auth') return reply.code(401).send({ error: 'invalid_token' }); // one-shot revoked-token 401
+      return reply.code(422).send({ error: 'unprocessable', errors: ['mock one-shot client error'] });
+    };
+
+    this.app.get('/ags/:courseId/lineitems', async (request, reply) => {
+      if (!agsAuthOk(request)) return reply.code(401).send({ error: 'invalid_token' });
+      const failure = consumeAgsFailure(reply);
+      if (failure) return failure;
+      const { courseId } = request.params as { courseId: string };
+      const query = request.query as { tag?: string; resource_id?: string };
+      let items = this.lineItems.get(courseId) ?? [];
+      if (query.tag !== undefined) items = items.filter((li) => li.tag === query.tag);
+      if (query.resource_id !== undefined) items = items.filter((li) => li.resourceId === query.resource_id);
+      return items;
+    });
+
+    this.app.post('/ags/:courseId/lineitems', async (request, reply) => {
+      if (!agsAuthOk(request)) return reply.code(401).send({ error: 'invalid_token' });
+      const failure = consumeAgsFailure(reply);
+      if (failure) return failure;
+      const { courseId } = request.params as { courseId: string };
+      const body = (request.body ?? {}) as Record<string, unknown>;
+      const created = this.createLineItem(courseId, {
+        scoreMaximum: typeof body.scoreMaximum === 'number' ? body.scoreMaximum : 100,
+        label: typeof body.label === 'string' ? body.label : 'Attendance',
+        resourceId: typeof body.resourceId === 'string' ? body.resourceId : 'attendance-cumulative-v1',
+        tag: typeof body.tag === 'string' ? body.tag : 'attendance',
+      });
+      return created;
+    });
+
+    this.app.post('/ags/lineitems/:lineItemId/scores', async (request, reply) => {
+      if (!agsAuthOk(request)) return reply.code(401).send({ error: 'invalid_token' });
+      // Score-only one-shot first, so failNextScorePost never eats a line-items request.
+      if (this.agsScoreFailOnce) {
+        const scoreKind = this.agsScoreFailOnce;
+        this.agsScoreFailOnce = null;
+        if (scoreKind === 'rate-limited') {
+          reply.header('retry-after', '1');
+          return reply.code(429).send({ error: 'rate_limited' });
+        }
+        if (scoreKind === 'server-error') return reply.code(500).send({ error: 'server_error' });
+        return reply.code(422).send({ error: 'unprocessable' });
+      }
+      const failure = consumeAgsFailure(reply);
+      if (failure) return failure;
+      const { lineItemId } = request.params as { lineItemId: string };
+      if (!this.lineItemScores.has(lineItemId)) return reply.code(404).send({ error: 'unknown_line_item' });
+      this.lineItemScores.get(lineItemId)!.push((request.body ?? {}) as Record<string, unknown>);
+      return reply.code(200).send({ resultUrl: `${this.baseUrl}/ags/lineitems/${lineItemId}/results/mock` });
+    });
+
     this.app.get('/jwks', async () => ({ keys: [...this.keys.values()].map((k) => k.publicJwk) }));
 
     this.app.post('/login/oauth2/token', async (request, reply) => {
@@ -189,6 +278,61 @@ export class MockCanvasPlatform {
 
   nrpsUrlFor(courseId: string): string {
     return `${this.baseUrl}/nrps/${courseId}/members`;
+  }
+
+  lineItemsUrlFor(courseId: string): string {
+    return `${this.baseUrl}/ags/${courseId}/lineitems`;
+  }
+
+  private createLineItem(
+    courseId: string,
+    fields: { scoreMaximum: number; label: string; resourceId: string; tag: string },
+  ): { id: string; scoreMaximum: number; label: string; resourceId: string; tag: string } {
+    const lineItemId = randomUUID();
+    const id = `${this.baseUrl}/ags/lineitems/${lineItemId}`;
+    const record = { id, ...fields };
+    const list = this.lineItems.get(courseId) ?? [];
+    list.push(record);
+    this.lineItems.set(courseId, list);
+    this.lineItemScores.set(lineItemId, []);
+    return record;
+  }
+
+  /** Pre-create a line item (bypasses the create route) so a reuse path can be exercised. */
+  seedExistingLineItem(
+    courseId: string,
+    overrides: Partial<{ scoreMaximum: number; label: string; resourceId: string; tag: string }> = {},
+  ): string {
+    return this.createLineItem(courseId, {
+      scoreMaximum: overrides.scoreMaximum ?? 100,
+      label: overrides.label ?? 'Attendance',
+      resourceId: overrides.resourceId ?? 'attendance-cumulative-v1',
+      tag: overrides.tag ?? 'attendance',
+    }).id;
+  }
+
+  /**
+   * Arm a one-shot failure for the NEXT AGS request of any kind. `'auth'` -> a 401 `invalid_token`
+   * (a revoked/rotated token), which grade-worker.ts handles by clearing the token cache and
+   * re-minting once.
+   */
+  failNextAgsRequest(kind: 'rate-limited' | 'server-error' | 'client-error' | 'auth'): void {
+    this.agsFailOnce = kind;
+  }
+
+  /** Arm a one-shot failure for the NEXT score POST only, leaving line-item GET/POST untouched. */
+  failNextScorePost(kind: 'rate-limited' | 'server-error' | 'client-error'): void {
+    this.agsScoreFailOnce = kind;
+  }
+
+  getLineItems(courseId: string): ReadonlyArray<{ id: string; scoreMaximum: number; label: string; resourceId: string; tag: string }> {
+    return this.lineItems.get(courseId) ?? [];
+  }
+
+  /** Every score posted to any line item of this course, oldest first. */
+  getPostedScores(courseId: string): Array<Record<string, unknown>> {
+    const ids = (this.lineItems.get(courseId) ?? []).map((li) => li.id.split('/').pop()!);
+    return ids.flatMap((id) => this.lineItemScores.get(id) ?? []);
   }
 
   setCourseMembers(courseId: string, members: NrpsRawMember[]): void {
