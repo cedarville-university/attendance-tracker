@@ -12,12 +12,21 @@ import * as diagnostics from './diagnostics.js';
 import { HidReader, isWebHidSupported, isSecureContext } from './hid-reader.js';
 import { loadRosterCsv, buildRosterIndex, normalizeId } from './roster.js';
 import { ScanPipeline } from './scan-pipeline.js';
-import { downloadAttendanceCsv } from './csv.js';
+import { downloadAttendanceCsv, downloadCsvText } from './csv.js';
 import { computeAbsentRows } from './absentees.js';
 import * as storage from './storage.js';
 import * as ui from './ui.js';
 import { bootstrapSession } from './api-client.js';
-import { createAttendanceSession, closeAttendanceSession, reopenAttendanceSession } from './attendance-session.js';
+import {
+  createAttendanceSession,
+  closeAttendanceSession,
+  reopenAttendanceSession,
+  getAttendanceSession,
+  listOpenAttendanceSessions,
+  deleteAttendanceRecord,
+  correctMemberStatus,
+  fetchAttendanceCsv,
+} from './attendance-session.js';
 
 const { elements } = ui;
 
@@ -38,9 +47,31 @@ const rosterState = {
 
 // ---- Scan pipeline ----------------------------------------------------------
 
-function handleRemoveRecord(id) {
-  scanPipeline.removeRecord(id);
-  ui.removeAttendanceRow(id);
+// Rows added by a session resume (C1) are not tracked by scanPipeline; keep a
+// side map so their DELETE call can find the server ids.
+const resumedRowsById = new Map();
+
+async function handleRemoveRecord(recordOrId) {
+  // ui.js now passes the full record; tolerate a bare id for safety.
+  const record =
+    typeof recordOrId === 'string'
+      ? scanPipeline.getRecords().find((r) => r.id === recordOrId) || resumedRowsById.get(recordOrId) || { id: recordOrId }
+      : recordOrId;
+
+  // Server-authoritative deletion is only possible for a rostered row (the
+  // DELETE route is member-scoped). Unexpected / lookup-error rows fall back to
+  // a client-only removal.
+  if (currentAttendanceSessionId && record.serverRecordId && record.ltiUserId) {
+    const result = await deleteAttendanceRecord(currentAttendanceSessionId, record.ltiUserId, record.serverRecordId);
+    if (!result.ok) {
+      ui.showAppMessage('error', `Could not remove the record: ${result.error.message}`);
+      return; // keep the row
+    }
+  }
+
+  scanPipeline.removeRecord(record.id);
+  resumedRowsById.delete(record.id);
+  ui.removeAttendanceRow(record.id);
   schedulePersist();
 }
 
@@ -314,7 +345,20 @@ elements.rosterEnableToggle.addEventListener('change', () => {
 
 // ---- Attendance table / export -------------------------------------------------
 
-elements.downloadCsvBtn.addEventListener('click', () => {
+elements.downloadCsvBtn.addEventListener('click', async () => {
+  // With a persisted session active, the server holds the authoritative record
+  // (roster snapshot, system_absence rows, manual corrections). Download that.
+  if (currentAttendanceSessionId) {
+    const result = await fetchAttendanceCsv(currentAttendanceSessionId);
+    if (!result.ok) {
+      ui.showAppMessage('error', `CSV export failed: ${result.error.message}`);
+      return;
+    }
+    const dl = downloadCsvText(result.csv, result.filename);
+    if (!dl.ok) ui.showAppMessage('error', `CSV export failed: ${dl.error}`);
+    return;
+  }
+
   const rosterActive = rosterState.enabled && rosterState.index.size > 0;
   const mode = rosterActive ? elements.exportModeSelect.value : 'present';
   const presentRecords = scanPipeline.getRecords();
@@ -425,6 +469,9 @@ diagnostics.setListener((event) => {
 
 function buildPersistState() {
   return {
+    // Fast-path hint only; the server's open-session list is the source of truth
+    // on reload (a persisted id the server no longer reports open is discarded).
+    currentAttendanceSessionId,
     attendanceRecords: scanPipeline.getRecords(),
     duplicateCounters: scanPipeline.getDuplicateCounters(),
     roster: {
@@ -521,6 +568,78 @@ function initPreferencesDefaults() {
   }
 }
 
+// C2: per-row manual-correction control -> PATCH the member. Returns true on
+// success so ui.js can re-render that row's status badge.
+ui.setManualCorrectionHandler(async (record, status) => {
+  if (!currentAttendanceSessionId || !record.ltiUserId) return false;
+  const result = await correctMemberStatus(currentAttendanceSessionId, record.ltiUserId, status);
+  if (!result.ok) {
+    ui.showAppMessage('error', `Could not update attendance: ${result.error.message}`);
+    return false;
+  }
+  record.status = status;
+  ui.showAppMessage('info', 'Attendance updated.');
+  return true;
+});
+
+/**
+ * Maps a server current-record / unmatched-record into the row-model shape the
+ * attendance table + handleRemoveRecord expect.
+ */
+function serverRecordToRow(serverRecord, member) {
+  return {
+    id: `resume-${serverRecord.id}`,
+    serverRecordId: serverRecord.id,
+    timestamp: serverRecord.scannedAt || '',
+    rawCardCode: '',
+    institutionalId: (member && member.institutionalId) || serverRecord.institutionalId || null,
+    ltiUserId: (member && member.ltiUserId) || null,
+    displayName: (member && member.displayName) || null,
+    clientScanId: null,
+    status: serverRecord.status,
+  };
+}
+
+async function resumeOpenSessionIfAny() {
+  const list = await listOpenAttendanceSessions();
+  if (!list.ok) {
+    diagnostics.logEvent('error', { kind: 'resume-list-failed', message: list.error.message });
+    return;
+  }
+  if (list.sessions.length === 0) return; // no open session; normal first-run path
+
+  const hintId = storage.loadSession()?.currentAttendanceSessionId || null;
+  const chosen = list.sessions.find((s) => s.id === hintId) || list.sessions[0];
+
+  currentAttendanceSessionId = chosen.id;
+  scanPipeline.sessionId = chosen.id;
+
+  const detail = await getAttendanceSession(chosen.id);
+  if (detail.ok) {
+    resumedRowsById.clear();
+    ui.clearAttendanceTable();
+    const rows = [];
+    for (const member of detail.body.members || []) {
+      if (member.currentRecord) rows.push(serverRecordToRow(member.currentRecord, member));
+    }
+    for (const unmatched of detail.body.unmatchedRecords || []) {
+      rows.push(serverRecordToRow(unmatched, null));
+    }
+    // Oldest first so addAttendanceRow's newest-on-top insert leaves the table
+    // in a sensible order.
+    rows.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
+    for (const row of rows) {
+      resumedRowsById.set(row.id, row);
+      ui.addAttendanceRow(row, handleRemoveRecord);
+    }
+  } else {
+    ui.showAppMessage('warning', 'Reconnected to the open attendance session, but its current roster could not be loaded.');
+  }
+
+  ui.renderSessionState({ state: chosen.state, label: chosen.label });
+  ui.showAppMessage('info', 'Reconnected to the attendance session already in progress.');
+}
+
 async function init() {
   initDiagnosticsSupportInfo();
   initPreferencesDefaults();
@@ -537,6 +656,11 @@ async function init() {
     // renderSessionState({state:'none'}) enables the Start button; re-disable
     // it here so no mutation goes out without a CSRF token.
     elements.startSessionBtn.disabled = true;
+  } else {
+    // C1: resume an attendance session that is still open on the server (page
+    // reload / Canvas re-launch) instead of silently dropping every scan or
+    // creating a duplicate open session.
+    await resumeOpenSessionIfAny();
   }
 
   if (storage.hasSavedSession()) {

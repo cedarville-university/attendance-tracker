@@ -59,6 +59,7 @@ function successResult(overrides = {}) {
     attendanceSessionId: TEST_SESSION_ID,
     ltiUserId: 'user-1',
     institutionalId: '1000000',
+    displayName: 'Jane Smith',
     status: 'present',
     lookupErrorKind: null,
     scannedAt: new Date().toISOString(),
@@ -136,6 +137,10 @@ describe('ScanPipeline', () => {
     const updated = callbacks.onRecordUpdated.mock.calls.at(-1)[0];
     expect(updated.status).toBe('present');
     expect(updated.institutionalId).toBe('1000000');
+    // B2: the record carries the roster displayName + server ids from the response.
+    expect(updated.displayName).toBe('Jane Smith');
+    expect(updated.ltiUserId).toBe('user-1');
+    expect(updated.serverRecordId).toBe('record-1');
     expect(pipeline.getStats().totalAccepted).toBe(1);
   });
 

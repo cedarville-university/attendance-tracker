@@ -2,7 +2,16 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 vi.mock('../api-client.js', () => ({ apiFetch: vi.fn() }));
 import { apiFetch } from '../api-client.js';
-import { createAttendanceSession, closeAttendanceSession, reopenAttendanceSession, getAttendanceSession } from '../attendance-session.js';
+import {
+  createAttendanceSession,
+  closeAttendanceSession,
+  reopenAttendanceSession,
+  getAttendanceSession,
+  listOpenAttendanceSessions,
+  deleteAttendanceRecord,
+  correctMemberStatus,
+  fetchAttendanceCsv,
+} from '../attendance-session.js';
 
 beforeEach(() => {
   vi.mocked(apiFetch).mockReset();
@@ -52,5 +61,52 @@ describe('attendance-session.js', () => {
     expect(apiFetch).toHaveBeenCalledWith('/api/attendance-sessions/session-1');
     expect(result.ok).toBe(true);
     expect(result.body.session.id).toBe('session-1');
+  });
+
+  it('listOpenAttendanceSessions GETs the list endpoint and returns the sessions array', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ sessions: [{ id: 's1', state: 'open' }] }) });
+    const result = await listOpenAttendanceSessions();
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance-sessions?state=open');
+    expect(result).toEqual({ ok: true, sessions: [{ id: 's1', state: 'open' }] });
+  });
+
+  it('listOpenAttendanceSessions normalizes a network failure and a missing sessions key', async () => {
+    vi.mocked(apiFetch).mockRejectedValueOnce(new Error('offline'));
+    const err = await listOpenAttendanceSessions();
+    expect(err.ok).toBe(false);
+    expect(err.error.kind).toBe('network');
+
+    vi.mocked(apiFetch).mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    const empty = await listOpenAttendanceSessions();
+    expect(empty).toEqual({ ok: true, sessions: [] });
+  });
+
+  it('deleteAttendanceRecord DELETEs the nested record path', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 204, json: () => Promise.reject(new Error('no body')) });
+    const result = await deleteAttendanceRecord('s1', 'user-1', 'rec-9');
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance-sessions/s1/members/user-1/records/rec-9', expect.objectContaining({ method: 'DELETE' }));
+    expect(result.ok).toBe(true);
+  });
+
+  it('correctMemberStatus PATCHes the member with the new status and returns the record', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ id: 'rec-10', status: 'excused' }) });
+    const result = await correctMemberStatus('s1', 'user-1', 'excused');
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance-sessions/s1/members/user-1', expect.objectContaining({ method: 'PATCH', body: { status: 'excused' } }));
+    expect(result).toEqual({ ok: true, record: { id: 'rec-10', status: 'excused' } });
+  });
+
+  it('fetchAttendanceCsv GETs export.csv and returns the raw text', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 200, text: () => Promise.resolve('a,b\r\n1,2') });
+    const result = await fetchAttendanceCsv('s1');
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance-sessions/s1/export.csv');
+    expect(result.ok).toBe(true);
+    expect(result.csv).toBe('a,b\r\n1,2');
+  });
+
+  it('fetchAttendanceCsv normalizes a non-2xx response', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: false, status: 404, text: () => Promise.resolve('') });
+    const result = await fetchAttendanceCsv('s1');
+    expect(result.ok).toBe(false);
+    expect(result.error.kind).toBe('http-status');
   });
 });

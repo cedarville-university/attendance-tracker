@@ -30,7 +30,7 @@ import { apiFetch } from './api-client.js';
  * @param {string} sessionId
  * @param {string} clientScanId
  * @param {string} cardCode
- * @returns {Promise<{status: string, ltiUserId: string|null, institutionalId: string|null, lookupErrorKind: string|null, scannedAt: string}>}
+ * @returns {Promise<{id: string|null, status: string, ltiUserId: string|null, institutionalId: string|null, displayName: string|null, lookupErrorKind: string|null, scannedAt: string}>}
  */
 async function submitScan(sessionId, clientScanId, cardCode) {
   logEvent('lookup-request', { cardCode });
@@ -61,26 +61,29 @@ async function performSubmit(sessionId, clientScanId, cardCode) {
       body: { clientScanId, cardCode, scannedAt: new Date().toISOString() },
     });
   } catch {
-    return { status: 'lookup_error', ltiUserId: null, institutionalId: null, lookupErrorKind: 'network', scannedAt: new Date().toISOString() };
+    return { id: null, status: 'lookup_error', ltiUserId: null, institutionalId: null, displayName: null, lookupErrorKind: 'network', scannedAt: new Date().toISOString() };
   }
 
   if (!response.ok) {
-    return { status: 'lookup_error', ltiUserId: null, institutionalId: null, lookupErrorKind: 'http-status', scannedAt: new Date().toISOString() };
+    return { id: null, status: 'lookup_error', ltiUserId: null, institutionalId: null, displayName: null, lookupErrorKind: 'http-status', scannedAt: new Date().toISOString() };
   }
 
   try {
     return await response.json();
   } catch {
-    return { status: 'lookup_error', ltiUserId: null, institutionalId: null, lookupErrorKind: 'bad-json', scannedAt: new Date().toISOString() };
+    return { id: null, status: 'lookup_error', ltiUserId: null, institutionalId: null, displayName: null, lookupErrorKind: 'bad-json', scannedAt: new Date().toISOString() };
   }
 }
 
 /**
  * @typedef {Object} ScanRecord
- * @property {string} id
+ * @property {string} id - client-local row id (`scan-N`)
+ * @property {string|null} serverRecordId - the server's attendance_records.id, once resolved (needed to DELETE the row)
  * @property {string} timestamp - ISO 8601.
  * @property {string} rawCardCode
  * @property {string|null} institutionalId
+ * @property {string|null} ltiUserId - set from the server response; null for unexpected / lookup_error
+ * @property {string|null} displayName - roster-snapshot name from the server; null when there is no roster match
  * @property {string|null} clientScanId
  * @property {'pending'|'present'|'unexpected'|'lookup_error'} status
  */
@@ -174,9 +177,12 @@ export class ScanPipeline {
     /** @type {ScanRecord} */
     const record = {
       id: `scan-${this.nextId++}`,
+      serverRecordId: null,
       timestamp: new Date().toISOString(),
       rawCardCode: cardCode,
       institutionalId: null,
+      ltiUserId: null,
+      displayName: null,
       clientScanId: crypto.randomUUID(),
       status: 'pending',
     };
@@ -213,6 +219,9 @@ export class ScanPipeline {
     this._decrementStatsForRecord(record);
 
     record.institutionalId = null;
+    record.ltiUserId = null;
+    record.displayName = null;
+    record.serverRecordId = null;
     record.status = 'pending';
 
     this.callbacks.onRecordUpdated(record);
@@ -231,6 +240,9 @@ export class ScanPipeline {
     if (!record) return;
 
     record.institutionalId = result.institutionalId;
+    record.ltiUserId = result.ltiUserId ?? null;
+    record.displayName = result.displayName ?? null;
+    record.serverRecordId = result.id ?? null;
     record.status = result.status;
 
     if (result.status === 'lookup_error') {

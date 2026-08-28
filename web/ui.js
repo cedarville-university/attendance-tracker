@@ -183,8 +183,10 @@ const LATEST_SCAN_STATUS_TEXT = {
 };
 
 function studentDisplayName(record) {
-  const parts = [record.lookupData?.firstName, record.lookupData?.lastName].filter(Boolean);
-  return parts.length ? parts.join(' ') : null;
+  // Phase 5: the name comes from the roster snapshot via the server response
+  // (scan-pipeline.js threads it onto the record). There is no client-side
+  // lookupData any more.
+  return record.displayName || null;
 }
 
 function applyLatestScanState(state, record) {
@@ -233,7 +235,69 @@ const STATUS_LABELS = {
   present: 'Present',
   unexpected: 'Unexpected',
   lookup_error: 'Lookup error',
+  absent: 'Absent',
+  excused: 'Excused',
+  not_recorded: 'Not recorded',
 };
+
+// C2: set once from app.js. Given a row's record + a chosen status, performs the
+// PATCH and resolves to true on success. When null (standalone / no session) no
+// per-row correction control is rendered.
+let manualCorrectionHandler = null;
+/** @param {((record: object, status: string) => Promise<boolean>)|null} fn */
+export function setManualCorrectionHandler(fn) {
+  manualCorrectionHandler = fn;
+}
+
+const CORRECTION_OPTIONS = [
+  ['', 'Correct…'],
+  ['present', 'Present'],
+  ['absent', 'Absent'],
+  ['excused', 'Excused'],
+];
+
+function renderStatusBadge(row, state) {
+  const badge = row.querySelector('.status-badge');
+  badge.textContent = STATUS_LABELS[state] || state;
+  badge.className = `status-badge status-badge--${state}`;
+}
+
+function ensureCorrectionControl(row, record) {
+  const actions = row.querySelector('.col-actions');
+  if (!actions) return;
+  let select = actions.querySelector('.correct-status-select');
+  const eligible = manualCorrectionHandler && record.ltiUserId;
+
+  if (!eligible) {
+    if (select) select.remove();
+    return;
+  }
+  if (select) return;
+
+  select = document.createElement('select');
+  select.className = 'correct-status-select';
+  select.setAttribute('aria-label', 'Correct attendance status');
+  for (const [value, label] of CORRECTION_OPTIONS) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    select.appendChild(option);
+  }
+  select.addEventListener('change', async () => {
+    const status = select.value;
+    if (!status) return;
+    select.disabled = true;
+    let ok = false;
+    try {
+      ok = await manualCorrectionHandler(record, status);
+    } finally {
+      select.disabled = false;
+      select.value = '';
+    }
+    if (ok) renderStatusBadge(row, status);
+  });
+  actions.appendChild(select);
+}
 
 function fillAttendanceRow(row, record) {
   row.querySelector('.col-time').textContent = formatLocalTime(record.timestamp);
@@ -241,10 +305,8 @@ function fillAttendanceRow(row, record) {
   row.querySelector('.col-university-id').textContent = record.institutionalId || '—';
   const name = studentDisplayName(record);
   row.querySelector('.col-name').textContent = name || (record.status === 'pending' ? 'Looking up…' : '—');
-  const badge = row.querySelector('.status-badge');
-  const state = record.status || 'pending';
-  badge.textContent = STATUS_LABELS[state] || state;
-  badge.className = `status-badge status-badge--${state}`;
+  renderStatusBadge(row, record.status || 'pending');
+  ensureCorrectionControl(row, record);
 }
 
 function updateEmptyMessage() {
@@ -254,14 +316,14 @@ function updateEmptyMessage() {
 /**
  * Adds a new row to the top of the table (newest-first display order).
  * @param {object} record
- * @param {(id: string) => void} onRemove
+ * @param {(record: object) => void} onRemove - receives the full record (needs its server id / ltiUserId for the DELETE call)
  */
 export function addAttendanceRow(record, onRemove) {
   const fragment = elements.attendanceRowTemplate.content.cloneNode(true);
   const row = fragment.querySelector('tr');
   row.dataset.scanId = record.id;
   fillAttendanceRow(row, record);
-  row.querySelector('.remove-row-button').addEventListener('click', () => onRemove(record.id));
+  row.querySelector('.remove-row-button').addEventListener('click', () => onRemove(record));
   elements.attendanceTableBody.insertBefore(row, elements.attendanceTableBody.firstChild);
   updateEmptyMessage();
 }

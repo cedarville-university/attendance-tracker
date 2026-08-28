@@ -76,3 +76,77 @@ export async function reopenAttendanceSession(sessionId, reason) {
 export async function getAttendanceSession(sessionId) {
   return request(`/api/attendance-sessions/${sessionId}`);
 }
+
+/**
+ * Lists this course's still-open (open | reopened) attendance sessions so the
+ * client can resume after a page reload / Canvas re-launch (C1). Never throws.
+ * @returns {Promise<{ok: true, sessions: object[]}|{ok: false, error: {kind: string, message: string}}>}
+ */
+export async function listOpenAttendanceSessions() {
+  const result = await request('/api/attendance-sessions?state=open');
+  if (!result.ok) return result;
+  return { ok: true, sessions: Array.isArray(result.body?.sessions) ? result.body.sessions : [] };
+}
+
+/**
+ * Deletes a single (mis-scanned) attendance record on the server (C2). Never throws.
+ * @param {string} sessionId
+ * @param {string} ltiUserId
+ * @param {string} recordId
+ * @returns {Promise<{ok: true}|{ok: false, error: {kind: string, message: string}}>}
+ */
+export async function deleteAttendanceRecord(sessionId, ltiUserId, recordId) {
+  const url = `/api/attendance-sessions/${sessionId}/members/${encodeURIComponent(ltiUserId)}/records/${encodeURIComponent(recordId)}`;
+  let response;
+  try {
+    response = await apiFetch(url, { method: 'DELETE' });
+  } catch (err) {
+    return { ok: false, error: { kind: 'network', message: `Request to ${url} failed: ${err.message}` } };
+  }
+  // A successful DELETE is 204 with no body -- don't try to parse JSON.
+  if (!response.ok) {
+    return { ok: false, error: { kind: 'http-status', message: `${url} returned HTTP ${response.status}` } };
+  }
+  return { ok: true };
+}
+
+/**
+ * Applies a manual attendance correction for one rostered member (C2). Never throws.
+ * @param {string} sessionId
+ * @param {string} ltiUserId
+ * @param {'present'|'absent'|'excused'} status
+ * @returns {Promise<{ok: true, record: object}|{ok: false, error: {kind: string, message: string}}>}
+ */
+export async function correctMemberStatus(sessionId, ltiUserId, status) {
+  const result = await request(`/api/attendance-sessions/${sessionId}/members/${encodeURIComponent(ltiUserId)}`, {
+    method: 'PATCH',
+    body: { status },
+  });
+  if (!result.ok) return result;
+  return { ok: true, record: result.body };
+}
+
+/**
+ * Fetches the server-authoritative attendance CSV text for a session (C2). Never
+ * throws. Returns the raw CSV string on success.
+ * @param {string} sessionId
+ * @returns {Promise<{ok: true, csv: string, filename: string}|{ok: false, error: {kind: string, message: string}}>}
+ */
+export async function fetchAttendanceCsv(sessionId) {
+  const url = `/api/attendance-sessions/${sessionId}/export.csv`;
+  let response;
+  try {
+    response = await apiFetch(url);
+  } catch (err) {
+    return { ok: false, error: { kind: 'network', message: `Request to ${url} failed: ${err.message}` } };
+  }
+  if (!response.ok) {
+    return { ok: false, error: { kind: 'http-status', message: `${url} returned HTTP ${response.status}` } };
+  }
+  try {
+    const csv = await response.text();
+    return { ok: true, csv, filename: `attendance-${sessionId}.csv` };
+  } catch (err) {
+    return { ok: false, error: { kind: 'bad-body', message: `${url} returned an unreadable body: ${err.message}` } };
+  }
+}
