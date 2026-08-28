@@ -24,6 +24,7 @@ import { registerLtiLoginRoute } from './routes/lti-login.js';
 import { registerLtiLaunchRoute } from './routes/lti-launch.js';
 import { registerMeRoute } from './routes/me.js';
 import { registerCourseRosterRoutes } from './routes/course-roster.js';
+import { registerAttendanceSessionsRoute } from './routes/attendance-sessions.js';
 import { createRequireSession, createRequireCsrf } from './auth/middleware.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -120,11 +121,20 @@ registerCourseRosterRoutes(app, {
   signingKey: getActiveSigningKey(signingKeys),
 });
 
-app.get('/health', async () => ({ status: 'ok' }));
-
 // Falls back to the Mock resolver whenever the real HTTP resolver's required env vars aren't set
 // -- see docs/canvas-lti/progress.md's "Deferred decisions" section for why that's the case.
 const identityResolver = createHttpIdentityResolverFromEnv() ?? new MockIdentityResolver();
+
+registerAttendanceSessionsRoute(app, {
+  db,
+  resolver: identityResolver,
+  requireSession,
+  requireCsrf,
+  signingKey: getActiveSigningKey(signingKeys),
+});
+
+app.get('/health', async () => ({ status: 'ok' }));
+
 // DELIBERATE: POST /api/scans stays UNAUTHENTICATED in Phase 3 -- no requireSession, no
 // requireCsrf, no rate limit. It is registered on the root `app`, outside the rate-limited plugin
 // scope above, exactly as Phase 2 shipped it. Phase 3 adds endpoints beside it and introduces no
