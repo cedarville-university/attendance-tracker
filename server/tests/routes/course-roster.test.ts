@@ -126,6 +126,9 @@ describe('GET /api/course/roster', () => {
 
     const res = await app.inject({ method: 'GET', url: '/api/course/roster' });
     expect(res.statusCode).toBe(502);
+    // §31.9: opaque code + requestId only -- no internal Error.message leaked.
+    expect(res.json()).toEqual({ error: 'roster_refresh_failed', requestId: expect.any(String) });
+    expect(res.json()).not.toHaveProperty('message');
   });
 
   it('never collapses duplicate institutionalId members', async () => {
@@ -195,6 +198,8 @@ describe('POST /api/course/roster/refresh', () => {
 
     const res = await app.inject({ method: 'POST', url: '/api/course/roster/refresh' });
     expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({ error: 'roster_refresh_failed', requestId: expect.any(String) });
+    expect(res.json()).not.toHaveProperty('message');
   });
 
   it('rejects a form-encoded body with 403 (spec §15)', async () => {

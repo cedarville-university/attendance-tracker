@@ -80,7 +80,8 @@ export function registerCourseRosterRoutes(app: FastifyInstance, deps: CourseRos
       return { members: roster.members.map(serializeMember), fetchedAt: roster.fetchedAt, stale: roster.stale };
     } catch (err) {
       if (err instanceof RosterUnavailableError) {
-        return reply.code(502).send({ error: 'roster_refresh_failed', message: err.message });
+        request.log.error({ err, reqId: request.id }, 'roster refresh failed');
+        return reply.code(502).send({ error: 'roster_refresh_failed', requestId: request.id });
       }
       throw err;
     }
@@ -103,7 +104,8 @@ export function registerCourseRosterRoutes(app: FastifyInstance, deps: CourseRos
         return { members: roster.members.map(serializeMember), fetchedAt: roster.fetchedAt, stale: roster.stale };
       } catch (err) {
         if (err instanceof RosterUnavailableError) {
-          return reply.code(502).send({ error: 'roster_refresh_failed', message: err.message });
+          request.log.error({ err, reqId: request.id }, 'roster refresh failed');
+          return reply.code(502).send({ error: 'roster_refresh_failed', requestId: request.id });
         }
         throw err;
       }

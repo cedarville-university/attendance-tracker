@@ -91,7 +91,7 @@ describe('createAttendanceSession', () => {
     expect(event.newValue).toMatchObject({ stale: true, rosterFetchedAt: '2026-08-26T09:00:00.000Z' });
   });
 
-  it('hard-fails (RosterUnavailableError) only when getRosterWithFallback itself throws — no fetch AND no <24h cache', async () => {
+  it('hard-fails (SessionRosterUnavailableError) only when getRosterWithFallback itself throws — no fetch AND no <24h cache', async () => {
     const { courseId } = await seedInstitutionAndCourse(db, platform);
     vi.mocked(getRosterWithFallback).mockRejectedValue(new Error('canvas down, cache is 3 days old'));
 
@@ -143,6 +143,27 @@ describe('closeAttendanceSession', () => {
 
     const records = await db.select().from(attendanceRecords).where(eq(attendanceRecords.attendanceSessionId, session.id));
     expect(records.filter((r) => r.source === 'system_absence')).toHaveLength(0);
+  });
+
+  it('D1: two concurrent closes write exactly one set of system_absence rows and one audit row', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
+    await db.insert(attendanceSessionMembers).values([
+      { attendanceSessionId: session.id, ltiUserId: 'u1', institutionalId: '1000000', displayName: 'A', eligibleForAttendance: true, status: 'Active', snapshotData: {} },
+      { attendanceSessionId: session.id, ltiUserId: 'u2', institutionalId: '2000000', displayName: 'B', eligibleForAttendance: true, status: 'Active', snapshotData: {} },
+    ]);
+
+    const results = await Promise.allSettled([
+      closeAttendanceSession(db, session.id, 'instructor-1', 'req-a'),
+      closeAttendanceSession(db, session.id, 'instructor-1', 'req-b'),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+
+    const records = await db.select().from(attendanceRecords).where(eq(attendanceRecords.attendanceSessionId, session.id));
+    expect(records.filter((r) => r.source === 'system_absence')).toHaveLength(2);
+    const events = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'attendance_session_closed'));
+    expect(events).toHaveLength(1);
   });
 
   it('rejects a second close with a 409-mapped error (state guard, Q7)', async () => {

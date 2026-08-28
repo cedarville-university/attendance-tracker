@@ -53,6 +53,19 @@ describe('applyManualCorrection', () => {
     expect(events[0].newValue).toMatchObject({ status: 'absent', note: 'Left early, unexcused' });
   });
 
+  it('throws a coded (session_not_found) error for a missing session, not a bare Error', async () => {
+    await expect(
+      applyManualCorrection(db, '00000000-0000-0000-0000-000000000000', 'user-1', { status: 'present' }, 'instructor-1'),
+    ).rejects.toMatchObject({ code: 'session_not_found' });
+  });
+
+  it('throws a coded (member_not_in_snapshot) error when the ltiUserId is not on the roster snapshot', async () => {
+    const sessionId = await seedSessionWithScannedMember();
+    await expect(
+      applyManualCorrection(db, sessionId, 'not-a-member', { status: 'present' }, 'instructor-1'),
+    ).rejects.toMatchObject({ code: 'member_not_in_snapshot' });
+  });
+
   it('works for a member with no prior record (oldValue is null)', async () => {
     const { courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();

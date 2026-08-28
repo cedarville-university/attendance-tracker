@@ -45,7 +45,11 @@ export class SessionNotClosedError extends Error {
     super('Only a closed attendance session can be reopened.');
   }
 }
-export class RosterUnavailableError extends Error {
+// Renamed from RosterUnavailableError to avoid colliding with the identically
+// named class in roster-store.ts (different ctor + different discriminant: this
+// one carries `.code`, that one carries `.kind`). attendance-sessions.ts
+// duck-types `.code`; course-roster.ts uses `instanceof` on the roster-store one.
+export class SessionRosterUnavailableError extends Error {
   code = 'roster_unavailable' as const;
   constructor(cause: unknown) {
     super('Cannot start an attendance session: the course roster is unavailable and no recent cache exists.');
@@ -74,7 +78,7 @@ export async function createAttendanceSession(
       now: deps.now,
     });
   } catch (err) {
-    throw new RosterUnavailableError(err);
+    throw new SessionRosterUnavailableError(err);
   }
 
   return db.transaction(async (tx) => {
@@ -129,7 +133,9 @@ export async function closeAttendanceSession(
   requestId?: string,
 ): Promise<void> {
   await db.transaction(async (tx) => {
-    const [session] = await tx.select().from(attendanceSessions).where(eq(attendanceSessions.id, sessionId));
+    // D1: row-lock the session so two concurrent Close calls can't both pass the
+    // state guard and each write a set of system_absence + audit rows.
+    const [session] = await tx.select().from(attendanceSessions).where(eq(attendanceSessions.id, sessionId)).for('update');
     if (!session) throw new Error(`Attendance session ${sessionId} not found.`);
     if (session.state === 'closed') throw new SessionAlreadyClosedError(); // Q7 state guard
 
@@ -189,7 +195,9 @@ export async function reopenAttendanceSession(
   requestId?: string,
 ): Promise<void> {
   await db.transaction(async (tx) => {
-    const [session] = await tx.select().from(attendanceSessions).where(eq(attendanceSessions.id, sessionId));
+    // D1: row-lock the session so two concurrent Reopen calls can't both pass the
+    // state guard and each write an audit row.
+    const [session] = await tx.select().from(attendanceSessions).where(eq(attendanceSessions.id, sessionId)).for('update');
     if (!session) throw new Error(`Attendance session ${sessionId} not found.`);
     if (session.state !== 'closed') throw new SessionNotClosedError(); // Q7 state guard
 

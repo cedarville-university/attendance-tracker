@@ -217,6 +217,71 @@ describe('attendance-sessions routes', () => {
     expect(events[0].requestId).toBeTruthy();
   });
 
+  it('GET /api/attendance-sessions lists only open/reopened sessions for the caller\'s course, newest first; cross-tenant excluded', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const { courseId: otherCourseId } = await seedInstitutionAndCourse(db, platform, { clientId: 'other-client-id' });
+    const [older] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open', openedAt: new Date('2026-08-01T10:00:00.000Z') }).returning();
+    const [newer] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'reopened', openedAt: new Date('2026-08-20T10:00:00.000Z') }).returning();
+    await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'closed' });
+    await db.insert(attendanceSessions).values({ courseId: otherCourseId, startedByLtiUserId: 'x', state: 'open' });
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+
+    const response = await app.inject({ method: 'GET', url: '/api/attendance-sessions?state=open' });
+
+    expect(response.statusCode).toBe(200);
+    const ids = response.json().sessions.map((s: { id: string }) => s.id);
+    expect(ids).toEqual([newer.id, older.id]);
+  });
+
+  it('POST .../scans of a rostered member returns the roster-snapshot displayName', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
+    await db.insert(attendanceSessionMembers).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', displayName: 'Jane Smith', eligibleForAttendance: true, status: 'Active', snapshotData: {} });
+    const resolver: IdentityResolver = { resolveCard: vi.fn().mockResolvedValue({ ok: true, universityId: '1000000', firstName: 'Jane', lastName: 'Smith', email: null, raw: {}, error: null }) };
+    const app = buildTestApp({ resolver, session: makeSession({ institutionId, courseId }) });
+
+    const response = await app.inject({ method: 'POST', url: `/api/attendance-sessions/${session.id}/scans`, headers: CSRF, payload: { clientScanId: 'scan-1', cardCode: 'CARD001', scannedAt: new Date().toISOString() } });
+
+    expect(response.json().status).toBe('present');
+    expect(response.json().displayName).toBe('Jane Smith');
+  });
+
+  it('PATCH .../members/{unknown} returns 404 (not 500) with a requestId', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+
+    const response = await app.inject({ method: 'PATCH', url: `/api/attendance-sessions/${session.id}/members/nobody`, headers: CSRF, payload: { status: 'present' } });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toMatchObject({ error: 'member_not_in_snapshot' });
+    expect(response.json().requestId).toBeTruthy();
+  });
+
+  it('GET .../{id} on an unknown session returns 404 with a requestId (D2)', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+    const response = await app.inject({ method: 'GET', url: '/api/attendance-sessions/00000000-0000-0000-0000-000000000000' });
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: 'not_found', requestId: expect.any(String) });
+  });
+
+  it('an unexpected (ltiUserId null) scan appears in GET .../{id} unmatchedRecords and in export.csv, and unscanned members read not_recorded pre-close', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
+    await db.insert(attendanceSessionMembers).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', displayName: 'Jane', eligibleForAttendance: true, status: 'Active', snapshotData: {} });
+    await db.insert(attendanceRecords).values({ attendanceSessionId: session.id, ltiUserId: null, institutionalId: '9999999', clientScanId: 'scan-x', status: 'unexpected', scannedAt: new Date('2026-08-26T10:00:00.000Z'), source: 'card' });
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+
+    const detail = await app.inject({ method: 'GET', url: `/api/attendance-sessions/${session.id}` });
+    expect(detail.json().unmatchedRecords).toHaveLength(1);
+    expect(detail.json().unmatchedRecords[0].institutionalId).toBe('9999999');
+
+    const csv = await app.inject({ method: 'GET', url: `/api/attendance-sessions/${session.id}/export.csv` });
+    expect(csv.body).toContain('1000000,Jane,not_recorded,');
+    expect(csv.body).toContain('9999999,,unexpected,card');
+  });
+
   it('GET .../export.csv returns a CSV body with the current-record status per member', async () => {
     const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();

@@ -11,6 +11,18 @@ import type { Database } from '../database/client.js';
 import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents, courses, type AttendanceRecordRow } from '../database/schema.js';
 import { resolveCurrentRecord } from './member-status.js';
 
+// Coded client-fault errors (mirrors session-lifecycle.ts's `.code` convention).
+// attendance-sessions.ts::replyForError maps both codes to 404; without a `.code`
+// these would rethrow to Fastify's generic 500.
+class ManualCorrectionError extends Error {
+  constructor(
+    message: string,
+    public readonly code: 'session_not_found' | 'member_not_in_snapshot',
+  ) {
+    super(message);
+  }
+}
+
 export async function applyManualCorrection(
   db: Database,
   sessionId: string,
@@ -21,13 +33,13 @@ export async function applyManualCorrection(
 ): Promise<AttendanceRecordRow> {
   return db.transaction(async (tx) => {
     const [session] = await tx.select().from(attendanceSessions).where(eq(attendanceSessions.id, sessionId));
-    if (!session) throw new Error(`Attendance session ${sessionId} not found.`);
+    if (!session) throw new ManualCorrectionError(`Attendance session ${sessionId} not found.`, 'session_not_found');
 
     const [member] = await tx
       .select()
       .from(attendanceSessionMembers)
       .where(and(eq(attendanceSessionMembers.attendanceSessionId, sessionId), eq(attendanceSessionMembers.ltiUserId, ltiUserId)));
-    if (!member) throw new Error(`No roster-snapshot member ${ltiUserId} in session ${sessionId}.`);
+    if (!member) throw new ManualCorrectionError(`No roster-snapshot member ${ltiUserId} in session ${sessionId}.`, 'member_not_in_snapshot');
 
     const priorRecords = await tx
       .select()
