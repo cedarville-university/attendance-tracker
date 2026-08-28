@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { pgTable, uuid, text, boolean, timestamp, jsonb, integer, unique, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, text, boolean, timestamp, jsonb, integer, doublePrecision, unique, uniqueIndex } from 'drizzle-orm/pg-core';
 
 export const institutions = pgTable('institutions', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -225,3 +225,53 @@ export const auditEvents = pgTable('audit_events', {
 export type AttendanceSessionRow = typeof attendanceSessions.$inferSelect;
 export type AttendanceSessionMemberRow = typeof attendanceSessionMembers.$inferSelect;
 export type AttendanceRecordRow = typeof attendanceRecords.$inferSelect;
+
+// One cumulative Canvas Gradebook line item per course (spec §27). UNIQUE(course_id) makes
+// ensureLineItem's persist step idempotent regardless of how many times the worker runs.
+export const gradeLineItems = pgTable(
+  'grade_line_items',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    courseId: uuid('course_id').notNull().references(() => courses.id),
+    canvasLineItemId: text('canvas_line_item_id').notNull(),
+    canvasLineItemUrl: text('canvas_line_item_url').notNull(),
+    resourceId: text('resource_id').notNull(),
+    tag: text('tag').notNull(),
+    scoreMaximum: integer('score_maximum').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique().on(t.courseId)],
+);
+
+// Durable grade-sync outbox (spec §28). One row per (course, member): each session close upserts
+// the member's latest cumulative score and resets the row to pending. state: pending -> synced on a
+// successful AGS post; pending -> failed after MAX_GRADE_SYNC_ATTEMPTS retries or a permanent 4xx.
+// (the `enum` on the state column narrows the TS type only — Postgres stores plain text with no CHECK
+// constraint, same as attendance_records.status / attendance_sessions.state.)
+export const gradeSyncJobs = pgTable(
+  'grade_sync_jobs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    courseId: uuid('course_id').notNull().references(() => courses.id),
+    // The session whose close last (re)computed this score. Nullable per spec §26; a manual retry
+    // (POST /grade-sync) leaves it unchanged.
+    attendanceSessionId: uuid('attendance_session_id').references(() => attendanceSessions.id),
+    ltiUserId: text('lti_user_id').notNull(),
+    // Cumulative percentage 0..100 (scoreGiven; maximum is 100). doublePrecision (float8) on purpose:
+    // `real` (float4) has ~7 significant digits and would lose the 4th decimal of e.g. 33.3333, and
+    // `numeric` comes back from node-postgres as a STRING, which would break every toBeCloseTo and
+    // force a Number() wrapper in grade-worker.ts. Do not "improve" this to numeric.
+    score: doublePrecision('score').notNull(),
+    state: text('state', { enum: ['pending', 'synced', 'failed'] }).notNull().default('pending'),
+    attemptCount: integer('attempt_count').notNull().default(0),
+    lastError: text('last_error'), // opaque short code only (spec §31.9) — never a raw Canvas body
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique().on(t.courseId, t.ltiUserId)],
+);
+
+export type GradeLineItemRow = typeof gradeLineItems.$inferSelect;
+export type GradeSyncJobRow = typeof gradeSyncJobs.$inferSelect;

@@ -13,7 +13,11 @@ import {
   attendanceSessions,
   attendanceSessionMembers,
   attendanceRecords,
+  gradeLineItems,
+  gradeSyncJobs,
 } from '../../src/database/schema.js';
+import { seedInstitutionAndCourse } from '../support/seed.js';
+import { MockCanvasPlatform } from '../support/mock-canvas.js';
 
 // File scope, not inside a describe: the pg pool in tests/support/db.ts is module-level and shared
 // by every describe in this file, so closing it from inside one describe would leave any later
@@ -226,6 +230,44 @@ describe('Phase 5 schema', () => {
       clientScanId: null, status: 'excused', scannedAt: null, source: 'manual',
     }).returning();
     expect(row.scannedAt).toBeNull();
+  });
+});
+
+describe('Phase 6 schema', () => {
+  it('stores a grade line item (one per course) and grade-sync jobs (one per course+member)', async () => {
+    const { db } = getTestDb();
+    await resetDb();
+    const { courseId } = await seedInstitutionAndCourse(db, new MockCanvasPlatform());
+
+    const [li] = await db.insert(gradeLineItems).values({
+      courseId,
+      canvasLineItemId: '123',
+      canvasLineItemUrl: 'https://canvas.example.edu/api/lti/courses/1/line_items/123',
+      resourceId: 'attendance-cumulative-v1',
+      tag: 'attendance',
+      scoreMaximum: 100,
+    }).returning();
+    expect(li.id).toBeTruthy();
+
+    // UNIQUE(course_id): a second line item for the same course is rejected.
+    await expect(
+      db.insert(gradeLineItems).values({
+        courseId, canvasLineItemId: '999', canvasLineItemUrl: 'https://x/999',
+        resourceId: 'attendance-cumulative-v1', tag: 'attendance', scoreMaximum: 100,
+      }),
+    ).rejects.toThrow();
+
+    const [job] = await db.insert(gradeSyncJobs).values({
+      courseId, ltiUserId: 'user-1', score: 94.5,
+    }).returning();
+    expect(job.state).toBe('pending');
+    expect(job.attemptCount).toBe(0);
+    expect(job.score).toBeCloseTo(94.5);
+
+    // UNIQUE(course_id, lti_user_id): a second job for the same member is rejected.
+    await expect(
+      db.insert(gradeSyncJobs).values({ courseId, ltiUserId: 'user-1', score: 10 }),
+    ).rejects.toThrow();
   });
 });
 
