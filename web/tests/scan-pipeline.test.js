@@ -1,33 +1,39 @@
-import { vi, describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+
+// Task 14: scan-pipeline.js now POSTs scans to the session-scoped endpoint
+// via api-client.js's apiFetch (Task 13), and trusts the server-returned
+// `status` verbatim. Mock the apiFetch wrapper instead of global.fetch --
+// this replaces the earlier module-scope `global.fetch = vi.fn()` (whose
+// missing restore leaked a mock into sibling files; see commit 83ea622).
+const { lookupCardMock, TEST_SESSION_ID } = vi.hoisted(() => ({
+  lookupCardMock: vi.fn(),
+  TEST_SESSION_ID: 'session-under-test',
+}));
+
+vi.mock('../api-client.js', () => ({
+  apiFetch: vi.fn((url, init) => {
+    expect(url).toBe(`/api/attendance-sessions/${TEST_SESSION_ID}/scans`);
+    expect(init.method).toBe('POST');
+    // performSubmit passes a plain object as `body` (the real apiFetch is
+    // what JSON-encodes it); tolerate either shape so the mock stays honest
+    // whether or not the wrapper stringifies.
+    const body = typeof init.body === 'string' ? JSON.parse(init.body) : init.body;
+    return lookupCardMock(body.cardCode).then((result) => ({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: () => Promise.resolve(result),
+    }));
+  }),
+}));
 
 const { ScanPipeline } = await import('../scan-pipeline.js');
-
-const lookupCardMock = vi.fn();
-
-/**
- * Stands in for the browser's fetch('/api/scans', ...) call inside
- * scan-pipeline.js's submitScan() (the Phase 2 replacement for a direct
- * lookupCard() import). Delegates to lookupCardMock -- called with the
- * same cardCode argument lookupCard() used to receive -- and wraps
- * whatever it resolves to in a minimal fetch Response shape, so every
- * lookupCardMock.mockReturnValueOnce(...)/expect(lookupCardMock)...
- * assertion below keeps working unchanged across the transport swap.
- */
-const realFetch = global.fetch;
-global.fetch = vi.fn((_url, init) => {
-  const { cardCode } = JSON.parse(init.body);
-  return lookupCardMock(cardCode).then((result) => ({
-    ok: true,
-    status: 200,
-    statusText: 'OK',
-    json: () => Promise.resolve(result),
-  }));
-});
+const { apiFetch } = await import('../api-client.js');
 
 /**
  * Waits for all currently-pending microtasks to drain -- unlike a fixed
  * number of `await Promise.resolve()` ticks, this doesn't need updating
- * every time submitScan()'s fetch/json/logEvent chain gains or loses a
+ * every time submitScan()'s apiFetch/json/logEvent chain gains or loses a
  * promise hop, since a macrotask callback only runs after the microtask
  * queue is empty.
  */
@@ -46,28 +52,44 @@ function createDeferred() {
   return { promise, resolve, reject };
 }
 
+/** The server's normalized attendance record for a resolved + roster-matched scan. */
 function successResult(overrides = {}) {
   return {
-    ok: true,
-    universityId: '1000000',
-    firstName: 'Jane',
-    lastName: 'Smith',
-    email: 'jane.smith@example.edu',
-    raw: {},
-    error: null,
+    id: 'record-1',
+    attendanceSessionId: TEST_SESSION_ID,
+    ltiUserId: 'user-1',
+    institutionalId: '1000000',
+    status: 'present',
+    lookupErrorKind: null,
+    scannedAt: new Date().toISOString(),
     ...overrides,
   };
 }
 
+/** The server's normalized record when the identity lookup failed. */
 function errorResult(kind, overrides = {}) {
   return {
-    ok: false,
-    universityId: null,
-    firstName: null,
-    lastName: null,
-    email: null,
-    raw: null,
-    error: { kind, message: `simulated ${kind}` },
+    id: 'record-1',
+    attendanceSessionId: TEST_SESSION_ID,
+    ltiUserId: null,
+    institutionalId: null,
+    status: 'lookup_error',
+    lookupErrorKind: kind,
+    scannedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+/** The server's normalized record for an identity not on this session's roster snapshot. */
+function unexpectedResult(overrides = {}) {
+  return {
+    id: 'record-1',
+    attendanceSessionId: TEST_SESSION_ID,
+    ltiUserId: null,
+    institutionalId: '9999999',
+    status: 'unexpected',
+    lookupErrorKind: null,
+    scannedAt: new Date().toISOString(),
     ...overrides,
   };
 }
@@ -76,31 +98,24 @@ function parsedReport(cardCode) {
   return { valid: true, hasPayload: true, trimmedCardCode: cardCode };
 }
 
-function makePipeline({ rosterEnabled = false, rosterIndex = new Map() } = {}) {
+function makePipeline() {
   const callbacks = {
     onRecordCreated: vi.fn(),
     onRecordUpdated: vi.fn(),
     onLatestScanUpdate: vi.fn(),
     onStatsChanged: vi.fn(),
   };
-  const pipeline = new ScanPipeline({
-    getRosterState: () => ({ enabled: rosterEnabled, index: rosterIndex }),
-    callbacks,
-  });
+  const pipeline = new ScanPipeline({ sessionId: TEST_SESSION_ID, callbacks });
   return { pipeline, callbacks };
 }
 
 beforeEach(() => {
   lookupCardMock.mockReset();
-  global.fetch.mockClear();
+  apiFetch.mockClear();
 });
 
 afterEach(() => {
   vi.useRealTimers();
-});
-
-afterAll(() => {
-  global.fetch = realFetch;
 });
 
 describe('ScanPipeline', () => {
@@ -119,8 +134,8 @@ describe('ScanPipeline', () => {
     await flushAsync(); // let _resolveScan's continuation run
 
     const updated = callbacks.onRecordUpdated.mock.calls.at(-1)[0];
-    expect(updated.status).toBe('accepted');
-    expect(updated.universityId).toBe('1000000');
+    expect(updated.status).toBe('present');
+    expect(updated.institutionalId).toBe('1000000');
     expect(pipeline.getStats().totalAccepted).toBe(1);
   });
 
@@ -149,20 +164,20 @@ describe('ScanPipeline', () => {
     pipeline.handleParsedReport(parsedReport('CARD_B')); // latestScanId = B
 
     // A's (older) lookup finally resolves, after B has already become latest.
-    deferredA.resolve(successResult({ universityId: '1111111' }));
+    deferredA.resolve(successResult({ institutionalId: '1111111' }));
     await flushAsync();
 
     expect(callbacks.onLatestScanUpdate).not.toHaveBeenCalled();
 
     // B's (newer) lookup resolves -- this one SHOULD update the latest display.
-    deferredB.resolve(successResult({ universityId: '2222222' }));
+    deferredB.resolve(successResult({ institutionalId: '2222222' }));
     await flushAsync();
 
     expect(callbacks.onLatestScanUpdate).toHaveBeenCalledTimes(1);
-    expect(callbacks.onLatestScanUpdate.mock.calls[0][0].universityId).toBe('2222222');
+    expect(callbacks.onLatestScanUpdate.mock.calls[0][0].institutionalId).toBe('2222222');
   });
 
-  it('suppresses a duplicate scan of a card that already has a live (accepted) row, without re-looking-up', async () => {
+  it('suppresses a duplicate scan of a card that already has a live (present) row, without re-looking-up', async () => {
     const { pipeline, callbacks } = makePipeline();
     lookupCardMock.mockReturnValueOnce(Promise.resolve(successResult()));
 
@@ -177,7 +192,7 @@ describe('ScanPipeline', () => {
     expect(pipeline.getStats().suppressedDuplicates).toBe(1);
   });
 
-  it('retries the lookup in place when a duplicate scan arrives for a row stuck in lookup-error', async () => {
+  it('retries the lookup in place when a duplicate scan arrives for a row stuck in lookup_error', async () => {
     const { pipeline, callbacks } = makePipeline();
     const deferred2 = createDeferred();
     lookupCardMock
@@ -187,7 +202,7 @@ describe('ScanPipeline', () => {
     pipeline.handleParsedReport(parsedReport('CARD001'));
     await flushAsync();
 
-    expect(callbacks.onRecordUpdated.mock.calls.at(-1)[0].status).toBe('lookup-error');
+    expect(callbacks.onRecordUpdated.mock.calls.at(-1)[0].status).toBe('lookup_error');
     expect(pipeline.getStats().lookupErrors).toBe(1);
 
     pipeline.handleParsedReport(parsedReport('CARD001')); // retry via duplicate scan
@@ -260,44 +275,55 @@ describe('ScanPipeline', () => {
     expect(pipeline.getRecords()).toHaveLength(0);
   });
 
-  it('records a lookup-error status (not "not on roster") when the lookup times out', async () => {
-    const { pipeline, callbacks } = makePipeline({ rosterEnabled: true });
+  it('records a lookup_error status (not "not on roster") when the lookup times out', async () => {
+    const { pipeline, callbacks } = makePipeline();
     lookupCardMock.mockReturnValueOnce(Promise.resolve(errorResult('timeout')));
 
     pipeline.handleParsedReport(parsedReport('CARD001'));
     await flushAsync();
 
     const updated = callbacks.onRecordUpdated.mock.calls.at(-1)[0];
-    expect(updated.status).toBe('lookup-error');
-    expect(updated.rosterStatus).toBe('lookup-error');
+    expect(updated.status).toBe('lookup_error');
     expect(pipeline.getStats().lookupErrors).toBe(1);
   });
 
-  it('marks an identity resolved but not present on the roster as unexpected', async () => {
-    const rosterIndex = new Map([['9999999', { id: '9999999', name: 'On Roster' }]]);
-    const { pipeline, callbacks } = makePipeline({ rosterEnabled: true, rosterIndex });
-    lookupCardMock.mockReturnValueOnce(Promise.resolve(successResult({ universityId: '1000000' })));
+  it('trusts the server-provided status verbatim rather than recomputing a roster match locally', async () => {
+    const { pipeline, callbacks } = makePipeline();
+    lookupCardMock.mockReturnValueOnce(Promise.resolve(unexpectedResult()));
 
     pipeline.handleParsedReport(parsedReport('CARD001'));
     await flushAsync();
 
     const updated = callbacks.onRecordUpdated.mock.calls.at(-1)[0];
-    expect(updated.rosterStatus).toBe('unexpected');
+    expect(updated.status).toBe('unexpected');
     expect(pipeline.getStats().unexpected).toBe(1);
-    expect(pipeline.getStats().expected).toBe(0);
   });
 
-  it('marks an identity present on the roster as expected and attaches the roster row', async () => {
-    const rosterIndex = new Map([['1000000', { id: '1000000', name: 'Jane Smith', section: '01' }]]);
-    const { pipeline, callbacks } = makePipeline({ rosterEnabled: true, rosterIndex });
-    lookupCardMock.mockReturnValueOnce(Promise.resolve(successResult({ universityId: '1000000' })));
+  it('marks an identity resolved and matched on the server as present', async () => {
+    const { pipeline, callbacks } = makePipeline();
+    lookupCardMock.mockReturnValueOnce(Promise.resolve(successResult({ institutionalId: '1000000' })));
 
     pipeline.handleParsedReport(parsedReport('CARD001'));
     await flushAsync();
 
     const updated = callbacks.onRecordUpdated.mock.calls.at(-1)[0];
-    expect(updated.rosterStatus).toBe('expected');
-    expect(updated.rosterData).toEqual({ id: '1000000', name: 'Jane Smith', section: '01' });
-    expect(pipeline.getStats().expected).toBe(1);
+    expect(updated.status).toBe('present');
+    expect(pipeline.getStats().totalAccepted).toBe(1);
+  });
+
+  it('ignores a parsed report when no attendance session is active (sessionId null) and does not call the transport', async () => {
+    const callbacks = {
+      onRecordCreated: vi.fn(),
+      onRecordUpdated: vi.fn(),
+      onLatestScanUpdate: vi.fn(),
+      onStatsChanged: vi.fn(),
+    };
+    const pipeline = new ScanPipeline({ sessionId: null, callbacks });
+
+    pipeline.handleParsedReport(parsedReport('CARD001'));
+    await flushAsync();
+
+    expect(callbacks.onRecordCreated).not.toHaveBeenCalled();
+    expect(apiFetch).not.toHaveBeenCalled();
   });
 });

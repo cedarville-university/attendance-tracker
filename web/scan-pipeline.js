@@ -1,9 +1,10 @@
 // scan-pipeline.js
 //
 // Orchestrates turning a parsed HID report into an attendance scan record:
-// duplicate suppression, record creation, the (un-awaited) card lookup,
-// roster matching, and race-safe correlation of a late-arriving lookup
-// response back to the correct record. This is the most
+// duplicate suppression, record creation, the (un-awaited) scan submission
+// to this session's backend endpoint, and race-safe correlation of a
+// late-arriving response back to the correct record. Roster matching now
+// happens server-side and its `status` is trusted verbatim. This is the most
 // correctness-critical module in the app -- see the "Concurrency
 // correctness" requirement in the project spec -- so it is kept separate
 // from both hid-reader.js (dumb transport) and ui.js (dumb rendering).
@@ -13,56 +14,64 @@
 
 import { DUPLICATE_SUPPRESS_WINDOW_MS } from './config.js';
 import { logEvent } from './diagnostics.js';
-import { isExpected, getRosterRow } from './roster.js';
+import { apiFetch } from './api-client.js';
 
 /**
- * Submits a scanned card code to the backend's identity resolver
- * (POST /api/scans) and returns its normalized result. Replaces the old
- * direct-from-browser lookupCard() call (formerly lookup.js) now that card
- * lookups -- and any credentials they require -- live server-side
- * (Phase 2). Like the old lookupCard(), this never throws or rejects: a
- * network failure or non-2xx response is folded into the same normalized
- * error shape the resolver itself would produce, so a failed request still
- * yields a recordable 'lookup-error' scan rather than an unhandled
- * rejection.
+ * Submits a scanned card code to this attendance session's backend endpoint
+ * (POST /api/attendance-sessions/{sessionId}/scans) and returns the server's
+ * normalized attendance record. Per spec §29, this replaces the old
+ * cardCode-only submitScan(): the server now also resolves roster matching
+ * (against this session's immutable roster snapshot), so the returned
+ * `status` is trusted verbatim -- this module no longer recomputes it
+ * against a local roster index. Like the function it replaces, this never
+ * throws or rejects: a network failure or non-2xx response is folded into a
+ * normalized 'lookup_error' shape so a failed request still yields a
+ * recordable, visible row rather than an unhandled rejection.
+ * @param {string} sessionId
+ * @param {string} clientScanId
  * @param {string} cardCode
- * @returns {Promise<{ok: boolean, universityId: string|null, firstName: string|null, lastName: string|null, email: string|null, raw: any, error: null|{kind: string, message: string}}>}
+ * @returns {Promise<{status: string, ltiUserId: string|null, institutionalId: string|null, lookupErrorKind: string|null, scannedAt: string}>}
  */
-async function submitScan(cardCode) {
+async function submitScan(sessionId, clientScanId, cardCode) {
   logEvent('lookup-request', { cardCode });
 
-  const result = await performSubmit(cardCode);
+  const result = await performSubmit(sessionId, clientScanId, cardCode);
 
-  // Diagnostics intentionally omit name/email to limit incidental exposure
-  // of student PII in copyable diagnostics text; the University ID and
-  // error state are kept since they're the most useful fields for
-  // debugging a lookup failure.
-  logEvent('lookup-result', { cardCode, ok: result.ok, universityId: result.universityId, error: result.error });
+  // Diagnostics intentionally omit any name/email the server might echo,
+  // to limit incidental exposure of student PII in copyable diagnostics
+  // text; institutionalId and status are the most useful fields for
+  // debugging a scan failure.
+  logEvent('lookup-result', { cardCode, status: result.status, institutionalId: result.institutionalId, lookupErrorKind: result.lookupErrorKind });
 
   return result;
 }
 
-/** @param {string} cardCode */
-async function performSubmit(cardCode) {
+/**
+ * @param {string} sessionId
+ * @param {string} clientScanId
+ * @param {string} cardCode
+ */
+async function performSubmit(sessionId, clientScanId, cardCode) {
   let response;
   try {
-    response = await fetch('/api/scans', {
+    // apiFetch attaches x-csrf-token + JSON content type (Task 13). Without it
+    // the server's requireCsrf preHandler (Task 12) returns 403.
+    response = await apiFetch(`/api/attendance-sessions/${sessionId}/scans`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cardCode }),
+      body: { clientScanId, cardCode, scannedAt: new Date().toISOString() },
     });
-  } catch (err) {
-    return { ok: false, universityId: null, firstName: null, lastName: null, email: null, raw: null, error: { kind: 'network', message: `Scan submission failed: ${err.message}` } };
+  } catch {
+    return { status: 'lookup_error', ltiUserId: null, institutionalId: null, lookupErrorKind: 'network', scannedAt: new Date().toISOString() };
   }
 
   if (!response.ok) {
-    return { ok: false, universityId: null, firstName: null, lastName: null, email: null, raw: null, error: { kind: 'http-status', message: `Scan submission returned HTTP ${response.status} ${response.statusText}` } };
+    return { status: 'lookup_error', ltiUserId: null, institutionalId: null, lookupErrorKind: 'http-status', scannedAt: new Date().toISOString() };
   }
 
   try {
     return await response.json();
-  } catch (err) {
-    return { ok: false, universityId: null, firstName: null, lastName: null, email: null, raw: null, error: { kind: 'bad-json', message: `Scan submission returned a response that was not valid JSON: ${err.message}` } };
+  } catch {
+    return { status: 'lookup_error', ltiUserId: null, institutionalId: null, lookupErrorKind: 'bad-json', scannedAt: new Date().toISOString() };
   }
 }
 
@@ -71,11 +80,9 @@ async function performSubmit(cardCode) {
  * @property {string} id
  * @property {string} timestamp - ISO 8601.
  * @property {string} rawCardCode
- * @property {string|null} universityId
- * @property {Record<string, any>} lookupData - normalized lookup fields (empty on failure).
- * @property {Record<string, any>} rosterData - the full matched roster CSV row, if any.
- * @property {'pending'|'expected'|'unexpected'|'lookup-error'|'unchecked'} rosterStatus
- * @property {'pending'|'accepted'|'lookup-error'} status
+ * @property {string|null} institutionalId
+ * @property {string|null} clientScanId
+ * @property {'pending'|'present'|'unexpected'|'lookup_error'} status
  */
 
 function emptyStats(suppressedDuplicates = 0) {
@@ -85,15 +92,15 @@ function emptyStats(suppressedDuplicates = 0) {
 export class ScanPipeline {
   /**
    * @param {Object} options
-   * @param {() => {enabled: boolean, index: Map<string, object>}} options.getRosterState
+   * @param {string} options.sessionId
    * @param {Object} options.callbacks
    * @param {(record: ScanRecord) => void} options.callbacks.onRecordCreated
    * @param {(record: ScanRecord) => void} options.callbacks.onRecordUpdated
    * @param {(record: ScanRecord) => void} options.callbacks.onLatestScanUpdate - only fired when the resolving scan is still the most recently created one
    * @param {(stats: object) => void} options.callbacks.onStatsChanged
    */
-  constructor({ getRosterState, callbacks }) {
-    this.getRosterState = getRosterState;
+  constructor({ sessionId, callbacks }) {
+    this.sessionId = sessionId;
     this.callbacks = callbacks;
 
     /** @type {ScanRecord[]} */
@@ -116,6 +123,10 @@ export class ScanPipeline {
    * @param {import('./omnikey-parser.js').OmnikeyParseResult} parsed
    */
   handleParsedReport(parsed) {
+    if (!this.sessionId) {
+      logEvent('scan-ignored-no-session', {});
+      return; // no active attendance session; app.js keeps the Start button prompting
+    }
     if (!parsed.valid) {
       logEvent('error', { kind: 'invalid-hid-packet', message: parsed.note });
       return;
@@ -141,7 +152,7 @@ export class ScanPipeline {
       this.callbacks.onStatsChanged(this.getStats());
 
       const existingRecord = this.recordsById.get(existingRecordId);
-      if (existingRecord && existingRecord.status === 'lookup-error') {
+      if (existingRecord && existingRecord.status === 'lookup_error') {
         this._retryLookup(existingRecordId, cardCode);
       }
       return;
@@ -160,16 +171,13 @@ export class ScanPipeline {
     // still correctly suppressed.
     this.lastAcceptedByCode.set(cardCode, now);
 
-    const rosterState = this.getRosterState();
     /** @type {ScanRecord} */
     const record = {
       id: `scan-${this.nextId++}`,
       timestamp: new Date().toISOString(),
       rawCardCode: cardCode,
-      universityId: null,
-      lookupData: {},
-      rosterData: {},
-      rosterStatus: rosterState.enabled ? 'pending' : 'unchecked',
+      institutionalId: null,
+      clientScanId: crypto.randomUUID(),
       status: 'pending',
     };
 
@@ -183,7 +191,7 @@ export class ScanPipeline {
     // Deliberately not awaited: the caller (hid-reader's report handler)
     // must return immediately so the next inputreport -- possibly a
     // different card -- is never blocked behind this lookup.
-    this._resolveScan(record.id, cardCode);
+    this._resolveScan(record.id, cardCode, record.clientScanId);
   }
 
   /**
@@ -204,53 +212,35 @@ export class ScanPipeline {
 
     this._decrementStatsForRecord(record);
 
-    const rosterState = this.getRosterState();
-    record.universityId = null;
-    record.lookupData = {};
-    record.rosterData = {};
+    record.institutionalId = null;
     record.status = 'pending';
-    record.rosterStatus = rosterState.enabled ? 'pending' : 'unchecked';
 
     this.callbacks.onRecordUpdated(record);
     this.callbacks.onStatsChanged(this.getStats());
 
-    this._resolveScan(recordId, cardCode);
+    this._resolveScan(recordId, cardCode, record.clientScanId);
   }
 
   /** @private */
-  async _resolveScan(scanId, cardCode) {
-    const result = await submitScan(cardCode);
+  async _resolveScan(scanId, cardCode, clientScanId) {
+    const result = await submitScan(this.sessionId, clientScanId, cardCode);
 
     // The record may have been deleted (e.g. the professor removed the
     // row, or cleared the session) while the lookup was in flight.
     const record = this.recordsById.get(scanId);
     if (!record) return;
 
-    record.universityId = result.universityId;
-    record.lookupData = result.ok
-      ? { firstName: result.firstName, lastName: result.lastName, email: result.email }
-      : {};
+    record.institutionalId = result.institutionalId;
+    record.status = result.status;
 
-    const rosterState = this.getRosterState();
-    if (!result.ok) {
-      record.status = 'lookup-error';
-      record.rosterStatus = 'lookup-error'; // never claim "not on roster" when we couldn't even determine an ID
+    if (result.status === 'lookup_error') {
       this.stats.lookupErrors += 1;
-    } else {
-      record.status = 'accepted';
+    } else if (result.status === 'present') {
       this.stats.totalAccepted += 1;
-      if (rosterState.enabled) {
-        if (isExpected(rosterState.index, result.universityId)) {
-          record.rosterStatus = 'expected';
-          record.rosterData = getRosterRow(rosterState.index, result.universityId) || {};
-          this.stats.expected += 1;
-        } else {
-          record.rosterStatus = 'unexpected';
-          this.stats.unexpected += 1;
-        }
-      } else {
-        record.rosterStatus = 'unchecked';
-      }
+      this.stats.expected += 1;
+    } else if (result.status === 'unexpected') {
+      this.stats.totalAccepted += 1;
+      this.stats.unexpected += 1;
     }
 
     // Always update this scan's own row, regardless of recency.
@@ -304,10 +294,9 @@ export class ScanPipeline {
 
   /** @private */
   _decrementStatsForRecord(record) {
-    if (record.status === 'accepted') this.stats.totalAccepted -= 1;
-    if (record.status === 'lookup-error') this.stats.lookupErrors -= 1;
-    if (record.rosterStatus === 'expected') this.stats.expected -= 1;
-    if (record.rosterStatus === 'unexpected') this.stats.unexpected -= 1;
+    if (record.status === 'present') { this.stats.totalAccepted -= 1; this.stats.expected -= 1; }
+    if (record.status === 'unexpected') { this.stats.totalAccepted -= 1; this.stats.unexpected -= 1; }
+    if (record.status === 'lookup_error') this.stats.lookupErrors -= 1;
   }
 
   /** Clears the entire session (professor confirmed via the UI first). */
@@ -340,8 +329,7 @@ export class ScanPipeline {
     // actually recover it on the next scan of that card.
     for (const record of this.records) {
       if (record.status === 'pending') {
-        record.status = 'lookup-error';
-        record.rosterStatus = 'lookup-error'; // never claim "not on roster" when we couldn't even determine an ID
+        record.status = 'lookup_error';
       }
     }
     this.recordsById = new Map(this.records.map((r) => [r.id, r]));
@@ -360,10 +348,9 @@ export class ScanPipeline {
 
     const stats = emptyStats((duplicateCounters && duplicateCounters.suppressed) || 0);
     for (const record of this.records) {
-      if (record.status === 'accepted') stats.totalAccepted += 1;
-      if (record.status === 'lookup-error') stats.lookupErrors += 1;
-      if (record.rosterStatus === 'expected') stats.expected += 1;
-      if (record.rosterStatus === 'unexpected') stats.unexpected += 1;
+      if (record.status === 'present') { stats.totalAccepted += 1; stats.expected += 1; }
+      if (record.status === 'unexpected') { stats.totalAccepted += 1; stats.unexpected += 1; }
+      if (record.status === 'lookup_error') stats.lookupErrors += 1;
     }
     this.stats = stats;
   }
