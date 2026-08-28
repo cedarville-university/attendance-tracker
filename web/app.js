@@ -21,6 +21,7 @@ import {
   createAttendanceSession,
   closeAttendanceSession,
   reopenAttendanceSession,
+  retryGradeSync,
   getAttendanceSession,
   listOpenAttendanceSessions,
   deleteAttendanceRecord,
@@ -242,6 +243,14 @@ async function closeSession() {
   }
   ui.renderSessionState({ state: 'closed' });
   ui.showAppMessage('info', 'Attendance session closed. Unscanned students were marked absent.');
+  await refreshGradeSync(currentAttendanceSessionId);
+}
+
+/** Re-fetches the session so the grade-sync panel reflects the latest job state. */
+async function refreshGradeSync(sessionId) {
+  if (!sessionId) return;
+  const detail = await getAttendanceSession(sessionId);
+  if (detail.ok) ui.renderGradeSyncState(detail.body?.gradeSync);
 }
 
 async function reopenSession() {
@@ -255,12 +264,27 @@ async function reopenSession() {
     return;
   }
   ui.renderSessionState({ state: 'reopened' });
+  // Reopening doesn't touch grade-sync jobs; hide the panel until the next close.
+  ui.renderGradeSyncState(undefined);
   ui.showAppMessage('info', 'Attendance session reopened. Scans are accepted again.');
 }
 
 elements.startSessionBtn.addEventListener('click', startSession);
 elements.closeSessionBtn.addEventListener('click', closeSession);
 elements.reopenSessionBtn.addEventListener('click', reopenSession);
+
+elements.retryGradeSyncBtn.addEventListener('click', async () => {
+  const sessionId = currentAttendanceSessionId;
+  if (!sessionId) return;
+  elements.retryGradeSyncBtn.disabled = true;
+  try {
+    const result = await retryGradeSync(sessionId);
+    if (!result.ok) ui.showAppMessage('error', 'Could not re-queue grade sync.');
+    await refreshGradeSync(sessionId);
+  } finally {
+    elements.retryGradeSyncBtn.disabled = false;
+  }
+});
 
 // ---- Roster wiring ------------------------------------------------------------
 
@@ -637,6 +661,7 @@ async function resumeOpenSessionIfAny() {
   }
 
   ui.renderSessionState({ state: chosen.state, label: chosen.label });
+  ui.renderGradeSyncState(detail.body?.gradeSync);
   ui.showAppMessage('info', 'Reconnected to the attendance session already in progress.');
 }
 

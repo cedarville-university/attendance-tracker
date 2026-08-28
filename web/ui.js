@@ -19,6 +19,9 @@ export const elements = {
   startSessionBtn: document.getElementById('btn-start-session'),
   closeSessionBtn: document.getElementById('btn-close-session'),
   reopenSessionBtn: document.getElementById('btn-reopen-session'),
+  gradeSyncPanel: document.getElementById('grade-sync-panel'),
+  gradeSyncStatusText: document.getElementById('grade-sync-status-text'),
+  retryGradeSyncBtn: document.getElementById('btn-retry-grade-sync'),
 
   rosterEnableToggle: document.getElementById('roster-enable-toggle'),
   loadRosterBtn: document.getElementById('btn-load-roster'),
@@ -170,6 +173,34 @@ export function renderSessionState(sessionInfo) {
     elements.reopenSessionBtn.hidden = false;
     elements.reopenSessionBtn.disabled = false;
   }
+}
+
+// ---- Grade-sync status --------------------------------------------------
+
+const GRADE_SYNC_TEXT = {
+  synced: 'Grades synchronized',
+  pending: 'Grades pending',
+  failed: 'Grade synchronization failed',
+};
+
+/**
+ * Renders the grade-sync summary carried by GET /api/attendance-sessions/:id
+ * (spec §28). `state === 'none'` (or no summary) hides the panel; the retry
+ * button shows only when a sync has actually failed.
+ * @param {{state?: string, counts?: {pending:number,synced:number,failed:number}, lastError?: string|null}} [summary]
+ */
+export function renderGradeSyncState(summary) {
+  const state = summary?.state ?? 'none';
+  if (state === 'none') {
+    elements.gradeSyncPanel.hidden = true;
+    elements.retryGradeSyncBtn.hidden = true;
+    return;
+  }
+  elements.gradeSyncPanel.hidden = false;
+  const base = GRADE_SYNC_TEXT[state] ?? state;
+  elements.gradeSyncStatusText.textContent =
+    state === 'failed' && summary?.lastError ? `${base} (${summary.lastError})` : base;
+  elements.retryGradeSyncBtn.hidden = state !== 'failed';
 }
 
 // ---- Latest scan ---------------------------------------------------------

@@ -70,6 +70,17 @@ export async function reopenAttendanceSession(sessionId, reason) {
 }
 
 /**
+ * Re-queues this course's failed grade-sync jobs (spec §25.9). Never throws.
+ * @param {string} sessionId
+ * @returns {Promise<{ok: true, retried: number}|{ok: false, error: {kind: string, message: string}}>}
+ */
+export async function retryGradeSync(sessionId) {
+  const result = await request(`/api/attendance-sessions/${sessionId}/grade-sync`, { method: 'POST' });
+  if (!result.ok) return result;
+  return { ok: true, retried: Number(result.body?.retried ?? 0) };
+}
+
+/**
  * @param {string} sessionId
  * @returns {Promise<{ok: true, body: object}|{ok: false, error: {kind: string, message: string}}>}
  */

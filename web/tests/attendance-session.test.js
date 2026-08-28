@@ -6,6 +6,7 @@ import {
   createAttendanceSession,
   closeAttendanceSession,
   reopenAttendanceSession,
+  retryGradeSync,
   getAttendanceSession,
   listOpenAttendanceSessions,
   deleteAttendanceRecord,
@@ -108,5 +109,18 @@ describe('attendance-session.js', () => {
     const result = await fetchAttendanceCsv('s1');
     expect(result.ok).toBe(false);
     expect(result.error.kind).toBe('http-status');
+  });
+
+  it('retryGradeSync POSTs to /grade-sync and returns the retried count on 200', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, retried: 2 }) });
+    const result = await retryGradeSync('sess-1');
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance-sessions/sess-1/grade-sync', expect.objectContaining({ method: 'POST' }));
+    expect(result).toEqual({ ok: true, retried: 2 });
+  });
+
+  it('retryGradeSync surfaces a non-ok response as {ok:false}', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: false, status: 500, json: () => Promise.reject(new Error('not json')) });
+    const result = await retryGradeSync('sess-1');
+    expect(result.ok).toBe(false);
   });
 });
