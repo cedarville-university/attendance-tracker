@@ -362,6 +362,10 @@ enabled: true
 label: Attendance
 ```
 
+In Canvas's current Admin → Apps registration UI, `window target: _blank` (JSON key `windowTarget`)
+and the NRPS/AGS `scopes` are not exposed as form fields — they can only be supplied through the JSON
+configuration method. `docs/canvas-installation.md` gives the full JSON.
+
 In a course placement, Canvas's `admins` visibility includes administrators and instructors rather than learners.
 
 Visibility is a UI convenience, **not an authorization control**. The backend must independently validate the LTI role claim.
@@ -2725,7 +2729,15 @@ role authorization
 
 Add the full security test matrix.
 
-**Exit criterion:** valid instructor Canvas launches work and malformed/replayed launches fail.
+**Exit criterion:** the full §45 security test matrix passes against an in-process mock Canvas
+platform — valid instructor launches produce a session, and every malformed/replayed/unauthorized
+launch is rejected before one is created.
+
+Registering the tool in a real Canvas instance and confirming an instructor launch end-to-end is
+**not** part of this phase: it requires a publicly reachable HTTPS deployment, which does not exist
+until Phase 7. That real-Canvas registration and verification (including checking the role-claim
+URIs against an actual launch payload) is a Phase 7 post-deployment step — see
+`docs/canvas-installation.md`.
 
 ---
 
@@ -2793,7 +2805,16 @@ health checks
 monitoring
 ```
 
-**Exit criterion:** a tagged/approved release deploys without any long-lived Azure deployment password in GitHub.
+Once a public HTTPS deployment exists, perform the real-Canvas registration and launch verification
+that earlier phases could not: register the tool in Canvas (Admin → Apps, JSON configuration — the
+scopes and `windowTarget: _blank` are not settable through the form), install it in a test course,
+seed the registration, then confirm an instructor launch opens the scanner in a new tab and a
+learner-role launch returns HTTP 403. Verify `AUTHORIZED_INSTRUCTOR_ROLE_URIS` against a real launch
+payload at this point. Full steps: `docs/canvas-installation.md`.
+
+**Exit criterion:** a tagged/approved release deploys without any long-lived Azure deployment
+password in GitHub, and an instructor LTI launch from a real Canvas course succeeds against the
+deployed instance while a learner-role launch is refused.
 
 ---
 
@@ -2897,13 +2918,14 @@ The completed repository shall contain:
 
 ## `docs/canvas-installation.md`
 
-* LTI Developer Key creation;
+* LTI tool registration (Admin → Apps, JSON configuration);
 * required scopes;
 * course-navigation placement;
-* new-tab configuration;
+* new-tab configuration (`windowTarget`, JSON-only);
 * privacy-level choices;
 * client/deployment ID entry;
-* production/beta/test differences.
+* production/beta/test differences;
+* note that this is a post-deployment step (needs a public HTTPS instance).
 
 ## `docs/security.md`
 

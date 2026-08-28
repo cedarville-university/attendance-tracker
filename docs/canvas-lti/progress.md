@@ -25,11 +25,11 @@ listed below for continuity but have not been planned in detail yet.
 - [ ] **Phase 3 — LTI authentication** — `/lti/login`, `/lti/launch`,
       `/lti/jwks`; OIDC transaction storage; launch validation; application
       sessions; role authorization; full security test matrix (spec §45).
-      Exit criterion: valid instructor Canvas launches work, malformed/replayed
-      launches fail. **Automated implementation complete** (all 24 §45 matrix
-      cases pass against a mocked Canvas platform) **-- manual real-Canvas
-      Developer Key verification (docs/canvas-installation.md) still pending**;
-      this checkbox stays unchecked until that manual step is confirmed.
+      Exit criterion: all 24 §45 cases pass against the in-process mock Canvas
+      platform (`npm test`). **Automated implementation complete.** Registering
+      the tool in a real Canvas instance and verifying an instructor launch
+      end-to-end (docs/canvas-installation.md) needs a public HTTPS deployment
+      and has moved to **Phase 7** (see below) — it does not gate this phase.
 - [ ] **Phase 4 — NRPS** — Canvas token acquisition and roster retrieval;
       uploaded roster replaced as the primary workflow; identity matching
       configuration.
@@ -47,8 +47,16 @@ listed below for continuity but have not been planned in detail yet.
 - [ ] **Phase 7 — Infrastructure and CI/CD** — Dockerfile, Bicep, Azure
       Container Apps, PostgreSQL, Key Vault, ACR, GitHub Actions OIDC
       deployment, stage/prod environments, health checks, monitoring.
+      **Then, once a public HTTPS instance exists:** register the tool in
+      Canvas (Admin → Apps, JSON config), install it in a test course, seed the
+      registration, and verify an instructor launch opens the scanner in a new
+      tab while a learner-role launch returns 403 — including checking
+      `AUTHORIZED_INSTRUCTOR_ROLE_URIS` against a real launch payload
+      (docs/canvas-installation.md). This is the real-Canvas verification that
+      Phase 3 could not run.
       Exit criterion: a tagged/approved release deploys without any long-lived
-      Azure deployment password in GitHub.
+      Azure deployment password in GitHub, and a real instructor Canvas launch
+      against the deployed instance succeeds while a learner launch is refused.
 - [ ] **Phase 8 — Hardening** — dependency review, CSP/CSRF/tenant-isolation/
       rate-limit testing, resolver redaction testing, key rotation drill,
       database restore drill, Canvas token/key rotation tests, browser/hardware
@@ -212,11 +220,12 @@ listed below for continuity but have not been planned in detail yet.
   the standalone dev mode (spec §51, which performs no LTI launch) both still call it without a
   session. Phase 5 retires it in favour of `POST /api/attendance-sessions/{id}/scans` behind
   `requireSession` + `requireCsrf` and migrates the UI at the same time.
-- **Not yet done:** the manual real-Canvas Developer Key setup and instructor/learner launch
-  verification in `docs/canvas-installation.md`. `server/src/lti/roles.ts`'s
-  `AUTHORIZED_INSTRUCTOR_ROLE_URIS` set is written from the standard 1EdTech role vocabulary but is
-  explicitly flagged there as unverified against a real Canvas launch payload until that manual
-  step runs.
+- **Deferred to Phase 7 (needs a public HTTPS deployment):** the real-Canvas tool registration
+  (Admin → Apps, JSON config) and instructor/learner launch verification in
+  `docs/canvas-installation.md`. Canvas cannot deliver a launch to `http://localhost`, so this
+  could never have run in Phase 3. `server/src/lti/roles.ts`'s `AUTHORIZED_INSTRUCTOR_ROLE_URIS`
+  set is written from the standard 1EdTech role vocabulary and stays flagged there as unverified
+  against a real Canvas launch payload until that Phase 7 step runs.
 
 ## Deferred decisions
 

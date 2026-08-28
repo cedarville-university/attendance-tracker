@@ -82,7 +82,7 @@ server/tests/routes/lti-launch.test.ts
 server/tests/routes/me.test.ts
 server/tests/routes/hardening.test.ts                    # helmet CSP / Permissions-Policy / rate-limit config
 
-docs/canvas-installation.md                              # manual Canvas Developer Key setup steps
+docs/canvas-installation.md                              # Canvas registration (Admin -> Apps, JSON) -- Phase 7 post-deploy step
 ```
 
 Modified files:
@@ -95,7 +95,7 @@ eslint.config.js              # + @typescript-eslint/no-unused-vars override for
 vitest.config.ts              # + globalSetup, + singleFork pool (shared test DB is truncated per file)
 server/src/index.ts           # wire env/db/signing-keys/all new routes/helmet/rate-limit/Permissions-Policy
 README.md                     # Phase 3 env var table + "tests require Postgres" note
-docs/canvas-lti/progress.md   # Phase 3 status note (not marked done -- manual verification pending)
+docs/canvas-lti/progress.md   # Phase 3 status note; real-Canvas verification listed under Phase 7
 ```
 
 ---
@@ -2570,7 +2570,7 @@ Expected: FAIL with "Cannot find module '../../src/lti/roles.js'"
 // launch, so it is the highest-risk assumption in this phase: if Canvas emits a role URI outside
 // this set for a real instructor, every legitimate launch 403s, and if it emits one of these for a
 // non-teacher, an unauthorized user gets in. It MUST therefore be verified against a real Canvas
-// launch payload during the manual Canvas Developer Key verification in
+// launch payload during the Phase 7 post-deployment Canvas verification in
 // docs/canvas-installation.md (step 5) before this is trusted as load-bearing security logic.
 export const AUTHORIZED_INSTRUCTOR_ROLE_URIS = new Set<string>([
   'http://purl.imsglobal.org/vocab/lis/v2/membership#Instructor',
@@ -5343,37 +5343,92 @@ Note on database separation: this smoke seed writes to the **dev** database name
 
 - [ ] **Step 3: Write `docs/canvas-installation.md`**
 
+This doc is *written* in Phase 3 but is **not executed until Phase 7**: registering the tool in a
+real Canvas instance needs a publicly reachable HTTPS deployment, which does not exist until Phase 7.
+Phase 3's exit criterion is the automated §45 matrix against the mock Canvas platform. Content to
+write (keep it in sync with the shipped file — the file is authoritative if they ever diverge):
+
 ```markdown
-# Canvas Developer Key setup (Phase 3 manual verification)
+# Canvas registration and real-launch verification (Phase 7, post-deployment)
 
-This is the one-time, per-institution manual setup needed to launch this tool from a real Canvas
-course, and the checklist for verifying an instructor launch works end-to-end. The automated test
-suite (`npm test`) already covers all 24 cases in spec §45 against a mocked Canvas platform; this
-document is only for the real-Canvas verification step required by this plan's Definition of Done.
+This is the one-time, per-institution setup that registers this tool in Canvas and the checklist for
+verifying an instructor launch works end-to-end against a **real** Canvas instance.
 
-## 1. Create the Developer Key
+**This step cannot run until the app is deployed.** Canvas form-POSTs a signed `id_token` to a public
+HTTPS URL and redirects the instructor's browser to another one; it cannot reach `http://localhost`.
+So this requires a public HTTPS deployment — i.e. **Phase 7** (spec §54) must be done first. Phase 3's
+exit criterion is met entirely by `npm test` (all 24 spec §45 cases against an in-process mock Canvas
+platform). The steps here are the separate real-Canvas confirmation, and the only place
+`server/src/lti/roles.ts`'s `AUTHORIZED_INSTRUCTOR_ROLE_URIS` set is checked against an actual launch
+payload (step 5).
 
-1. In Canvas, go to **Admin → Developer Keys → + Developer Key → + LTI Key**, and choose **Manual
-   Entry** (this project does not implement dynamic registration in Phase 3; deep linking is an
-   explicit non-goal per the spec).
-2. **Redirect URIs**: `https://<APP_BASE_URL>/lti/launch` (this is where Canvas form-POSTs the
-   signed `id_token`).
-   **Target Link URI**: `https://<APP_BASE_URL>/index.html` — **not** `/lti/launch`. Canvas copies
-   this value into the launch's `target_link_uri`, and `/lti/launch` redirects the browser to it
-   after a successful launch (`POST /lti/launch` → 303 → this URL). Pointing it at `/lti/launch`
-   would redirect the launch endpoint back to itself. Whatever you put here must also appear
-   verbatim in `ALLOWED_TARGET_LINK_URIS` (step 5.1 below), which is the exact-match allowlist that
-   makes that redirect safe.
-   **OIDC Initiation URL**: `https://<APP_BASE_URL>/lti/login`.
-   **JWK Method**: Public JWK URL → `https://<APP_BASE_URL>/lti/jwks`.
-   **Privacy Level**: `Name Only`.
-3. Enable the NRPS and AGS scope checkboxes now, even though this app doesn't call those services
-   until Phase 4/6 -- this one Developer Key is reused through those later phases. **Use whatever
-   scope strings Canvas's own UI populates; never hand-type or hardcode a scope URN.**
-4. **Course Navigation placement**: enabled, label `Attendance`, **Default Visibility: Admins**,
-   **Window Target: `_blank`** (required -- Canvas iframes don't delegate WebHID permissions, which
-   this app's scanner needs).
-5. Save, toggle the key **On**, and copy its **Client ID**.
+## 1. Register the tool in Canvas (Admin → Apps)
+
+Register from the account-level **Admin → Apps** page. Canvas's current Apps form collects the
+redirect URI, target link URI, OIDC initiation URL, and JWK/JWKS, but does **not** expose the LTI
+Advantage (NRPS/AGS) scope toggles and has **no** placement "window target" / "open in new tab"
+field. Both are required here and both are JSON-only, so configure the whole tool as JSON: in
+**Admin → Apps**, add the app, choose the **paste-JSON / manual JSON configuration** option (label
+varies by Canvas version), and paste the block below with `<APP_BASE_URL>` replaced by your deployed
+origin (e.g. `https://attendance.example.edu`, no trailing slash):
+
+    {
+      "title": "Attendance",
+      "description": "Classroom attendance via a browser-connected HID card reader",
+      "oidc_initiation_url": "https://<APP_BASE_URL>/lti/login",
+      "target_link_uri": "https://<APP_BASE_URL>/index.html",
+      "public_jwk_url": "https://<APP_BASE_URL>/lti/jwks",
+      "redirect_uris": ["https://<APP_BASE_URL>/lti/launch"],
+      "scopes": [
+        "https://purl.imsglobal.org/spec/lti-nrps/scope/contextmembership.readonly",
+        "https://purl.imsglobal.org/spec/lti-ags/scope/lineitem",
+        "https://purl.imsglobal.org/spec/lti-ags/scope/score"
+      ],
+      "extensions": [
+        {
+          "platform": "canvas.instructure.com",
+          "domain": "<APP_BASE_URL>",
+          "privacy_level": "name_only",
+          "settings": {
+            "text": "Attendance",
+            "placements": [
+              {
+                "placement": "course_navigation",
+                "message_type": "LtiResourceLinkRequest",
+                "target_link_uri": "https://<APP_BASE_URL>/index.html",
+                "text": "Attendance",
+                "windowTarget": "_blank",
+                "default": "enabled",
+                "visibility": "admins"
+              }
+            ]
+          }
+        }
+      ]
+    }
+
+Field notes:
+
+- **`redirect_uris` → `/lti/launch`**: where Canvas form-POSTs the signed `id_token`. If you use the
+  Apps form field instead of the JSON, its value must still be exactly this.
+- **`target_link_uri` → `/index.html`, not `/lti/launch`.** Canvas copies this into the launch's
+  `target_link_uri`; `/lti/launch` issues a 303 to it on success. Pointing it at `/lti/launch` would
+  redirect the launch endpoint to itself. Must also appear verbatim in `ALLOWED_TARGET_LINK_URIS`
+  (step 5.1).
+- **`oidc_initiation_url` → `/lti/login`; `public_jwk_url` → `/lti/jwks`** (this app publishes its own
+  public keys there — do not paste a static `public_jwk`).
+- **`scopes`**: spec §10 requires NRPS context-membership read-only + AGS line items read/write + AGS
+  scores write, and nothing else. Not called until Phases 4/6 but the registration is reused, so
+  grant now. **Confirm these three strings against Canvas's current LTI configuration reference
+  (spec §58) — do not trust this file's copy over Canvas's own docs.**
+- **`windowTarget: "_blank"`** on `course_navigation` is required: WebHID's Permissions Policy
+  defaults to `self`, so a Canvas iframe does not get WebHID capability and the scanner must open
+  top-level (spec §8). JSON-only — the main reason the config goes in as JSON.
+- **`visibility: "admins"`** shows the link to admins/instructors, not learners (UI convenience only;
+  the backend still validates the role claim). **`privacy_level: "name_only"`** — NRPS returns
+  `lis_person_sourcedid` and names but not email (spec §10.2).
+
+Save, toggle the resulting key/app **On**, and copy its **Client ID**.
 
 ## 2. Install it in your test course
 
@@ -5397,14 +5452,13 @@ Use the `authorization_endpoint` value as `--oidc-auth-endpoint`, `token_endpoin
 ## 4. Seed the registration
 
 Run `server/src/database/seed-registration.ts` (see its usage comment) with the issuer, client ID,
-endpoints, and deployment ID gathered above, against whichever `DATABASE_URL` your deployed/local
-instance of this app is using.
+endpoints, and deployment ID gathered above, against the `DATABASE_URL` of the deployed app instance.
 
 ## 5. Verify the launch
 
-1. Set `ALLOWED_TARGET_LINK_URIS` to include the exact **Target Link URI** you configured in step
-   1.2 — `https://<APP_BASE_URL>/index.html` — since that is the page `/lti/launch` redirects to on
-   success. (The list may hold several entries, e.g. `/index.html,/scanner.html`; a launch is
+1. Set the deployed app's `ALLOWED_TARGET_LINK_URIS` to include the exact **target link URI** you
+   configured in step 1 — `https://<APP_BASE_URL>/index.html` — since that is the page `/lti/launch`
+   redirects to on success. (The list may hold several entries, e.g. `/index.html,/scanner.html`; a launch is
    redirected to whichever one Canvas sent, not to the first.) Also set
    `LTI_TOOL_SIGNING_KEYS_JSON` if this isn't a
    throwaway dev instance (otherwise a restart rotates the signing key and Canvas's cached JWKS
@@ -5441,11 +5495,11 @@ to:
 - [ ] **Phase 3 — LTI authentication** — `/lti/login`, `/lti/launch`,
       `/lti/jwks`; OIDC transaction storage; launch validation; application
       sessions; role authorization; full security test matrix (spec §45).
-      Exit criterion: valid instructor Canvas launches work, malformed/replayed
-      launches fail. **Automated implementation complete** (all 24 §45 matrix
-      cases pass against a mocked Canvas platform) **-- manual real-Canvas
-      Developer Key verification (docs/canvas-installation.md) still pending**;
-      this checkbox stays unchecked until that manual step is confirmed.
+      Exit criterion: all 24 §45 cases pass against the in-process mock Canvas
+      platform (`npm test`). Real-Canvas registration and instructor/learner
+      launch verification (docs/canvas-installation.md) needs a public HTTPS
+      deployment and is a **Phase 7** post-deploy step — it does not gate this
+      checkbox.
 ```
 
 Then append a new subsection right after the existing "## Phase 2 — what actually happened" section (before "## Deferred decisions"):
@@ -5474,8 +5528,8 @@ Then append a new subsection right after the existing "## Phase 2 — what actua
   the standalone dev mode (spec §51, which performs no LTI launch) both still call it without a
   session. Phase 5 retires it in favour of `POST /api/attendance-sessions/{id}/scans` behind
   `requireSession` + `requireCsrf` and migrates the UI at the same time.
-- **Not yet done:** the manual real-Canvas Developer Key setup and instructor/learner launch
-  verification in `docs/canvas-installation.md`. `server/src/lti/roles.ts`'s
+- **Deferred to Phase 7 (needs a public HTTPS deployment):** the real-Canvas registration and
+  instructor/learner launch verification in `docs/canvas-installation.md`. `server/src/lti/roles.ts`'s
   `AUTHORIZED_INSTRUCTOR_ROLE_URIS` set is written from the standard 1EdTech role vocabulary but is
   explicitly flagged there as unverified against a real Canvas launch payload until that manual
   step runs.
@@ -5490,7 +5544,7 @@ Expected: all pass.
 
 ```bash
 git add server/src/database/seed-registration.ts docs/canvas-installation.md docs/canvas-lti/progress.md
-git commit -m "docs: add seed-registration CLI, Canvas Developer Key setup guide, and Phase 3 progress note"
+git commit -m "docs: add seed-registration CLI, Canvas registration guide, and Phase 3 progress note"
 ```
 
 ---
@@ -5515,4 +5569,8 @@ git commit -m "docs: add seed-registration CLI, Canvas Developer Key setup guide
 - Spec §26's `courses.nrps_url` / `ags_lineitems_url` / `last_launched_at` — added by Phase 4's migration (see Task 3).
 - Authentication on `POST /api/scans` — deliberately unchanged in Phase 3; Phase 5 replaces the route (see Task 27 Step 3).
 
-- [ ] **Not part of this plan's automated tasks, and required before Phase 3 can be checked off in `docs/canvas-lti/progress.md`:** the manual real-Canvas Developer Key launch verification described in `docs/canvas-installation.md` — this is the checkpoint to run with the user next, using their test/beta Canvas instance.
+- [ ] **Not part of this plan's automated tasks, and NOT a gate on checking Phase 3 off:** the
+  real-Canvas registration and instructor/learner launch verification described in
+  `docs/canvas-installation.md`. It needs a publicly reachable HTTPS deployment (Phase 7) and is
+  listed as a Phase 7 post-deploy step in `docs/canvas-lti/progress.md`. Phase 3 is done when the
+  §45 matrix above passes against the mock platform.
