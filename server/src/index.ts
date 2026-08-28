@@ -8,7 +8,6 @@ import fastifyCookie from '@fastify/cookie';
 import fastifyFormbody from '@fastify/formbody';
 import fastifyHelmet from '@fastify/helmet';
 import fastifyRateLimit from '@fastify/rate-limit';
-import { registerScansRoute } from './routes/scans.js';
 import { MockIdentityResolver } from './identity/mock-resolver.js';
 import { createHttpIdentityResolverFromEnv } from './identity/http-resolver.js';
 import { loadEnv, parseAllowedTargetLinkUris } from './config/env.js';
@@ -86,9 +85,8 @@ await app.register(fastifyFormbody);
 await app.register(fastifyStatic, { root: webRoot });
 
 // /lti/login and /lti/launch get rate-limited (spec §31.10: 30 req/min/IP) inside their own
-// encapsulated plugin context so the limit doesn't apply to /api/scans (which needs classroom
-// bursts, per spec §31.10's explicit "do not impose a rate limit that prevents a class from
-// scanning through quickly").
+// encapsulated plugin context so the limit doesn't apply to POST /api/attendance-sessions/{id}/scans
+// (classroom bursts, spec §31.10).
 await app.register(async (instance) => {
   await instance.register(fastifyRateLimit, { max: 30, timeWindow: '1 minute' });
 
@@ -134,15 +132,6 @@ registerAttendanceSessionsRoute(app, {
 });
 
 app.get('/health', async () => ({ status: 'ok' }));
-
-// DELIBERATE: POST /api/scans stays UNAUTHENTICATED in Phase 3 -- no requireSession, no
-// requireCsrf, no rate limit. It is registered on the root `app`, outside the rate-limited plugin
-// scope above, exactly as Phase 2 shipped it. Phase 3 adds endpoints beside it and introduces no
-// new exposure; the existing browser UI and the standalone dev mode (spec §51, which never
-// performs an LTI launch) both still call it without a session. Phase 5 retires this route in
-// favour of POST /api/attendance-sessions/{id}/scans behind requireSession + requireCsrf, and
-// migrates the UI at the same time. Do not add auth here.
-registerScansRoute(app, identityResolver);
 
 const port = Number(process.env.PORT ?? 3000);
 app.listen({ port, host: '0.0.0.0' }).catch((err) => {
