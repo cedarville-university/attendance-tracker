@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { seedInstitutionAndCourse } from '../support/seed.js';
 import { MockCanvasPlatform } from '../support/mock-canvas.js';
@@ -175,5 +175,32 @@ describe('submitScan -- roster matching edge cases', () => {
     const rows = await db.select().from(attendanceRecords).where(and(eq(attendanceRecords.attendanceSessionId, sessionId), eq(attendanceRecords.clientScanId, 'retry-1')));
     expect(rows).toHaveLength(1);
     expect(attempt).toBe(2); // resolver WAS called again on the retry
+  });
+});
+
+describe('submitScan -- idempotency', () => {
+  it('returns the same settled record, without calling the resolver again, for a duplicate clientScanId submitted sequentially', async () => {
+    const { institutionId, sessionId } = await seedOpenSessionWithMember('1000000');
+    const resolveCard = vi.fn().mockResolvedValue(successResolution({ universityId: '1000000' }));
+    const resolver: IdentityResolver = { resolveCard };
+
+    const first = await submitScan(db, sessionId, { clientScanId: 'dup-1', cardCode: 'CARD001', scannedAt: new Date().toISOString() }, { resolver, institution: { id: institutionId, cardFingerprintEnabled: false } });
+    const second = await submitScan(db, sessionId, { clientScanId: 'dup-1', cardCode: 'CARD001', scannedAt: new Date().toISOString() }, { resolver, institution: { id: institutionId, cardFingerprintEnabled: false } });
+
+    expect(second.id).toBe(first.id);
+    expect(resolveCard).toHaveBeenCalledTimes(1); // 'present' is settled -> second call short-circuits before the resolver
+  });
+
+  it('when two concurrent requests race on the same clientScanId (lost-response-then-retried), exactly one attendance_records row exists and both callers see it', async () => {
+    const { institutionId, sessionId } = await seedOpenSessionWithMember('1000000');
+    const resolver: IdentityResolver = { resolveCard: async () => successResolution({ universityId: '1000000' }) };
+    const input = { clientScanId: 'race-1', cardCode: 'CARD001', scannedAt: new Date().toISOString() };
+    const deps = { resolver, institution: { id: institutionId, cardFingerprintEnabled: false } };
+
+    const [a, b] = await Promise.all([submitScan(db, sessionId, input, deps), submitScan(db, sessionId, input, deps)]);
+
+    expect(a.id).toBe(b.id);
+    const allRows = await db.select().from(attendanceRecords).where(and(eq(attendanceRecords.attendanceSessionId, sessionId), eq(attendanceRecords.clientScanId, 'race-1')));
+    expect(allRows).toHaveLength(1);
   });
 });
