@@ -1,6 +1,8 @@
+import fastifyFormbody from '@fastify/formbody';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { SignJWT, generateKeyPair, exportJWK } from 'jose';
 import { randomUUID } from 'node:crypto';
+import type { NrpsRawMember } from '../../src/lti/roster-config.js';
 
 interface MockKeyEntry {
   kid: string;
@@ -36,9 +38,62 @@ export class MockCanvasPlatform {
   private app: FastifyInstance;
   private port = 0;
 
+  // --- Phase 4: token endpoint + paginated NRPS ---
+  private issuedTokens = new Set<string>();
+  private expiredTokens = new Set<string>();
+  private courseMembers = new Map<string, NrpsRawMember[]>();
+  private rateLimitOnce = new Set<string>();
+  private breakNextPage = new Set<string>();
+  private nrpsPageSize = 50;
+
   constructor() {
     this.app = Fastify({ logger: false });
+    this.app.register(fastifyFormbody);
     this.app.get('/jwks', async () => ({ keys: [...this.keys.values()].map((k) => k.publicJwk) }));
+
+    this.app.post('/login/oauth2/token', async (request, reply) => {
+      const body = (request.body ?? {}) as Record<string, string>;
+      if (
+        body.grant_type !== 'client_credentials' ||
+        body.client_assertion_type !== 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer' ||
+        !body.client_assertion
+      ) {
+        return reply.code(400).send({ error: 'invalid_request' });
+      }
+      const token = `mock-access-token-${randomUUID()}`;
+      this.issuedTokens.add(token);
+      return { access_token: token, token_type: 'Bearer', expires_in: 3600, scope: body.scope ?? '' };
+    });
+
+    this.app.get('/nrps/:courseId/members', async (request, reply) => {
+      const { courseId } = request.params as { courseId: string };
+      const auth = request.headers.authorization ?? '';
+      const token = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : '';
+      if (!this.issuedTokens.has(token) || this.expiredTokens.has(token)) {
+        return reply.code(401).send({ error: 'invalid_token' });
+      }
+
+      const page = Number((request.query as { page?: string }).page ?? '1');
+
+      if (this.rateLimitOnce.has(courseId)) {
+        this.rateLimitOnce.delete(courseId);
+        reply.header('retry-after', '1');
+        return reply.code(429).send({ error: 'rate_limited' });
+      }
+
+      if (this.breakNextPage.has(courseId) && page >= 2) {
+        this.breakNextPage.delete(courseId);
+        return { id: this.nrpsUrlFor(courseId), context: {} }; // deliberately no `members`
+      }
+
+      const all = this.courseMembers.get(courseId) ?? [];
+      const start = (page - 1) * this.nrpsPageSize;
+      const slice = all.slice(start, start + this.nrpsPageSize);
+      if (start + this.nrpsPageSize < all.length) {
+        reply.header('link', `<${this.nrpsUrlFor(courseId)}?page=${page + 1}>; rel="next"`);
+      }
+      return { id: this.nrpsUrlFor(courseId), context: {}, members: slice };
+    });
   }
 
   async start(): Promise<void> {
@@ -122,5 +177,33 @@ export class MockCanvasPlatform {
     }
 
     return signed;
+  }
+
+  private get baseUrl(): string {
+    return `http://127.0.0.1:${this.port}`;
+  }
+
+  get tokenUrl(): string {
+    return `${this.baseUrl}/login/oauth2/token`;
+  }
+
+  nrpsUrlFor(courseId: string): string {
+    return `${this.baseUrl}/nrps/${courseId}/members`;
+  }
+
+  setCourseMembers(courseId: string, members: NrpsRawMember[]): void {
+    this.courseMembers.set(courseId, members);
+  }
+  setPageSize(n: number): void {
+    this.nrpsPageSize = n;
+  }
+  expireAccessToken(token: string): void {
+    this.expiredTokens.add(token);
+  }
+  rateLimitNextRequest(courseId: string): void {
+    this.rateLimitOnce.add(courseId);
+  }
+  breakPaginationOnNextPage(courseId: string): void {
+    this.breakNextPage.add(courseId);
   }
 }
