@@ -4,13 +4,16 @@ import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { seedInstitutionAndCourse } from '../support/seed.js';
 import { MockCanvasPlatform } from '../support/mock-canvas.js';
 import { createAttendanceSession, closeAttendanceSession, reopenAttendanceSession } from '../../src/attendance/session-lifecycle.js';
-import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents } from '../../src/database/schema.js';
+import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents, gradeSyncJobs, courseMembers } from '../../src/database/schema.js';
 import type { ToolSigningKey } from '../../src/lti/signing-keys.js';
 
 // D9: Start Attendance goes through the shared fallback helper, so that is what we mock.
 // vi.mock (not vi.spyOn) — an ESM named-export spy throws "Cannot redefine property"
 // under some esbuild interop settings; Phase 4's route tests also use vi.mock (Q3).
-vi.mock('../../src/attendance/roster-store.js', () => ({
+// Only getRosterWithFallback is stubbed — the real getCachedRosterAsMembers still runs so the
+// Phase 6 grade population reads the course_members rows each test seeds.
+vi.mock('../../src/attendance/roster-store.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/attendance/roster-store.js')>()),
   getRosterWithFallback: vi.fn(),
 }));
 import { getRosterWithFallback } from '../../src/attendance/roster-store.js';
@@ -171,6 +174,119 @@ describe('closeAttendanceSession', () => {
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'closed' }).returning();
 
     await expect(closeAttendanceSession(db, session.id, 'instructor-1')).rejects.toMatchObject({ code: 'session_already_closed' });
+  });
+
+  // --- Phase 6: cumulative grade calculation + durable grade-sync enqueue on close ---
+
+  // The N1 grade population reads course_members directly; seed it to match the mocked roster.
+  async function seedCourseMembers(courseId: string, ms: ReturnType<typeof member>[]) {
+    await db.insert(courseMembers).values(
+      ms.map((m) => ({
+        courseId,
+        ltiUserId: m.ltiUserId,
+        institutionalId: m.institutionalId,
+        displayName: m.displayName,
+        givenName: m.givenName,
+        familyName: m.familyName,
+        email: m.email,
+        roles: m.roles,
+        status: m.status, // 'Active' -> eligible for a Learner; 'Inactive' -> not
+      })),
+    );
+  }
+
+  it('enqueues one pending grade_sync_job per eligible current-roster member and writes a grade_sync_requested audit row', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    const members = [
+      member({ ltiUserId: 'u-present', institutionalId: '111' }),
+      member({ ltiUserId: 'u-absent', institutionalId: '222' }),
+      member({ ltiUserId: 'u-inelig', institutionalId: '333', eligibleForAttendance: false, status: 'Inactive' }),
+    ];
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members, fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    await seedCourseMembers(courseId, members);
+    const session = await createAttendanceSession(db, courseId, 'i1', {}, 'req-open', { signingKey });
+
+    // u-present scans present; u-absent never scans -> close marks them system_absence.
+    await db.insert(attendanceRecords).values({
+      attendanceSessionId: session.id, ltiUserId: 'u-present', institutionalId: '111',
+      clientScanId: 's1', status: 'present', source: 'card', scannedAt: new Date(),
+    });
+
+    await closeAttendanceSession(db, session.id, 'i1', 'req-close');
+
+    const jobs = await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, courseId));
+    const byUser = new Map(jobs.map((j) => [j.ltiUserId, j]));
+    expect(byUser.get('u-present')).toMatchObject({ state: 'pending', attemptCount: 0 });
+    expect(byUser.get('u-present')!.score).toBeCloseTo(100);
+    expect(byUser.get('u-absent')!.score).toBeCloseTo(0);
+    expect(byUser.has('u-inelig')).toBe(false); // Inactive -> isEligibleForAttendance false -> not graded
+    expect(byUser.get('u-present')!.attendanceSessionId).toBe(session.id);
+
+    const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_sync_requested'));
+    expect(audit).toMatchObject({ targetType: 'attendance_session', targetId: session.id, actorLtiUserId: 'i1', requestId: 'req-close' });
+    expect(audit.newValue).toMatchObject({ jobCount: 2, closedSessionCount: 1 });
+    expect(audit.institutionId).not.toBeNull();
+  });
+
+  it('recomputes cumulatively and UPDATES the same job rows when a second session in the course closes', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    const members = [member({ ltiUserId: 'u1', institutionalId: '111' })];
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members, fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    await seedCourseMembers(courseId, members);
+
+    // Session A: present -> 100
+    const a = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await db.insert(attendanceRecords).values({ attendanceSessionId: a.id, ltiUserId: 'u1', institutionalId: '111', clientScanId: 'a1', status: 'present', source: 'card', scannedAt: new Date() });
+    await closeAttendanceSession(db, a.id, 'i1', 'ra');
+
+    // Session B: absent (system_absence at close) -> cumulative 1/2 -> 50
+    const b = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await closeAttendanceSession(db, b.id, 'i1', 'rb');
+
+    const jobs = await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, courseId));
+    expect(jobs).toHaveLength(1); // upserted, not appended
+    expect(jobs[0].score).toBeCloseTo(50);
+    expect(jobs[0].state).toBe('pending');
+    expect(jobs[0].attendanceSessionId).toBe(b.id); // stamped with the latest triggering session
+  });
+
+  it('excludes a reopened session from the cumulative denominator (spec §25.8, 2026-08-28 ruling)', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    const members = [member({ ltiUserId: 'u1', institutionalId: '111' })];
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members, fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    await seedCourseMembers(courseId, members);
+
+    // Session A: absent -> would drag the average to 1/2 = 50 if it were still counted.
+    const a = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await closeAttendanceSession(db, a.id, 'i1', 'ra');
+    await reopenAttendanceSession(db, a.id, 'i1', 'correcting', 'rr'); // A is now 'reopened'
+
+    // Session B: present. Only B is 'closed', so the score is 1/1 -> 100.
+    const b = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await db.insert(attendanceRecords).values({
+      attendanceSessionId: b.id, ltiUserId: 'u1', institutionalId: '111',
+      clientScanId: 'b1', status: 'present', source: 'card', scannedAt: new Date(),
+    });
+    await closeAttendanceSession(db, b.id, 'i1', 'rb');
+
+    const jobs = await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, courseId));
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].score).toBeCloseTo(100);
+    const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_sync_requested')).orderBy(auditEvents.id);
+    expect(audit).toBeTruthy();
+  });
+
+  it('enqueues no jobs (but still audits) when the current roster has no eligible members', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    // no seedCourseMembers -> course_members is empty
+    const session = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+
+    await closeAttendanceSession(db, session.id, 'i1', 'rc');
+
+    expect(await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, courseId))).toHaveLength(0);
+    const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_sync_requested'));
+    expect(audit.newValue).toMatchObject({ jobCount: 0 });
   });
 });
 

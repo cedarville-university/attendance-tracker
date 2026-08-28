@@ -9,8 +9,13 @@ import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditE
 import type { IdentityResolver } from '../../src/identity/types.js';
 import type { ToolSigningKey } from '../../src/lti/signing-keys.js';
 
-// createAttendanceSession degrades through the shared helper -> mock it (Q3).
-vi.mock('../../src/attendance/roster-store.js', () => ({ getRosterWithFallback: vi.fn() }));
+// createAttendanceSession degrades through the shared helper -> mock it (Q3). Only
+// getRosterWithFallback is stubbed; the real getCachedRosterAsMembers still runs so
+// closeAttendanceSession's Phase 6 grade population can read course_members.
+vi.mock('../../src/attendance/roster-store.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/attendance/roster-store.js')>()),
+  getRosterWithFallback: vi.fn(),
+}));
 import { getRosterWithFallback } from '../../src/attendance/roster-store.js';
 
 const { db } = getTestDb();
