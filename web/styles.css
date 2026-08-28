@@ -291,13 +291,12 @@ button.danger:hover:not(:disabled) {
   border-color: var(--color-primary);
 }
 
-.latest-scan--expected,
-.latest-scan--unchecked {
+.latest-scan--present {
   background: var(--color-success-bg);
   border-color: var(--color-success);
 }
 
-.latest-scan--lookup-error {
+.latest-scan--lookup_error {
   background: var(--color-warning-bg);
   border-color: var(--color-warning);
 }
@@ -344,8 +343,7 @@ td {
   background: var(--color-idle-bg);
 }
 
-.status-badge--expected,
-.status-badge--unchecked {
+.status-badge--present {
   background: var(--color-success-bg);
   color: var(--color-success);
 }
@@ -355,7 +353,7 @@ td {
   color: var(--color-danger);
 }
 
-.status-badge--lookup-error {
+.status-badge--lookup_error {
   background: var(--color-warning-bg);
   color: var(--color-warning);
 }
