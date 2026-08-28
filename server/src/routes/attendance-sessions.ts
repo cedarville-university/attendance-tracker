@@ -17,6 +17,7 @@ import { submitScan } from '../attendance/scan-service.js';
 import { applyManualCorrection } from '../attendance/manual-correction.js';
 import { buildAttendanceSessionCsv } from '../attendance/csv-export.js';
 import { resolveCurrentRecord } from '../attendance/member-status.js';
+import { getGradeSyncSummary, resetFailedJobs } from '../attendance/grade-sync-store.js';
 import type { IdentityResolver } from '../identity/types.js';
 import type { ToolSigningKey } from '../lti/signing-keys.js';
 
@@ -142,6 +143,10 @@ export function registerAttendanceSessionsRoute(app: FastifyInstance, deps: Atte
       // appear in the per-member view. Surface them explicitly so a page reload
       // (C1 rehydrate) doesn't silently drop them.
       unmatchedRecords: records.filter((r) => !r.ltiUserId).map(serializeRecord),
+      // Phase 6: cumulative grade-sync status for this session's course (spec §28 UI states).
+      // Use `row.courseId` — the session row being served; `loadSessionScopedToCourse` already
+      // tenant-scoped it, so it equals the session's course.
+      gradeSync: await getGradeSyncSummary(db, row.courseId),
     };
   });
 
@@ -257,6 +262,31 @@ export function registerAttendanceSessionsRoute(app: FastifyInstance, deps: Atte
     } catch (err) {
       return replyForError(request, reply, err);
     }
+  });
+
+  // Phase 6 (spec §25.9): manual retry of this course's failed grade-sync jobs.
+  // CSRF-gated mutation; cross-tenant lookups 404 (never 403) like the siblings.
+  app.post('/api/attendance-sessions/:id/grade-sync', mutation, async (request, reply) => {
+    const session = sessionOf(request, reply);
+    if (!session) return;
+    const { id } = request.params as { id: string };
+    const row = await loadSessionScopedToCourse(id, session.courseId);
+    if (!row) return reply.code(404).send({ error: 'not_found', requestId: request.id });
+
+    const retried = await resetFailedJobs(db, row.courseId, new Date());
+    const [course] = await db.select().from(courses).where(eq(courses.id, row.courseId));
+    await db.insert(auditEvents).values({
+      institutionId: course.institutionId,
+      courseId: row.courseId,
+      attendanceSessionId: id,
+      actorLtiUserId: session.ltiSubject,
+      eventType: 'grade_sync_requested',
+      targetType: 'attendance_session',
+      targetId: id,
+      newValue: { retriedJobCount: retried, trigger: 'manual' },
+      requestId: request.id,
+    });
+    return { ok: true, retried };
   });
 
   app.get('/api/attendance-sessions/:id/export.csv', readOnly, async (request, reply) => {

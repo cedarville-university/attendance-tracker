@@ -5,7 +5,7 @@ import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { seedInstitutionAndCourse } from '../support/seed.js';
 import { MockCanvasPlatform } from '../support/mock-canvas.js';
 import { registerAttendanceSessionsRoute } from '../../src/routes/attendance-sessions.js';
-import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents } from '../../src/database/schema.js';
+import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents, gradeSyncJobs } from '../../src/database/schema.js';
 import type { IdentityResolver } from '../../src/identity/types.js';
 import type { ToolSigningKey } from '../../src/lti/signing-keys.js';
 
@@ -299,5 +299,54 @@ describe('attendance-sessions routes', () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers['content-type']).toContain('text/csv');
     expect(response.body).toContain('1000000,Jane Smith,present,card');
+  });
+});
+
+describe('grade-sync', () => {
+  it('GET :id includes a gradeSync summary (state "none" when no jobs exist)', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'i1', state: 'open' }).returning();
+
+    const res = await app.inject({ method: 'GET', url: `/api/attendance-sessions/${session.id}`, headers: CSRF });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().gradeSync).toMatchObject({ state: 'none', counts: { pending: 0, synced: 0, failed: 0 } });
+  });
+
+  it('POST :id/grade-sync re-queues the course\'s failed jobs and audits grade_sync_requested', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'i1', state: 'closed' }).returning();
+    await db.insert(gradeSyncJobs).values([
+      { courseId, ltiUserId: 'u1', score: 50, state: 'failed', lastError: 'ags:server-error', attemptCount: 6 },
+      { courseId, ltiUserId: 'u2', score: 100, state: 'synced' },
+    ]);
+
+    const res = await app.inject({ method: 'POST', url: `/api/attendance-sessions/${session.id}/grade-sync`, headers: CSRF });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, retried: 1 });
+
+    const [u1] = await db.select().from(gradeSyncJobs).where(and(eq(gradeSyncJobs.courseId, courseId), eq(gradeSyncJobs.ltiUserId, 'u1')));
+    expect(u1).toMatchObject({ state: 'pending', attemptCount: 0, lastError: null });
+    const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_sync_requested'));
+    expect(audit).toMatchObject({ targetType: 'attendance_session', targetId: session.id, actorLtiUserId: 'instructor-1' });
+    expect(audit.newValue).toMatchObject({ retriedJobCount: 1, trigger: 'manual' });
+  });
+
+  it('POST :id/grade-sync without a CSRF token is 403', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'i1', state: 'closed' }).returning();
+    const res = await app.inject({ method: 'POST', url: `/api/attendance-sessions/${session.id}/grade-sync` });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('POST :id/grade-sync for a session in another course is 404 (never 403)', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const other = await seedInstitutionAndCourse(db, platform, { clientId: 'other-client-id' });
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+    const [foreign] = await db.insert(attendanceSessions).values({ courseId: other.courseId, startedByLtiUserId: 'i1', state: 'closed' }).returning();
+    const res = await app.inject({ method: 'POST', url: `/api/attendance-sessions/${foreign.id}/grade-sync`, headers: CSRF });
+    expect(res.statusCode).toBe(404);
   });
 });
