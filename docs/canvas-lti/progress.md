@@ -40,10 +40,10 @@ listed below for continuity but have not been planned in detail yet.
       audit events, CSV export.
       Exit criterion: closing/reopening the browser does not lose
       server-accepted attendance. ✅ met.
-- [ ] **Phase 6 — AGS grading** — cumulative line item, grade calculation,
+- [x] **Phase 6 — AGS grading** — cumulative line item, grade calculation,
       score submission, grade outbox, retry worker, status UI.
       Exit criterion: closing attendance updates the expected Canvas Gradebook
-      column.
+      column. ✅ met.
 - [ ] **Phase 7 — Infrastructure and CI/CD** — Dockerfile, Bicep, Azure
       Container Apps, PostgreSQL, Key Vault, ACR, GitHub Actions OIDC
       deployment, stage/prod environments, health checks, monitoring.
@@ -288,6 +288,142 @@ listed below for continuity but have not been planned in detail yet.
   Manual Playwright verification of the full LTI→Start→scan→Close→Reopen flow
   (CSRF header present, no null-session requests) is outstanding (Phase 7 gate —
   needs real Canvas launch).
+
+## Phase 6 — what actually happened
+
+- Executed as 14 tasks per `docs/superpowers/plans/2026-08-26-canvas-lti-phase6-ags-grading.md`
+  (feature/test commits `565321c`..`452f7df`). A single independent pre-flight
+  reviewer (opus) reproduced `drizzle-kit generate`, `tsc`, `eslint`, an
+  import-cycle check, and a Fastify-5 mock-AGS harness; its 7 blockers + 15
+  quality items were folded back into the plan (revision `3bc582d`) before
+  execution, plus two user rulings — **N1** (grade population source) and
+  **N2** (backoff gets the pre-increment `attemptCount`). Every task landed as
+  written.
+- **Schema: two new tables + migration `0004_outgoing_speedball.sql`** (additive
+  only — 2 `CREATE TABLE` with inline UNIQUE + 3 FK `ADD CONSTRAINT`).
+  `grade_line_items` (`UNIQUE(course_id)` — one cumulative line item per course;
+  persists the Canvas line-item id + URL) and `grade_sync_jobs`
+  (`UNIQUE(course_id, lti_user_id)` durable outbox: `state` text
+  pending/synced/failed no CHECK, `score` `double precision`, `attempt_count`,
+  `next_attempt_at`, short-code `last_error`). Both added to `db.ts`
+  `TRUNCATE_ORDER`.
+- **`grade-policy.ts` / `grade-calc.ts` — pure, no I/O.** `grade-policy.ts`
+  defines `GradingPolicy` and `DEFAULT_GRADING_POLICY` (present = 1, absent = 0,
+  excused excluded from the denominator; `lookup_error` / `unexpected` never map
+  to a grade); `scoreContribution` returns `null` for a non-graded status.
+  `grade-calc.ts`'s `computeCumulativeScores` folds every closed session's
+  most-recent-wins record per member into `scoreGiven` (0..100, rounded to 4
+  places) over `scoreMaximum` 100; denominator 0 → the member is omitted (no
+  score posted). Both take the policy as a parameter — the seam for §27.2
+  "configurable by institution", but only the default is wired.
+  **Per-institution policy config + editor is deferred to Phase 8.**
+- **`closeAttendanceSession` extended, entirely inside the existing close
+  transaction, with NO Canvas call.** Population is the course's CURRENT roster
+  — `getCachedRosterAsMembers(db, session.courseId)` filtered to
+  `eligibleForAttendance` (2026-08-28 user ruling N1: this is literally
+  "current roster × all closed sessions"; `course_members` is refreshed on every
+  `createAttendanceSession`). The denominator walks every `state = 'closed'`
+  session for the course (a `reopened` session is excluded — a test pins 1/1 =
+  100 vs 1/2 = 50). Computes cumulative scores, calls `upsertGradeSyncJobs(tx, …)`
+  (enqueue in the same txn per §28), and writes one `grade_sync_requested` audit
+  row. `createAttendanceSession` / `reopenAttendanceSession` are untouched —
+  reopen writes nothing to `grade_sync_jobs`.
+- **`server/src/lti/ags.ts` — dumb HTTP client.** `ensureLineItem` queries the
+  course's `ags_lineitems_url` (verbatim from the signed launch, SSRF anchor =
+  provenance) by stable `tag` + `resourceId` and reuses or creates one line item,
+  idempotently. `postScore` PUT/POSTs an AGS Score with
+  `activityProgress: Completed` / `gradingProgress: FullyGraded`, keyed by the
+  NRPS `user_id` (no launch required), timestamped from a fresh `now.toISOString()`
+  each attempt (so a retry always carries a strictly-later timestamp than Canvas's
+  existing result). Error taxonomy is airtight — only `ags:*` short-code literals,
+  status classified before `.json()`: 429 / 5xx / network / 401 are retryable,
+  other 4xx / bad-JSON are permanent (never auto-retried; §25.9's manual route is
+  the escape hatch).
+- **`grade-sync-store.ts` — outbox operations.** `upsertGradeSyncJobs`
+  (`onConflictDoUpdate` on the course+member UNIQUE → back to `pending`);
+  `claimDueJobs` (a plain non-locking `SELECT` of due `pending` rows — the
+  single-writer invariant comes from `npm run worker` being one-shot;
+  `SKIP LOCKED` / multi-replica is Phase 7); `computeBackoff` (exponential with
+  jitter, first retry at `GRADE_SYNC_BASE_DELAY_MS` = 5 min per §35.2, then
+  10/20/40/60/60, capped); `markJobSynced` / `markJobRetry` / `markJobFailed`;
+  `getGradeSyncSummary` (failed > pending > synced > none, `lastError` from the
+  most-recently-updated row); `resetFailedJobs` (the manual-retry primitive).
+- **`grade-worker.ts` + `server/src/worker.ts` + `npm run worker` — standalone,
+  one pass, NOT wired into Fastify.** `processGradeSyncJobs` claims due jobs,
+  groups by course, mints one token + `ensureLineItem` per course, then posts
+  scores sequentially. On a 401 it calls `clearAccessTokenCache` and re-mints
+  **once per course** (`authRetried` guard, mirroring `nrps.ts`); a still-failing
+  auth error then goes to the retry/fail path. `server/src/worker.ts` is a thin
+  top-level-await entrypoint (`loadEnv` → `createDbClient` → `applyMigrations` →
+  signing key → one `processGradeSyncJobs` pass → tally log → `pool.end` / exit);
+  its `catch` logs `err.message` only (§31.8). No automated test for the
+  entrypoint itself (whole-branch follow-up #8); all logic is covered by the
+  `grade-worker` suite + the integration test.
+- **Route surface.** `GET /api/attendance-sessions/:id` gains an append-only
+  `gradeSync` summary object. `POST /api/attendance-sessions/:id/grade-sync`
+  (mutation — `requireSession` + `requireCsrf`) resolves the session scoped to the
+  authenticated course (cross-tenant → 404, never 403), calls `resetFailedJobs`,
+  and writes a `grade_sync_requested` audit row
+  (`{ retriedJobCount, trigger: 'manual' }`).
+- **AGS scope constants** — `AGS_LINEITEM_SCOPE` + `AGS_SCORE_SCOPE` added to
+  `server/src/lti/scopes.ts` as the character-exact 1EdTech URIs (lineitem +
+  score write; no Result read scope per §10). Phase 4 Task 3 had deliberately
+  deferred these.
+- **`MockCanvasPlatform` AGS additions** (additions only, mirroring the Phase 4
+  NRPS additions): vendor content-type parsers, `GET`/`POST .../lineitems`,
+  `POST .../lineitems/:id/scores`, plus test injectors `failNextAgsRequest`
+  (union widened with a one-shot `'auth'` 401) and `failNextScorePost`, and
+  `seedExistingLineItem` / `getLineItems` / `getPostedScores` helpers.
+- **Web status panel** — `#grade-sync-panel` inside `#session-panel`. `app.js`
+  refreshes the grade-sync state on close / reopen / resume; `renderGradeSyncState`
+  maps job state to text, hides on `none`, and shows a retry button only on
+  `failed` (which calls the CSRF-guarded retry route via a never-throws
+  `retryGradeSync`). Deliberately thin; the functional gate is the integration
+  test + a deferred Phase 7 Playwright pass.
+- **`grade-sync-integration.test.ts` is the exit criterion made executable.** It
+  composes real `/lti/login` + `/lti/launch` + `/api/me` + the attendance-session
+  routes onto a local Fastify (`@fastify/formbody` + `registerMeRoute`, `origin`
+  header on every mutation), drives a real minted instructor `id_token` through
+  login → launch → Start → close, then runs `processGradeSyncJobs(db, { signingKey })`
+  directly and asserts: every job `pending` → `synced`, exactly one line item
+  created, `learner-1 = 100` / `learner-2 = 0` posted to the mock Gradebook, and
+  two `grade_sync_completed` audit rows. The reviewer confirmed every assertion is
+  regression-sensitive.
+- Suite checkpoint: **373 tests / 52 files**, all passing; `npm run lint` and
+  `npm run typecheck` clean. No real-Canvas step here.
+
+### Deferred out of Phase 6
+
+- **Per-institution grading policy** (config surface + editor) — Phase 8. The
+  `GradingPolicy` parameter is the seam; only `DEFAULT_GRADING_POLICY` is wired.
+- **The worker's production schedule / deploy, and web-vs-worker migration
+  ownership** — Phase 7. `npm run worker` is a one-shot entrypoint with no
+  scheduler; there is no CI/deploy story yet.
+- **Real-Canvas AGS verification** — Phase 7 post-deploy. The scope URIs and the
+  line-item / score field shapes are written from the 1EdTech vocabulary and stay
+  unverified against a real Canvas Developer Key until then.
+- **6 pre-flight deferred quality items** (recorded for the Phase-6-range review,
+  not fixed now — see the plan's `## Self-review notes`): **Q4** (terminal-failure
+  path leaves `attempt_count` at its pre-increment value while the audit `newValue`
+  says +1; harmless), **Q9** (Task 11's GET edit relies on preserving the existing
+  `// B3:` comment), **Q10** (`getGradeSyncSummary` loads every job row for the
+  course to compute three counters), **Q11** (`failNextAgsRequest` /
+  `failNextScorePost` are process-global one-shots, unlike Phase 4's per-course
+  `rateLimitNextRequest(courseId)`), **Q14** (no bare `postScore` 401→`auth`
+  classification unit case — covered end-to-end only), **Q15** (the retry route
+  writes a `grade_sync_requested` audit row even when `retried === 0`).
+- **8 whole-branch follow-ups still open** (from the 2026-08-28 final
+  whole-branch review; none block Phase 6): (1) `GET /api/attendance-sessions`
+  ignores `?state=`; (2) resume flow — stat tiles show 0 after reload; (3) resume
+  flow — a resumed member who re-scans gets a second visible row; (4)
+  `attendance-sessions.ts` B2 adds one member lookup per scan (N+1 on the hot
+  path); (5) **#7** no production run path (`package.json` has no `build`/`start`,
+  `tsx` is a devDep, `noEmit: true`) — Phase 7; (6) **#8** `server/src/index.ts`
+  has no integration test, `hardening.test.ts` asserts a hand-copy of its CSP —
+  extract `buildApp(env, deps)` — Phase 7; (7) manual Playwright / real-Canvas
+  verification of the full launch → Start → scan → Close → Reopen → grade-sync
+  flow — Phase 7; (8) `server/src/lti/roles.ts` `AUTHORIZED_INSTRUCTOR_ROLE_URIS`
+  — capture a real Canvas launch's `roles` array — Phase 7.
 
 ## Phase 3 — what actually happened (automated portion)
 
