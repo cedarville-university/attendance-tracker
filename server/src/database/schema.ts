@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { pgTable, uuid, text, boolean, timestamp, jsonb, unique } from 'drizzle-orm/pg-core';
 
 export const institutions = pgTable('institutions', {
@@ -6,6 +7,9 @@ export const institutions = pgTable('institutions', {
   displayName: text('display_name').notNull(),
   timezone: text('timezone').notNull().default('UTC'),
   enabled: boolean('enabled').notNull().default(true),
+  canvasIdentityMatchField: text('canvas_identity_match_field').notNull().default('lis_person_sourcedid'),
+  identityMatchEmailEnabled: boolean('identity_match_email_enabled').notNull().default(false),
+  rosterLearnerRoles: jsonb('roster_learner_roles').$type<string[]>().notNull().default(sql`'["Learner"]'::jsonb`),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
@@ -85,6 +89,7 @@ export const courses = pgTable(
     nrpsUrl: text('nrps_url'),
     agsLineitemsUrl: text('ags_lineitems_url'),
     lastLaunchedAt: timestamp('last_launched_at', { withTimezone: true }),
+    rosterCachedAt: timestamp('roster_cached_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -119,3 +124,40 @@ export const appSessions = pgTable(
   },
   (t) => [unique().on(t.sessionTokenHash)],
 );
+
+export const courseMembers = pgTable(
+  'course_members',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    courseId: uuid('course_id')
+      .notNull()
+      .references(() => courses.id),
+    ltiUserId: text('lti_user_id').notNull(),
+    institutionalId: text('institutional_id'),
+    displayName: text('display_name'),
+    givenName: text('given_name'),
+    familyName: text('family_name'),
+    email: text('email'),
+    roles: jsonb('roles').$type<string[]>().notNull(),
+    status: text('status').notNull(),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique().on(t.courseId, t.ltiUserId)],
+);
+
+export const auditEvents = pgTable('audit_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  institutionId: uuid('institution_id')
+    .notNull()
+    .references(() => institutions.id),
+  courseId: uuid('course_id').references(() => courses.id),
+  attendanceSessionId: uuid('attendance_session_id'),
+  actorLtiUserId: text('actor_lti_user_id'),
+  eventType: text('event_type').notNull(),
+  targetType: text('target_type').notNull(),
+  targetId: text('target_id').notNull(),
+  oldValue: jsonb('old_value'),
+  newValue: jsonb('new_value'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  requestId: text('request_id'),
+});
