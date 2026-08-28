@@ -1,7 +1,7 @@
 // server/tests/support/seed.ts
 import { randomUUID } from 'node:crypto';
 import type { Database } from '../../src/database/client.js';
-import { institutions, ltiRegistrations, ltiDeployments } from '../../src/database/schema.js';
+import { institutions, ltiRegistrations, ltiDeployments, courses } from '../../src/database/schema.js';
 import type { MockCanvasPlatform } from './mock-canvas.js';
 
 export interface SeededRegistration {
@@ -50,4 +50,28 @@ export async function seedInstitutionAndRegistration(
     .returning();
 
   return { institutionId: institution.id, registrationId: registration.id, deploymentRowId: deployment.id, clientId, deploymentId };
+}
+
+export interface SeededCourse extends SeededRegistration {
+  courseId: string;
+}
+
+export async function seedInstitutionAndCourse(
+  db: Database,
+  platform: MockCanvasPlatform,
+  overrides: SeedOverrides & { nrpsUrl?: string | null } = {},
+): Promise<SeededCourse> {
+  const seeded = await seedInstitutionAndRegistration(db, platform, overrides);
+  const [course] = await db
+    .insert(courses)
+    .values({
+      institutionId: seeded.institutionId,
+      deploymentId: seeded.deploymentRowId, // lti_deployments.id ROW UUID -- never the business string
+      ltiContextId: `ctx-${randomUUID()}`,
+      label: 'TEST-101',
+      title: 'Test Course',
+      nrpsUrl: overrides.nrpsUrl ?? null,
+    })
+    .returning();
+  return { ...seeded, courseId: course.id };
 }
