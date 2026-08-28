@@ -4,6 +4,7 @@
 // rename or reshape without updating Phase 5's plan document too.
 
 import type { NrpsRawMember } from './roster-config.js';
+import { resolveInstitutionalId, isEligibleForAttendance, type InstitutionRosterConfig } from './roster-config.js';
 
 export interface CourseRosterMember {
   ltiUserId: string;
@@ -136,4 +137,19 @@ export async function fetchRawMembershipPages(
   }
 
   return { ok: true, members };
+}
+
+export function normalizeMember(raw: NrpsRawMember, config: InstitutionRosterConfig): CourseRosterMember {
+  const roles = Array.isArray(raw.roles) ? raw.roles : [];
+  return {
+    ltiUserId: raw.user_id,
+    institutionalId: resolveInstitutionalId(raw, config),
+    displayName: raw.name ?? null,
+    givenName: raw.given_name ?? null,
+    familyName: raw.family_name ?? null,
+    email: raw.email ?? null,
+    roles,
+    status: raw.status,
+    eligibleForAttendance: isEligibleForAttendance(raw.status, roles, config.rosterLearnerRoles),
+  };
 }

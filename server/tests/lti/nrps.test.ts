@@ -90,3 +90,66 @@ describe('fetchRawMembershipPages', () => {
     }
   });
 });
+
+import { normalizeMember } from '../../src/lti/nrps.js';
+import type { InstitutionRosterConfig } from '../../src/lti/roster-config.js';
+
+describe('normalizeMember', () => {
+  const config: InstitutionRosterConfig = {
+    canvasIdentityMatchField: 'lis_person_sourcedid',
+    identityMatchEmailEnabled: false,
+    rosterLearnerRoles: ['Learner'],
+  };
+  const learnerRole = 'http://purl.imsglobal.org/vocab/lis/v2/membership#Learner';
+  const instructorRole = 'http://purl.imsglobal.org/vocab/lis/v2/membership#Instructor';
+
+  it('normalizes an active learner as eligible', () => {
+    const raw = {
+      user_id: 'u1',
+      status: 'Active',
+      roles: [learnerRole],
+      name: 'Jane Student',
+      given_name: 'Jane',
+      family_name: 'Student',
+      email: 'jane@example.edu',
+      lis_person_sourcedid: '001234',
+    };
+    expect(normalizeMember(raw, config)).toEqual({
+      ltiUserId: 'u1',
+      institutionalId: '001234',
+      displayName: 'Jane Student',
+      givenName: 'Jane',
+      familyName: 'Student',
+      email: 'jane@example.edu',
+      roles: [learnerRole],
+      status: 'Active',
+      eligibleForAttendance: true,
+    });
+  });
+
+  it('normalizes an inactive learner as ineligible', () => {
+    expect(normalizeMember({ user_id: 'u2', status: 'Inactive', roles: [learnerRole] }, config).eligibleForAttendance).toBe(false);
+  });
+
+  it('excludes an instructor from eligibility', () => {
+    expect(normalizeMember({ user_id: 'u3', status: 'Active', roles: [instructorRole] }, config).eligibleForAttendance).toBe(false);
+  });
+
+  it('honors a custom configured learner role', () => {
+    const customConfig: InstitutionRosterConfig = { ...config, rosterLearnerRoles: ['Learner', 'ProxyLearner'] };
+    const raw = { user_id: 'u4', status: 'Active', roles: ['http://purl.imsglobal.org/vocab/lis/v2/membership#ProxyLearner'] };
+    expect(normalizeMember(raw, customConfig).eligibleForAttendance).toBe(true);
+  });
+
+  it('leaves institutionalId null when the SIS ID field is missing', () => {
+    expect(normalizeMember({ user_id: 'u5', status: 'Active', roles: [learnerRole] }, config).institutionalId).toBeNull();
+  });
+
+  it('normalizes two members sharing the same institutionalId independently (no dedup)', () => {
+    const a = normalizeMember({ user_id: 'u6', status: 'Active', roles: [learnerRole], lis_person_sourcedid: 'DUP1' }, config);
+    const b = normalizeMember({ user_id: 'u7', status: 'Active', roles: [learnerRole], lis_person_sourcedid: 'DUP1' }, config);
+    expect(a.institutionalId).toBe('DUP1');
+    expect(b.institutionalId).toBe('DUP1');
+    expect(a.ltiUserId).not.toBe(b.ltiUserId);
+  });
+});
