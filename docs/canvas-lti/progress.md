@@ -35,11 +35,11 @@ listed below for continuity but have not been planned in detail yet.
       configuration.
       Exit criterion: instructor launches from a course and sees the active
       Canvas learner roster without uploading a file.
-- [ ] **Phase 5 — Persistent attendance** — attendance sessions, roster
+- [x] **Phase 5 — Persistent attendance** — attendance sessions, roster
       snapshots, scan persistence, manual corrections, session close/reopen,
       audit events, CSV export.
       Exit criterion: closing/reopening the browser does not lose
-      server-accepted attendance.
+      server-accepted attendance. ✅ met.
 - [ ] **Phase 6 — AGS grading** — cumulative line item, grade calculation,
       score submission, grade outbox, retry worker, status UI.
       Exit criterion: closing attendance updates the expected Canvas Gradebook
@@ -196,6 +196,98 @@ listed below for continuity but have not been planned in detail yet.
   and the one `POST /api/scans` — going to `http://localhost:3000` only; confirmed via `grep` on the
   server's log output that neither test card code ever appeared in it. Zero console errors/warnings
   throughout. `npm test`/`lint`/`typecheck` all pass (52 tests, 0 lint errors, 0 type errors).
+
+## Phase 5 — what actually happened
+
+- Schema additions: `attendanceSessions`, `attendanceSessionMembers`, and
+  `attendanceRecords` tables per spec §26 (state enum: open/closed/reopened;
+  status enum: present/absent/excused/lookup_error/unexpected—no `late`; scanned_at
+  nullable; snapshot_data jsonb; unique index on (session_id, client_scan_id)).
+  `attendance_session_id` FK added to existing `audit_events` table. Migration
+  `0003_flawless_chamber.sql` additive only, handles both orderings vs Phase 4.
+- DI re-thread: `db: Database` is the first parameter of every DB-touching function
+  (`createAttendanceSession`, `submitScan`, `closeAttendanceSession`,
+  `reopenAttendanceSession`, `applyManualCorrection`). No `import { db }` singleton.
+  Every route receives `deps: { db, resolver, requireSession, requireCsrf, signingKey }`.
+  `ToolSigningKey` threaded end-to-end from `index.ts` through route deps to
+  `getRosterWithFallback`, with sync `getActiveSigningKey(signingKeys)` selector.
+- `getRosterWithFallback` <24h stale-cache degradation for Start Attendance:
+  on fresh-roster fetch success → live roster; on failure → cache iff `< 24h` old →
+  `{stale: true}`; past 24h → `RosterUnavailableError` → 502 (no transient-failure
+  workaround without fresh data). `stale` flag stored on the audit `attendance_session_created`
+  event `newValue`, not a schema column.
+- `submitScan` idempotency via `(session_id, client_scan_id)` unique key +
+  `onConflictDoNothing` + fallback SELECT on lost race. Prior `lookup_error` rows
+  are RE-RESOLVED + UPDATEd in place on retry (spec §47). Ambiguous roster match
+  (>1 member for a resolved institutionalId) → `unexpected`, never `present`. Resolver
+  `ok:false` → `lookup_error` (kind from error or 'unknown'). `ok:true` + `universityId:null`
+  → `lookup_error` kind `missing-university-id` (spec §20). Card fingerprint only if
+  institution opts in; raw `cardCode` never persisted.
+- `closeAttendanceSession`: inserts one `system_absence`/`absent`/`scannedAt:null`/
+  `clientScanId:null` record per eligible member with no current record
+  (`resolveCurrentRecord`), sets `state=closed`, writes `attendance_session_closed`
+  audit event. Steps 3–4 of spec §25.7 (cumulative recalc, grade sync) deferred
+  to Phase 6. `SessionAlreadyClosedError` 409 guard.
+- `reopenAttendanceSession`: mirrors close; sets `state=reopened`, `closedAt:null`,
+  writes `attendance_session_reopened` audit event with optional reason.
+  `SessionNotClosedError` 409 guard.
+- Manual corrections append-only: `applyManualCorrection` always INSERTs a new row
+  (source `'manual'`, scannedAt/clientScanId `null`), never UPDATEs. Correction note
+  lives only in `audit_events.new_value.note` JSONB, no `note` column on records.
+- DELETE-record route: HARD DELETE + one `attendance_record_removed` audit event
+  (oldValue with status/source) in a single transaction. Recovery via audit log only;
+  no tombstone, no in-band undo.
+- State-transition 409 guards: `session_already_closed` (close when closed),
+  `session_not_closed` (reopen when not closed), with opaque error codes + request.id
+  correlation.
+- CSV export: `buildAttendanceSessionCsv` byte-identical escaping to `web/csv.js`
+  (RFC-4180: `/[",\r\n]/` → wrap + double-quote; null/undefined → ''). Columns:
+  institutionalId, displayName, status, source, scannedAt (CRLF join).
+- 8 routes on `POST /api/attendance-sessions` root: POST create (with
+  `getRosterWithFallback`), GET :id (roster snapshot), POST :id/scans (scan ingestion),
+  PATCH :id/members/:ltiUserId (manual correction), DELETE :id/members/:ltiUserId/records/:recordId,
+  POST :id/close, POST :id/reopen, GET :id/export.csv. All behind `requireSession`
+  (GETs) or `[requireSession, requireCsrf]` (mutations). Tenant isolation returns 404,
+  never 403. Explicit serializers hide internal columns. Mounted on root `app`
+  (outside rate-limit scope per spec §31.10). Opaque error responses:
+  `{error: code, requestId: request.id}`.
+- `web/api-client.js` CSRF bootstrap: `bootstrapSession()` GETs `/api/me`, caches
+  `csrfToken` from response, never throws (network/status/JSON errors normalized).
+  `apiFetch` wrapper: GET pass-through; non-GET adds `x-csrf-token` header +
+  `Content-Type: application/json` + JSON-stringified body.
+- `web/scan-pipeline.js` refactor: `submitScan(sessionId, clientScanId, cardCode)`
+  POSTs to `/api/attendance-sessions/{sessionId}/scans` via `apiFetch`. `clientScanId`
+  now `crypto.randomUUID()` instead of a counter. Status vocab changed: `accepted`→`present`,
+  `lookup-error`→`lookup_error`. No-session guard: `handleParsedReport` early-returns
+  if `!sessionId`, logs `scan-ignored-no-session`, no request. `ScanPipeline`
+  constructor takes `sessionId`; set at Start Attendance in `app.js`. Tests rewritten
+  to mock `api-client.js` instead of `global.fetch` (removes a cross-file mock leak).
+- `web/attendance-session.js` new module: `createAttendanceSession(body)` /
+  `closeAttendanceSession(sessionId)` / `reopenAttendanceSession(sessionId, reason)` /
+  `getAttendanceSession(sessionId)` wrappers over `apiFetch` with shared never-throws
+  `request()` helper (network/status/JSON failures → `{ok:false, error:{kind}}`).
+- `web/app.js` / `web/ui.js` / `web/index.html` wiring: Start/Close/Reopen buttons
+  in a `#session-panel`. `init()` awaits `bootstrapSession()` before showing controls.
+  Session state rendered via `renderSessionState({state, label})`. Record status vocab
+  updated: `rosterStatus`→`status`, `universityId`→`institutionalId`, `lookup-error`→`lookup_error`.
+  CSV export reads `institutionalId` instead of `universityId`. Sound alert checks
+  `record.status === 'unexpected'` instead of `rosterStatus`. CSS selectors realigned
+  for new status names.
+- Retirement of `POST /api/scans`: route and `server/src/routes/scans.ts` +
+  `server/tests/routes/scans.test.ts` removed. `server/src/index.ts` no longer
+  registers it; rate-limit scope comment updated to name the new session-scoped
+  endpoint. No phase-in period — the old endpoint is gone and the new session-scoped
+  route is wired.
+- Deferred/out-of-scope: `late` status deferred (not in enum/schema/routes);
+  standalone-mode CSV roster panel unchanged but not wired to the new backend
+  (roster-checking UI kept for demo, server status always trusted); card-fingerprint
+  secret is app-wide `CARD_FINGERPRINT_SECRET` env var, not per-institution
+  (per-institution migration path documented as future work); no scan-API rate
+  limiting yet (Phase 8).
+- Suite checkpoint: **292 tests / 44 files**, all passing. Lint and typecheck clean.
+  Manual Playwright verification of the full LTI→Start→scan→Close→Reopen flow
+  (CSRF header present, no null-session requests) is outstanding (Phase 7 gate —
+  needs real Canvas launch).
 
 ## Phase 3 — what actually happened (automated portion)
 
