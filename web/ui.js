@@ -15,6 +15,11 @@ export const elements = {
   readerStatusText: document.getElementById('reader-status-text'),
   readerProductName: document.getElementById('reader-product-name'),
 
+  sessionStatusText: document.getElementById('session-status-text'),
+  startSessionBtn: document.getElementById('btn-start-session'),
+  closeSessionBtn: document.getElementById('btn-close-session'),
+  reopenSessionBtn: document.getElementById('btn-reopen-session'),
+
   rosterEnableToggle: document.getElementById('roster-enable-toggle'),
   loadRosterBtn: document.getElementById('btn-load-roster'),
   rosterFileInput: document.getElementById('roster-file-input'),
@@ -134,15 +139,47 @@ export function setExportControlsAvailability({ rosterActive }) {
   if (!rosterActive) elements.exportModeSelect.value = 'present';
 }
 
+// ---- Attendance session controls ----------------------------------------
+
+/**
+ * Renders the Attendance Session panel's controls for the given session
+ * state (or the no-session-yet state before Start Attendance is clicked).
+ * @param {{state: 'none'|'open'|'closed'|'reopened', label?: string|null}} sessionInfo
+ */
+export function renderSessionState(sessionInfo) {
+  if (sessionInfo.state === 'none') {
+    elements.sessionStatusText.textContent = 'No session started.';
+    elements.startSessionBtn.hidden = false;
+    elements.startSessionBtn.disabled = false;
+    elements.closeSessionBtn.hidden = true;
+    elements.reopenSessionBtn.hidden = true;
+    return;
+  }
+
+  const label = sessionInfo.label ? ` — ${sessionInfo.label}` : '';
+  if (sessionInfo.state === 'open' || sessionInfo.state === 'reopened') {
+    elements.sessionStatusText.textContent = `Session ${sessionInfo.state}${label}`;
+    elements.startSessionBtn.hidden = true;
+    elements.closeSessionBtn.hidden = false;
+    elements.closeSessionBtn.disabled = false;
+    elements.reopenSessionBtn.hidden = true;
+  } else if (sessionInfo.state === 'closed') {
+    elements.sessionStatusText.textContent = `Session closed${label}`;
+    elements.startSessionBtn.hidden = true;
+    elements.closeSessionBtn.hidden = true;
+    elements.reopenSessionBtn.hidden = false;
+    elements.reopenSessionBtn.disabled = false;
+  }
+}
+
 // ---- Latest scan ---------------------------------------------------------
 
 const LATEST_SCAN_STATUS_TEXT = {
   idle: 'Waiting for a card…',
   pending: 'Card scanned — looking up student…',
-  expected: '✓ Expected student',
+  present: '✓ Present',
   unexpected: '⚠ UNEXPECTED STUDENT',
-  'lookup-error': '⚠ Lookup error — could not verify roster status',
-  unchecked: '✓ Scan recorded',
+  lookup_error: '⚠ Lookup error — could not verify roster status',
 };
 
 function studentDisplayName(record) {
@@ -154,7 +191,7 @@ function applyLatestScanState(state, record) {
   elements.latestScanPanel.className = `panel latest-scan latest-scan--${state}`;
   elements.latestScanStatusText.textContent = LATEST_SCAN_STATUS_TEXT[state] || state;
   elements.latestScanName.textContent = studentDisplayName(record) || '—';
-  elements.latestScanUniversityId.textContent = record.universityId || '—';
+  elements.latestScanUniversityId.textContent = record.institutionalId || '—';
   elements.latestScanCardCode.textContent = record.rawCardCode || '—';
   elements.latestScanTime.textContent = formatLocalTime(record.timestamp);
 }
@@ -164,7 +201,7 @@ export function renderLatestScanPending(record) {
 }
 
 export function renderLatestScanResult(record) {
-  applyLatestScanState(record.rosterStatus, record);
+  applyLatestScanState(record.status, record);
 }
 
 export function resetLatestScanPanel() {
@@ -193,20 +230,19 @@ export function renderStats(stats, rosterEnabled) {
 
 const STATUS_LABELS = {
   pending: 'Pending…',
-  expected: 'Expected',
+  present: 'Present',
   unexpected: 'Unexpected',
-  'lookup-error': 'Lookup error',
-  unchecked: 'Unchecked',
+  lookup_error: 'Lookup error',
 };
 
 function fillAttendanceRow(row, record) {
   row.querySelector('.col-time').textContent = formatLocalTime(record.timestamp);
   row.querySelector('.col-card-code').textContent = record.rawCardCode;
-  row.querySelector('.col-university-id').textContent = record.universityId || '—';
+  row.querySelector('.col-university-id').textContent = record.institutionalId || '—';
   const name = studentDisplayName(record);
   row.querySelector('.col-name').textContent = name || (record.status === 'pending' ? 'Looking up…' : '—');
   const badge = row.querySelector('.status-badge');
-  const state = record.rosterStatus || 'pending';
+  const state = record.status || 'pending';
   badge.textContent = STATUS_LABELS[state] || state;
   badge.className = `status-badge status-badge--${state}`;
 }

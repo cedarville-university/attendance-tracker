@@ -16,8 +16,14 @@ import { downloadAttendanceCsv } from './csv.js';
 import { computeAbsentRows } from './absentees.js';
 import * as storage from './storage.js';
 import * as ui from './ui.js';
+import { bootstrapSession } from './api-client.js';
+import { createAttendanceSession, closeAttendanceSession, reopenAttendanceSession } from './attendance-session.js';
 
 const { elements } = ui;
+
+// ---- Attendance session state (owned here) --------------------------------
+
+let currentAttendanceSessionId = null;
 
 // ---- Roster state (owned here; roster.js only provides pure helpers) ------
 
@@ -39,7 +45,7 @@ function handleRemoveRecord(id) {
 }
 
 const scanPipeline = new ScanPipeline({
-  getRosterState: () => ({ enabled: rosterState.enabled, index: rosterState.index }),
+  sessionId: null, // set once Start Attendance succeeds; see startSession() below
   callbacks: {
     onRecordCreated: (record) => {
       ui.addAttendanceRow(record, handleRemoveRecord);
@@ -52,7 +58,7 @@ const scanPipeline = new ScanPipeline({
     },
     onLatestScanUpdate: (record) => {
       ui.renderLatestScanResult(record);
-      if (record.rosterStatus === 'unexpected' && elements.soundAlertsToggle.checked) {
+      if (record.status === 'unexpected' && elements.soundAlertsToggle.checked) {
         playUnexpectedTone();
       }
     },
@@ -178,6 +184,53 @@ elements.disconnectBtn.addEventListener('click', () => {
   hidReader.disconnect();
 });
 
+// ---- Attendance session lifecycle ------------------------------------------
+
+async function startSession() {
+  elements.startSessionBtn.disabled = true;
+  const result = await createAttendanceSession({});
+  if (!result.ok) {
+    elements.startSessionBtn.disabled = false;
+    ui.showAppMessage('error', `Could not start attendance: ${result.error.message}`);
+    return;
+  }
+  currentAttendanceSessionId = result.session.id;
+  scanPipeline.sessionId = result.session.id;
+  ui.renderSessionState({ state: result.session.state, label: result.session.label });
+  ui.showAppMessage('info', 'Attendance session started.');
+}
+
+async function closeSession() {
+  if (!currentAttendanceSessionId) return;
+  elements.closeSessionBtn.disabled = true;
+  const result = await closeAttendanceSession(currentAttendanceSessionId);
+  if (!result.ok) {
+    elements.closeSessionBtn.disabled = false;
+    ui.showAppMessage('error', `Could not close attendance: ${result.error.message}`);
+    return;
+  }
+  ui.renderSessionState({ state: 'closed' });
+  ui.showAppMessage('info', 'Attendance session closed. Unscanned students were marked absent.');
+}
+
+async function reopenSession() {
+  if (!currentAttendanceSessionId) return;
+  const reason = window.prompt('Reason for reopening this session (optional):') || undefined;
+  elements.reopenSessionBtn.disabled = true;
+  const result = await reopenAttendanceSession(currentAttendanceSessionId, reason);
+  if (!result.ok) {
+    elements.reopenSessionBtn.disabled = false;
+    ui.showAppMessage('error', `Could not reopen attendance: ${result.error.message}`);
+    return;
+  }
+  ui.renderSessionState({ state: 'reopened' });
+  ui.showAppMessage('info', 'Attendance session reopened. Scans are accepted again.');
+}
+
+elements.startSessionBtn.addEventListener('click', startSession);
+elements.closeSessionBtn.addEventListener('click', closeSession);
+elements.reopenSessionBtn.addEventListener('click', reopenSession);
+
 // ---- Roster wiring ------------------------------------------------------------
 
 // Called after any change to rosterState (load/column-select/clear/enable):
@@ -274,7 +327,7 @@ elements.downloadCsvBtn.addEventListener('click', () => {
     return;
   }
 
-  const scannedIds = new Set(presentRecords.map((record) => record.universityId).filter(Boolean).map(normalizeId));
+  const scannedIds = new Set(presentRecords.map((record) => record.institutionalId).filter(Boolean).map(normalizeId));
   const absentRows = computeAbsentRows({ rosterState, scannedIds });
 
   if (absentRows.length === 0) {
@@ -473,6 +526,18 @@ async function init() {
   initPreferencesDefaults();
   ui.setDiagDeviceInfo(null);
   ui.renderStats(scanPipeline.getStats(), rosterState.enabled);
+
+  // Bootstrap the CSRF token from GET /api/me before any mutation can fire.
+  // On failure, leave Start Attendance disabled so no request goes out
+  // without the x-csrf-token header the server's requireCsrf demands.
+  const boot = await bootstrapSession();
+  ui.renderSessionState({ state: 'none' });
+  if (!boot.ok) {
+    ui.showAppMessage('error', 'Could not load your session. Reload the page from Canvas.');
+    // renderSessionState({state:'none'}) enables the Start button; re-disable
+    // it here so no mutation goes out without a CSRF token.
+    elements.startSessionBtn.disabled = true;
+  }
 
   if (storage.hasSavedSession()) {
     ui.showRestoreBanner(true);
