@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { pgTable, uuid, text, boolean, timestamp, jsonb, unique } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, text, boolean, timestamp, jsonb, integer, unique, uniqueIndex } from 'drizzle-orm/pg-core';
 
 export const institutions = pgTable('institutions', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -145,13 +145,73 @@ export const courseMembers = pgTable(
   (t) => [unique().on(t.courseId, t.ltiUserId)],
 );
 
+export const attendanceSessions = pgTable('attendance_sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  courseId: uuid('course_id').notNull().references(() => courses.id),
+  startedByLtiUserId: text('started_by_lti_user_id').notNull(),
+  label: text('label'),
+  meetingAt: timestamp('meeting_at', { withTimezone: true }),
+  openedAt: timestamp('opened_at', { withTimezone: true }).notNull().defaultNow(),
+  closedAt: timestamp('closed_at', { withTimezone: true }),
+  state: text('state', { enum: ['open', 'closed', 'reopened'] }).notNull().default('open'),
+  rosterSnapshotVersion: integer('roster_snapshot_version').notNull().default(1),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// attendanceSessionMembers -- the roster snapshot; status here is the ROSTER status at
+// snapshot time, never the attendance outcome, and is never mutated after insert.
+export const attendanceSessionMembers = pgTable('attendance_session_members', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  attendanceSessionId: uuid('attendance_session_id').notNull().references(() => attendanceSessions.id),
+  ltiUserId: text('lti_user_id').notNull(),
+  institutionalId: text('institutional_id'),
+  displayName: text('display_name'),
+  eligibleForAttendance: boolean('eligible_for_attendance').notNull(),
+  status: text('status').notNull(), // raw roster status AT SNAPSHOT TIME (e.g. 'Active'/'Inactive')
+  snapshotData: jsonb('snapshot_data').notNull(), // a Phase 4 CourseRosterMember, stored verbatim
+});
+
+// attendanceRecords -- append-only (with the single documented exception that a
+// prior 'lookup_error' row for the same clientScanId is re-resolved and updated
+// in place -- see scan-service.ts / spec §47). "Current status" for a member is
+// resolved by member-status.ts's resolveCurrentRecord(), never by mutating a row.
+export const attendanceRecords = pgTable(
+  'attendance_records',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    attendanceSessionId: uuid('attendance_session_id').notNull().references(() => attendanceSessions.id),
+    ltiUserId: text('lti_user_id'),
+    institutionalId: text('institutional_id'),
+    clientScanId: text('client_scan_id'),
+    // 'late' is deliberately omitted -- deferred this phase (settled decision).
+    status: text('status', { enum: ['present', 'absent', 'excused', 'lookup_error', 'unexpected'] }).notNull(),
+    // Nullable to match spec §26 ("scanned_at nullable"): manual / system_absence
+    // rows were never "scanned at" an instant and store null here.
+    scannedAt: timestamp('scanned_at', { withTimezone: true }),
+    source: text('source', { enum: ['card', 'manual', 'system_absence', 'import'] }).notNull(),
+    cardFingerprint: text('card_fingerprint'),
+    lookupErrorKind: text('lookup_error_kind'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // Array form -- matches shipped schema.ts (`(t) => [unique().on(...)]`); the
+  // object-return form is deprecated by drizzle-kit.
+  (table) => [
+    // The idempotency mechanism: a retried submission with the same clientScanId
+    // never creates a second row. clientScanId is nullable (manual/system_absence
+    // records have none), so this constraint only actually de-duplicates 'card' scans.
+    uniqueIndex('attendance_records_session_client_scan_id_key').on(table.attendanceSessionId, table.clientScanId),
+  ],
+);
+
 export const auditEvents = pgTable('audit_events', {
   id: uuid('id').primaryKey().defaultRandom(),
   institutionId: uuid('institution_id')
     .notNull()
     .references(() => institutions.id),
   courseId: uuid('course_id').references(() => courses.id),
-  attendanceSessionId: uuid('attendance_session_id'),
+  attendanceSessionId: uuid('attendance_session_id').references(() => attendanceSessions.id),
   actorLtiUserId: text('actor_lti_user_id'),
   eventType: text('event_type').notNull(),
   targetType: text('target_type').notNull(),
@@ -161,3 +221,7 @@ export const auditEvents = pgTable('audit_events', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   requestId: text('request_id'),
 });
+
+export type AttendanceSessionRow = typeof attendanceSessions.$inferSelect;
+export type AttendanceSessionMemberRow = typeof attendanceSessionMembers.$inferSelect;
+export type AttendanceRecordRow = typeof attendanceRecords.$inferSelect;

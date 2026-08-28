@@ -22,6 +22,13 @@
       "when": 1787888389738,
       "tag": "0002_material_mesmero",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787892168068,
+      "tag": "0003_flawless_chamber",
+      "breakpoints": true
     }
   ]
 }

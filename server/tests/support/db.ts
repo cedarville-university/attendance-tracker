@@ -25,6 +25,9 @@ export async function migrate(): Promise<void> {
 }
 
 const TRUNCATE_ORDER = [
+  'attendance_records',
+  'attendance_session_members',
+  'attendance_sessions',
   'audit_events',
   'course_members',
   'app_sessions',

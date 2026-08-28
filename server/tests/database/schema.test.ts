@@ -1,6 +1,19 @@
 import { beforeEach, afterAll, describe, it, expect } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
-import { institutions, ltiRegistrations, ltiDeployments, courses, appSessions, oidcTransactions, courseMembers, auditEvents } from '../../src/database/schema.js';
+import {
+  institutions,
+  ltiRegistrations,
+  ltiDeployments,
+  courses,
+  appSessions,
+  oidcTransactions,
+  courseMembers,
+  auditEvents,
+  attendanceSessions,
+  attendanceSessionMembers,
+  attendanceRecords,
+} from '../../src/database/schema.js';
 
 // File scope, not inside a describe: the pg pool in tests/support/db.ts is module-level and shared
 // by every describe in this file, so closing it from inside one describe would leave any later
@@ -170,3 +183,69 @@ describe('schema smoke test', () => {
     expect(event.requestId).toBe('req-abc');
   });
 });
+
+describe('Phase 5 schema', () => {
+  it('attendance_sessions, attendance_session_members, attendance_records, audit_events exist and are queryable', async () => {
+    const { db } = getTestDb();
+    await resetDb();
+    await expect(db.select().from(attendanceSessions).limit(1)).resolves.toEqual([]);
+    await expect(db.select().from(attendanceSessionMembers).limit(1)).resolves.toEqual([]);
+    await expect(db.select().from(attendanceRecords).limit(1)).resolves.toEqual([]);
+    await expect(db.select().from(auditEvents).limit(1)).resolves.toEqual([]);
+  });
+
+  it('rejects a second attendance_records row with the same (attendanceSessionId, clientScanId)', async () => {
+    const { db } = getTestDb();
+    await resetDb();
+    const { sessionId } = await seedCourseAndSession();
+    await db.insert(attendanceRecords).values({
+      attendanceSessionId: sessionId, ltiUserId: 'user-1', institutionalId: '1000000',
+      clientScanId: 'scan-abc', status: 'present', scannedAt: new Date(), source: 'card',
+    });
+    let error: unknown;
+    try {
+      await db.insert(attendanceRecords).values({
+        attendanceSessionId: sessionId, ltiUserId: 'user-1', institutionalId: '1000000',
+        clientScanId: 'scan-abc', status: 'present', scannedAt: new Date(), source: 'card',
+      });
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(Error);
+    // drizzle-orm wraps the driver error; the pg "duplicate key" text is on `.cause`.
+    const err = error as Error & { cause?: unknown };
+    expect(String(err.cause ?? err.message)).toMatch(/duplicate key value violates unique constraint/);
+  });
+
+  it('accepts a manual record with a null scanned_at (spec §26 — scanned_at is nullable)', async () => {
+    const { db } = getTestDb();
+    await resetDb();
+    const { sessionId } = await seedCourseAndSession();
+    const [row] = await db.insert(attendanceRecords).values({
+      attendanceSessionId: sessionId, ltiUserId: 'user-1', institutionalId: '1000000',
+      clientScanId: null, status: 'excused', scannedAt: null, source: 'manual',
+    }).returning();
+    expect(row.scannedAt).toBeNull();
+  });
+});
+
+// Builds the real FK chain institutions -> lti_registrations -> lti_deployments -> courses,
+// so courses.deployment_id points at an lti_deployments.id ROW UUID (never institutions.id).
+async function seedCourseAndSession() {
+  const { db } = getTestDb();
+  const s = randomUUID();
+  const [institution] = await db.insert(institutions)
+    .values({ slug: `schema-test-${s}`, displayName: 'Schema Test U', timezone: 'UTC', enabled: true }).returning();
+  const [registration] = await db.insert(ltiRegistrations).values({
+    institutionId: institution.id, issuer: `https://canvas-${s}.test`, clientId: `client-${s}`,
+    oidcAuthEndpoint: 'https://canvas.test/auth', tokenEndpoint: 'https://canvas.test/token',
+    tokenAudience: 'https://canvas.test/token', platformJwksUri: 'https://canvas.test/jwks', enabled: true,
+  }).returning();
+  const [deployment] = await db.insert(ltiDeployments)
+    .values({ registrationId: registration.id, deploymentId: `dep-${s}`, enabled: true, configuration: {} }).returning();
+  const [course] = await db.insert(courses)
+    .values({ institutionId: institution.id, deploymentId: deployment.id, ltiContextId: `ctx-${s}`, label: 'TEST101', title: 'Test Course' }).returning();
+  const [session] = await db.insert(attendanceSessions)
+    .values({ courseId: course.id, startedByLtiUserId: 'instructor-1' }).returning();
+  return { sessionId: session.id };
+}
