@@ -30,7 +30,7 @@ listed below for continuity but have not been planned in detail yet.
       the tool in a real Canvas instance and verifying an instructor launch
       end-to-end (docs/canvas-installation.md) needs a public HTTPS deployment
       and has moved to **Phase 7** (see below) — it does not gate this phase.
-- [ ] **Phase 4 — NRPS** — Canvas token acquisition and roster retrieval;
+- [x] **Phase 4 — NRPS** — Canvas token acquisition and roster retrieval;
       uploaded roster replaced as the primary workflow; identity matching
       configuration.
       Exit criterion: instructor launches from a course and sees the active
@@ -226,6 +226,73 @@ listed below for continuity but have not been planned in detail yet.
   could never have run in Phase 3. `server/src/lti/roles.ts`'s `AUTHORIZED_INSTRUCTOR_ROLE_URIS`
   set is written from the standard 1EdTech role vocabulary and stays flagged there as unverified
   against a real Canvas launch payload until that Phase 7 step runs.
+
+## Phase 4 — what actually happened
+
+- Executed as 15 tasks per `docs/superpowers/plans/` Phase 4 plan (14 feature/test
+  commits `18234b0`..`1bcd0cf` plus this integration test). Pre-flight review folded
+  its blockers back into the plan first, so execution hit no surprises — every task
+  landed as written.
+- **Task 1 was a launch-time retrofit, not new NRPS code.** Spec §31.7 wants the
+  NRPS/AGS service URLs taken from the signature-verified launch JWT and used
+  verbatim, but Phase 3's `launch.ts` never persisted them. Task 1 added three
+  nullable `courses` columns (`nrps_url`, `ags_lineitems_url`, `last_launched_at`),
+  two optional service claims in `claims.ts`, and turned `findOrCreateCourse` into
+  find-or-create-then-update-launch-metadata (keeping the ON CONFLICT race fix) so
+  every launch refreshes the stored endpoints and stamps `last_launched_at`.
+  `server/tests/lti/launch-nrps-persistence.test.ts` covers a rotated `nrpsUrl`
+  updating the one `courses` row in place.
+- **No outbound host allowlist.** `server/src/lti/service-url.ts`'s
+  `validateCanvasServiceUrl` is a structural check only — absolute `http(s)` scheme,
+  no embedded credentials — and deliberately accepts `http:` so the in-process mock
+  works. The SSRF trust anchor is provenance (a verified launch JWT, stored and used
+  verbatim), not a token-endpoint-host anchor, which spec §11 makes wrong on real
+  Canvas. Redirect rejection stays at the fetch call sites. A future per-institution
+  service-host policy is noted for later.
+- **Shared `getRosterWithFallback` degradation helper** (`server/src/attendance/roster-store.ts`).
+  It calls `refreshCourseRoster` (paginated NRPS fetch via `nrps.ts`, client-
+  credentials token from `token-client.ts` with retry-once on expired-token and
+  429-backoff), and on failure falls back to the `course_members` cache only while
+  it is under `STALE_CACHE_MAX_AGE_MS` (24h); past that ceiling it throws
+  `RosterUnavailableError` (→ 502 at the route). Both routes and Phase 5's session
+  creation consume this one helper.
+- **`roster_refreshed` audit on both GET and POST.** `getRosterWithFallback` returns
+  `refreshed: boolean`; `GET /api/course/roster` (5-min cache, live refresh past
+  that) and `POST /api/course/roster/refresh` each write one `audit_events` row with
+  `request_id = request.id` when `refreshed === true`. Pure cache hits and stale-
+  cache fallbacks write nothing.
+- **`POST /api/course/roster/refresh` is CSRF-gated now, ahead of Phase 5.** No
+  Phase 4 web caller exists, so there is no dead end — it is exercised by tests
+  until Phase 5 wires the browser CSRF/JSON bootstrap (Phase 5 Task 13).
+- **The contract Phase 5 consumes is fixed:** `CourseRosterMember` (defined once in
+  `server/src/lti/nrps.ts` — `ltiUserId`, `institutionalId`, `displayName`,
+  name parts, `email`, `roles`, `status`, `eligibleForAttendance`) and
+  `getRosterWithFallback(db, courseId, { signingKey })` →
+  `{ members, fetchedAt, stale, refreshed }`. `eligibleForAttendance` is always
+  computed from the institution's `rosterLearnerRoles` (default `['Learner']`),
+  identically on the fresh and stale paths.
+- The `nrps.ts ⇄ roster-store.ts` import cycle is function-body-only (ESM live
+  bindings), not a load-time cycle. No module imports a `db` or signing-key handle:
+  `db: Database` is the first arg of every DB-touching function and the active
+  `ToolSigningKey` is threaded `index.ts` → route deps → `getRosterWithFallback` →
+  `refreshCourseRoster` → `getAccessToken`.
+- The AGS scope constants (`AGS_LINEITEM_SCOPE`/`AGS_SCORE_SCOPE`) were deferred to
+  Phase 6 (YAGNI) even though `courses.ags_lineitems_url` is persisted at launch so
+  Phase 6 has the data.
+- `server/tests/routes/course-roster-integration.test.ts` is the Phase 4 exit
+  criterion made executable: it composes the real `registerLtiLoginRoute` +
+  `registerLtiLaunchRoute` + `registerCourseRosterRoutes` onto a local `Fastify()`
+  (with `@fastify/cookie` + `@fastify/formbody`, mirroring `lti-launch.test.ts` — no
+  `index.ts` import) and drives `POST /lti/login` → 302 with `state`/`nonce` →
+  `mintIdToken` (instructor role, NRPS claim via `extraClaims`) →
+  `POST /lti/launch` → 303 + session cookie → `GET /api/course/roster` → 200 with 2
+  normalized members (one eligible learner, one excluded instructor) and exactly one
+  `roster_refreshed` audit row with a truthy `request_id`. `platform.setPageSize(1)`
+  with 2 members means the GET path exercises real Link-header pagination end to end.
+  It passed on the first run with no source changes.
+- Suite is now **233 tests across 36 files**, all passing; `npm run typecheck` and
+  `npm run lint` clean. No real-Canvas step here — that stays a Phase 7 post-deploy
+  item, as for Phase 3.
 
 ## Deferred decisions
 
