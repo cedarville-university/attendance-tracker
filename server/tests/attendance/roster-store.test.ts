@@ -10,8 +10,12 @@ import {
   getCachedRoster,
   getCachedRosterAsMembers,
   findCourseMembersByInstitutionalId,
+  getRosterWithFallback,
+  RosterUnavailableError,
+  STALE_CACHE_MAX_AGE_MS,
 } from '../../src/attendance/roster-store.js';
 import type { CourseRosterMember } from '../../src/lti/nrps.js';
+import { loadSigningKeysFromEnv, getActiveSigningKey, type ToolSigningKey } from '../../src/lti/signing-keys.js';
 
 let platform: MockCanvasPlatform;
 
@@ -158,5 +162,79 @@ describe('findCourseMembersByInstitutionalId', () => {
     expect((await findCourseMembersByInstitutionalId(db, courseId, 'DUP1')).map((m) => m.ltiUserId).sort()).toEqual(['u1', 'u2']);
     expect(await findCourseMembersByInstitutionalId(db, courseId, 'UNIQUE')).toHaveLength(1);
     expect(await findCourseMembersByInstitutionalId(db, courseId, 'NOPE')).toHaveLength(0);
+  });
+});
+
+describe('getRosterWithFallback', () => {
+  let signingKey: ToolSigningKey;
+
+  beforeAll(async () => {
+    signingKey = getActiveSigningKey(await loadSigningKeysFromEnv(undefined));
+  });
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  it('exports a 24h ceiling', () => {
+    expect(STALE_CACHE_MAX_AGE_MS).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it('returns a fresh roster with refreshed:true on a successful Canvas fetch', async () => {
+    const { db } = getTestDb();
+    const { courseId } = await seedInstitutionAndCourse(db, platform, { nrpsUrl: platform.nrpsUrlFor('gw-fresh') });
+    platform.setCourseMembers('gw-fresh', [
+      { user_id: 'u1', status: 'Active', roles: ['http://purl.imsglobal.org/vocab/lis/v2/membership#Learner'] },
+    ]);
+
+    const result = await getRosterWithFallback(db, courseId, { signingKey, sleepImpl: async () => {} });
+    expect(result).toMatchObject({ stale: false, refreshed: true });
+    expect(result.members[0]).toHaveProperty('eligibleForAttendance', true);
+  });
+
+  it('falls back to a <24h cache with stale:true when the fresh fetch fails', async () => {
+    const { db } = getTestDb();
+    const { courseId } = await seedInstitutionAndCourse(db, platform, { nrpsUrl: platform.nrpsUrlFor('gw-stale') });
+    platform.setCourseMembers('gw-stale', [
+      { user_id: 'u1', status: 'Active', roles: ['http://purl.imsglobal.org/vocab/lis/v2/membership#Learner'] },
+      { user_id: 'u2', status: 'Active', roles: ['http://purl.imsglobal.org/vocab/lis/v2/membership#Instructor'] },
+    ]);
+    // Populate the cache with a real refresh, then break Canvas.
+    await getRosterWithFallback(db, courseId, { signingKey, sleepImpl: async () => {} });
+    const dead: typeof fetch = async () => {
+      throw new Error('ECONNREFUSED');
+    };
+
+    const result = await getRosterWithFallback(db, courseId, { signingKey, fetchImpl: dead, sleepImpl: async () => {} });
+    expect(result).toMatchObject({ stale: true, refreshed: false });
+    expect(result.members).toHaveLength(2);
+    // SG3 shape parity: same keys as the fresh path.
+    const fresh = await getRosterWithFallback(db, courseId, { signingKey, sleepImpl: async () => {} });
+    expect(Object.keys(result.members[0]).sort()).toEqual(Object.keys(fresh.members[0]).sort());
+  });
+
+  it('throws RosterUnavailableError when the fetch fails and there is no cache', async () => {
+    const { db } = getTestDb();
+    const { courseId } = await seedInstitutionAndCourse(db, platform, { nrpsUrl: platform.nrpsUrlFor('gw-none') });
+    const dead: typeof fetch = async () => {
+      throw new Error('ECONNREFUSED');
+    };
+    await expect(getRosterWithFallback(db, courseId, { signingKey, fetchImpl: dead, sleepImpl: async () => {} })).rejects.toBeInstanceOf(
+      RosterUnavailableError,
+    );
+  });
+
+  it('throws RosterUnavailableError when the fetch fails and the cache is older than 24h', async () => {
+    const { db } = getTestDb();
+    const { courseId } = await seedInstitutionAndCourse(db, platform, { nrpsUrl: platform.nrpsUrlFor('gw-25h') });
+    platform.setCourseMembers('gw-25h', [{ user_id: 'u1', status: 'Active', roles: [] }]);
+    await getRosterWithFallback(db, courseId, { signingKey, sleepImpl: async () => {} });
+    // Age the cache to 25 hours.
+    await db.update(courses).set({ rosterCachedAt: new Date(Date.now() - 25 * 60 * 60 * 1000) }).where(eq(courses.id, courseId));
+    const dead: typeof fetch = async () => {
+      throw new Error('ECONNREFUSED');
+    };
+    await expect(getRosterWithFallback(db, courseId, { signingKey, fetchImpl: dead, sleepImpl: async () => {} })).rejects.toBeInstanceOf(
+      RosterUnavailableError,
+    );
   });
 });

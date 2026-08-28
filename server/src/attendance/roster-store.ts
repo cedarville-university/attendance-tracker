@@ -8,7 +8,9 @@ import { and, eq, inArray } from 'drizzle-orm';
 import type { Database } from '../database/client.js';
 import { courseMembers, courses, institutions } from '../database/schema.js';
 import type { CourseRosterMember } from '../lti/nrps.js';
+import { refreshCourseRoster } from '../lti/nrps.js';
 import { resolveInstitutionRosterConfig, isEligibleForAttendance } from '../lti/roster-config.js';
+import type { ToolSigningKey } from '../lti/signing-keys.js';
 
 export type CourseMemberRow = typeof courseMembers.$inferSelect;
 
@@ -136,4 +138,58 @@ export async function getCachedRosterAsMembers(
     members: cached.members.filter((m) => m.status !== 'removed').map((m) => cachedRowToMember(m, learnerRoles)),
     rosterCachedAt: cached.rosterCachedAt,
   };
+}
+
+export const STALE_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+export class RosterUnavailableError extends Error {
+  readonly kind: string;
+  constructor(message: string, kind: string) {
+    super(message);
+    this.name = 'RosterUnavailableError';
+    this.kind = kind;
+  }
+}
+
+export interface RosterWithFallback {
+  members: CourseRosterMember[];
+  fetchedAt: string;
+  stale: boolean;
+  refreshed: boolean;
+}
+
+export interface GetRosterWithFallbackDeps {
+  signingKey: ToolSigningKey;
+  fetchImpl?: typeof fetch;
+  sleepImpl?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+export async function getRosterWithFallback(
+  db: Database,
+  courseId: string,
+  deps: GetRosterWithFallbackDeps,
+): Promise<RosterWithFallback> {
+  const now = deps.now ?? Date.now;
+
+  const fresh = await refreshCourseRoster(db, courseId, {
+    signingKey: deps.signingKey,
+    fetchImpl: deps.fetchImpl,
+    sleepImpl: deps.sleepImpl,
+  });
+  if (fresh.ok) {
+    return { members: fresh.members, fetchedAt: fresh.fetchedAt, stale: false, refreshed: true };
+  }
+
+  const cached = await getCachedRosterAsMembers(db, courseId);
+  if (cached && cached.rosterCachedAt && now() - cached.rosterCachedAt.getTime() < STALE_CACHE_MAX_AGE_MS) {
+    return {
+      members: cached.members,
+      fetchedAt: cached.rosterCachedAt.toISOString(),
+      stale: true,
+      refreshed: false,
+    };
+  }
+
+  throw new RosterUnavailableError(fresh.error.message, fresh.error.kind);
 }
