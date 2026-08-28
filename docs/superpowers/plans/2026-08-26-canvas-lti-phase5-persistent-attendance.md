@@ -14,7 +14,7 @@
 
 - No new npm dependencies (`drizzle-orm`, `pg`, `zod`, `fastify` already present from Phases 1–4). `web/` stays framework-free plain ES modules. Import `randomUUID`/`randomBytes`/`createHmac` from `node:crypto` explicitly (no unqualified global) server-side; `crypto.randomUUID()` is the browser global on the `web/` side.
 - **No importable `db`.** Thread `db: Database` as the first parameter of every DB-touching lib function and as a field of every route `deps` object (see the Dependency-injection note above). No module-level DB handle anywhere in Phase 5 source or tests.
-- Raw card codes MUST NOT be logged, written to audit logs, or persisted in `attendance_records` by default (spec §22). Only a fingerprint (`HMAC-SHA256(rawCardCode, institution-specific secret)`) may be persisted, and only when explicitly enabled — never the raw code itself. <!-- reviser note (S3): the fingerprint secret is app-wide (`CARD_FINGERPRINT_SECRET`) this phase because `institutions` has no secret column and only one institution is live; the `institutionId` parameter is kept in the signature and the per-institution migration path is documented in code. Needs an explicit user ruling that app-wide is acceptable for Phase 5. -->
+- Raw card codes MUST NOT be logged, written to audit logs, or persisted in `attendance_records` by default (spec §22). Only a fingerprint (`HMAC-SHA256(rawCardCode, institution-specific secret)`) may be persisted, and only when explicitly enabled — never the raw code itself. The fingerprint secret is app-wide (`CARD_FINGERPRINT_SECRET`) for Phase 5 — **user ruling (2026-08-27): app-wide is confirmed for now**, because `institutions` has no secret column and only one institution is live. The `institutionId` parameter is kept in `computeCardFingerprint`'s call path and the per-institution migration path (add an `institutions.card_fingerprint_secret` column, backfill, switch the lookup) is documented as future work in code and in Risks.
 - `attendance_session_members.status` is the *roster* status captured at snapshot time and is **never mutated** after creation. The attendance *outcome* lives only in the append-only `attendance_records` table.
 - Every mutation that changes attendance state MUST write an `audit_events` row (spec §33) with `institutionId` (always non-null, from the session's course), `actorLtiUserId`, and `requestId` (from the Fastify `request.id` correlation id): `attendance_session_created` (on `createAttendanceSession`), `attendance_manual_change`, `attendance_record_removed`, `attendance_session_closed`, `attendance_session_reopened`.
 - Every route under `/api/attendance-sessions/*` requires `requireSession`; every mutation (POST/PATCH/DELETE) additionally requires `requireCsrf`. Built in `index.ts` as `createRequireSession(db)` + `createRequireCsrf(env.APP_BASE_URL)`, threaded into the route `deps` object, applied as `preHandler: [requireSession, requireCsrf]` on mutations and `preHandler: requireSession` on GETs (spec §25 / §15). Every session/member/record lookup MUST verify the resource belongs to the authenticated session's institution/course — cross-tenant access returns `404`, never `403`.
@@ -23,10 +23,10 @@
 - Matches happen against **this session's roster snapshot** (`attendance_session_members`), never against the live `course_members` table — that is what makes the snapshot immutable.
 - `late` status is **deferred this phase** (settled decision): it is not in the `attendance_records` status enum, not in `manualCorrectionSchema`, and not accepted by any route. `excused` is the only manual-correction-only outcome; the automated scan pipeline only ever produces `present` / `unexpected` / `lookup_error`. No auto-cutoff policy exists yet.
 - Session state transitions are guarded (spec §23): `closeAttendanceSession` rejects a session already `closed` (409 `session_already_closed`); `reopenAttendanceSession` rejects a session that is not `closed` (409 `session_not_closed`).
-- Roster acquisition for **Start Attendance** goes through Phase 4's shared `getRosterWithFallback(db, courseId)` helper (`server/src/attendance/roster-store.ts`), NEVER `refreshCourseRoster` directly — a transient Canvas failure with a `< 24h` cache degrades to that cache with `stale: true` rather than hard-failing (settled decision / spec §18.4). Only a transient failure with no `< 24h` cache is fatal.
+- Roster acquisition for **Start Attendance** goes through Phase 4's shared `getRosterWithFallback(db, courseId, deps: { signingKey: ToolSigningKey; fetchImpl?: typeof fetch; sleepImpl?: (ms: number) => Promise<void>; now?: () => number })` helper (`server/src/attendance/roster-store.ts`), NEVER `refreshCourseRoster` directly — a transient Canvas failure with a `< 24h` cache degrades to that cache with `stale: true` rather than hard-failing (settled decision / spec §18.4). Only a transient failure with no `< 24h` cache is fatal. `deps.signingKey` is **required** (Phase 4's committed contract, per the SSRF/DI design D5): the active `ToolSigningKey` is not module-level, so `createAttendanceSession` must accept it via its own `deps` and thread it through — see the contract block below. `ToolSigningKey` is the type exported from `server/src/lti/signing-keys.ts` (`{ kid; status; privateKey; publicJwk }`).
 - Production error responses map to opaque codes and include the `request.id` correlation id; never echo an internal `Error.message`, SQL, hostname, or secret to the client (spec §31.9).
 - Follow the existing `registerXRoute(app, deps)` convention (`server/src/routes/me.ts`) and the existing Fastify-`inject` test pattern for every new route and its tests.
-- **Grounding note:** every interface below has been reconciled against the REAL shipped Phase 3 source in this repo (`client.ts`, `schema.ts`, `auth/middleware.ts`, `auth/session.ts`, `auth/csrf.ts`, `routes/me.ts`, `routes/scans.ts`, `index.ts`, `tests/support/{db,seed,mock-canvas}.ts`) and against the Phase 4 fixed contract + the shared revision-constraints doc (D1–D12). Phase 4 is being revised in parallel: rely on the constraints doc for `refreshCourseRoster(db, courseId)` / `getRosterWithFallback(db, courseId)` / `seedInstitutionAndCourse(db)` shapes, not on Phase 4's in-flight plan text. The `CourseRosterMember` fields are NOT changing. Never change a Phase 3/4 shipped public interface to fit this plan — adapt the call site here. Modifying `server/src/index.ts` route wiring and deleting `server/src/routes/scans.ts` + `server/tests/routes/scans.test.ts` is expected and in scope (Task 17).
+- **Grounding note:** every interface below has been reconciled against the REAL shipped Phase 3 source in this repo (`client.ts`, `schema.ts`, `auth/middleware.ts`, `auth/session.ts`, `auth/csrf.ts`, `routes/me.ts`, `routes/scans.ts`, `index.ts`, `tests/support/{db,seed,mock-canvas}.ts`) and against the Phase 4 fixed contract + the shared revision-constraints doc (D1–D12). Phase 4's committed contract governs the shared shapes: `refreshCourseRoster(db, courseId, deps: { signingKey: ToolSigningKey; fetchImpl?; sleepImpl?; maxRateLimitRetries? })`, `getRosterWithFallback(db, courseId, deps: { signingKey: ToolSigningKey; fetchImpl?; sleepImpl?; now? })` (both take a **required** injected `signingKey`), and `seedInstitutionAndCourse(db, platform: MockCanvasPlatform, overrides?)` → `SeededCourse extends SeededRegistration { courseId }`. Phase 5 inherits these verbatim (Phase 4 runs first) — do not re-derive them from Phase 4's in-flight plan text. The `CourseRosterMember` fields are NOT changing. Never change a Phase 3/4 shipped public interface to fit this plan — adapt the call site here. Modifying `server/src/index.ts` route wiring and deleting `server/src/routes/scans.ts` + `server/tests/routes/scans.test.ts` is expected and in scope (Task 17).
 
 ---
 
@@ -42,15 +42,18 @@ server/src/attendance/
   card-fingerprint.ts            # computeCardFingerprint() — HMAC-SHA256(cardCode, secret), spec §22 (pure)
 
 server/src/routes/
-  attendance-sessions.ts   # POST/GET/close/reopen/scans/members-PATCH/records-DELETE/export.csv — deps: { db, resolver, requireSession, requireCsrf }
+  attendance-sessions.ts   # POST/GET/close/reopen/scans/members-PATCH/records-DELETE/export.csv — deps: { db, resolver, requireSession, requireCsrf, signingKey }
 
 server/src/database/
   schema.ts                # MODIFIED: adds attendanceSessions/attendanceSessionMembers/attendanceRecords,
                             #   confirms/extends auditEvents with the attendanceSessionId FK
 server/src/index.ts        # MODIFIED: build createRequireCsrf(env.APP_BASE_URL); register attendance-sessions
-                            #   route on the ROOT app with real preHandlers; Task 17 removes registerScansRoute
+                            #   route on the ROOT app with real preHandlers + signingKey: getActiveSigningKey(signingKeys);
+                            #   Task 17 removes registerScansRoute
 server/tests/support/db.ts # MODIFIED: add the 4 new tables to TRUNCATE_ORDER (Task 1)
-server/tests/support/seed.ts # MODIFIED: add seedInstitutionAndCourse(db) building the real deployment chain (Task 4)
+server/tests/support/seed.ts # NOT modified by Phase 5 — seedInstitutionAndCourse(db, platform, overrides?)
+                              #   -> SeededCourse extends SeededRegistration { courseId } is created by Phase 4 Task 10;
+                              #   Phase 5 tests consume it as-is (construct a non-started MockCanvasPlatform to pass)
 
 server/src/routes/scans.ts        # DELETED in Task 17 (POST /api/scans retired per D8 / index.ts standing note)
 server/tests/routes/scans.test.ts # DELETED in Task 17
@@ -138,9 +141,16 @@ export const attendanceRecords = pgTable(
   ]
 );
 
-// auditEvents -- shared with Phase 4. Phase 5 adds the attendanceSessionId FK.
-// See Task 1 for the exact migration-ordering handling (works whether or not
-// Phase 4's migration already created this table).
+// auditEvents -- shared with Phase 4. Phase 5 adds ONLY the attendanceSessionId FK column
+// (Task 1 Step 3 — Phase 5 does NOT redefine this table if Phase 4 already declared it).
+// See Task 1 for the exact migration-ordering handling (works whether or not Phase 4's
+// migration already created this table).
+//
+// NULLABILITY NOTE (M2): Phase 4 Task 2 OWNS `target_type` / `target_id` and makes them
+// NOT NULL. They are shown nullable here only because this block is verbatim spec §26;
+// when Phase 4 has run first (it does), its NOT NULL definition stands and Phase 5 never
+// overrides it. Every Phase 5 audit insert (Tasks 4/8/9/10/12) sets BOTH columns
+// explicitly, so there is no conflict on either migration ordering.
 export const auditEvents = pgTable('audit_events', {
   id: uuid('id').primaryKey().defaultRandom(),
   institutionId: uuid('institution_id').notNull().references(() => institutions.id),
@@ -148,8 +158,8 @@ export const auditEvents = pgTable('audit_events', {
   attendanceSessionId: uuid('attendance_session_id').references(() => attendanceSessions.id),
   actorLtiUserId: text('actor_lti_user_id'),
   eventType: text('event_type').notNull(),
-  targetType: text('target_type'),
-  targetId: text('target_id'),
+  targetType: text('target_type'), // Phase 4 Task 2 makes this NOT NULL — see M2 note above
+  targetId: text('target_id'),     // Phase 4 Task 2 makes this NOT NULL — see M2 note above
   oldValue: jsonb('old_value'),
   newValue: jsonb('new_value'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -159,7 +169,7 @@ export const auditEvents = pgTable('audit_events', {
 
 ### Core module signatures (fixed contract — every task below must match these exactly)
 
-Every DB-touching function takes `db: Database` (from `server/src/database/client.js`) as its FIRST parameter (D1). `resolveCurrentRecord`, `buildAttendanceSessionCsv`, and `computeCardFingerprint` are pure and take no `db`.
+Every DB-touching function takes `db: Database` (from `server/src/database/client.js`) as its FIRST parameter (D1). `resolveCurrentRecord`, `buildAttendanceSessionCsv`, and `computeCardFingerprint` are pure and take no `db`. `ToolSigningKey` is imported type-only from `server/src/lti/signing-keys.js` (Phase 3); it is the exact name that module exports.
 
 ```ts
 // server/src/attendance/member-status.ts  (pure)
@@ -188,12 +198,25 @@ export async function submitScan(
 ): Promise<AttendanceRecordRow>;
 
 // server/src/attendance/session-lifecycle.ts
+// `deps.signingKey` is the active ToolSigningKey, threaded from index.ts -> route deps ->
+// here -> getRosterWithFallback (Phase 4 D5: no module-level signing-key accessor). It is
+// REQUIRED. The optional test-injection fields mirror Phase 4's getRosterWithFallback deps
+// so a test can stub the Canvas fetch without touching the real key path. `deps` is placed
+// LAST, after `requestId` (which becomes `string | undefined` — a required slot — because
+// TS forbids an optional param before a required one), and that shape is used at every call site.
+export interface CreateAttendanceSessionDeps {
+  signingKey: ToolSigningKey;
+  fetchImpl?: typeof fetch;
+  sleepImpl?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
 export async function createAttendanceSession(
   db: Database,
   courseId: string,
   startedByLtiUserId: string,
   body: { label?: string; meetingAt?: string },
-  requestId?: string
+  requestId: string | undefined,
+  deps: CreateAttendanceSessionDeps
 ): Promise<AttendanceSessionRow>;
 export async function closeAttendanceSession(db: Database, sessionId: string, actorLtiUserId: string, requestId?: string): Promise<void>;
 export async function reopenAttendanceSession(db: Database, sessionId: string, actorLtiUserId: string, reason?: string, requestId?: string): Promise<void>;
@@ -245,12 +268,12 @@ Expected: `/var/run/postgresql:5432 - accepting connections`
 - `server/src/routes/me.ts` shows the deps convention: `MeRouteDeps { requireSession; db }`, route registered `{ preHandler: deps.requireSession }`, and it already returns `csrfToken: session.csrfSecret` on `GET /api/me`.
 - `server/src/index.ts` builds `const { db } = dbClient;` and `const requireSession = createRequireSession(db)` once — this is where Task 12 adds `const requireCsrf = createRequireCsrf(env.APP_BASE_URL)`.
 - `server/tests/support/db.ts` exports `getTestDb()` (`-> { db, pool }`), `resetDb()`, `closeTestDb()`, and a `TRUNCATE_ORDER` array (6 names currently — Task 1 extends it).
-- `server/tests/support/seed.ts` exports `seedInstitutionAndRegistration(db, platform, overrides?)` -> `SeededRegistration` (with `deploymentRowId`). There is **no** `seedInstitutionAndCourse` — Task 4 adds it.
+- `server/tests/support/seed.ts` exports `seedInstitutionAndRegistration(db, platform, overrides?)` -> `SeededRegistration` (with `deploymentRowId`, `clientId`, `deploymentId`). `seedInstitutionAndCourse(db, platform: MockCanvasPlatform, overrides?)` -> `SeededCourse extends SeededRegistration { courseId }` is added by **Phase 4 Task 10** (Phase 4 runs first); Phase 5 consumes it and does not modify `seed.ts`. If it is somehow absent at execution time, note that and add it with exactly Phase 4's signature (see Task 4 Step 1).
 - `courses.deploymentId` is a NOT NULL FK to `lti_deployments.id` (a ROW UUID), NOT `institutions.id`.
 
 - [ ] **Step 3: Confirm the Phase 4 roster contract (per the constraints doc, D2/D9)**
 
-Confirm (or note the real shape of): `server/src/lti/nrps.ts` `refreshCourseRoster(db, courseId): Promise<CourseRosterResult>` (raw fetch, returns `{ ok:false, error }` on a transient failure, never throws) and `CourseRosterMember` (`{ ltiUserId, institutionalId, displayName, givenName, familyName, email, roles, status, eligibleForAttendance }` — unchanged); `server/src/attendance/roster-store.ts` `getRosterWithFallback(db, courseId): Promise<{ members: CourseRosterMember[]; fetchedAt: string; stale: boolean }>` (fresh fetch, else `< 24h` cache with `stale: true`, else throws). Phase 5 consumes `getRosterWithFallback`, never `refreshCourseRoster` directly. If Phase 4 has not executed yet, Task 4 still writes against this exact signature — Phase 4's revised plan is committed to it (D9).
+Confirm (or note the real shape of): `server/src/lti/nrps.ts` `refreshCourseRoster(db, courseId, deps: { signingKey: ToolSigningKey; fetchImpl?: typeof fetch; sleepImpl?: (ms: number) => Promise<void>; maxRateLimitRetries?: number }): Promise<CourseRosterResult>` (raw fetch, returns `{ ok:false, error }` on a transient failure, never throws) and `CourseRosterMember` (`{ ltiUserId, institutionalId, displayName, givenName, familyName, email, roles, status, eligibleForAttendance }` — unchanged); `server/src/attendance/roster-store.ts` `getRosterWithFallback(db, courseId, deps: { signingKey: ToolSigningKey; fetchImpl?: typeof fetch; sleepImpl?: (ms: number) => Promise<void>; now?: () => number }): Promise<{ members: CourseRosterMember[]; fetchedAt: string; stale: boolean; refreshed: boolean }>` (fresh fetch, else `< 24h` cache with `stale: true`, else throws). **Both take a required injected `deps.signingKey: ToolSigningKey`** (Phase 4's committed contract — the active key is not module-level per D5, so it is threaded in from `index.ts`). Confirm `ToolSigningKey` is exported from `server/src/lti/signing-keys.ts` with fields `{ kid, status, privateKey, publicJwk }` and that `getActiveSigningKey(keys: ToolSigningKey[]): ToolSigningKey` is a **synchronous** export of the same module. Phase 5 consumes `getRosterWithFallback`, never `refreshCourseRoster` directly, and threads `signingKey` into it via `createAttendanceSession`'s `deps` (see the contract block). If Phase 4 has not executed yet, Task 4 still writes against this exact 3-arg signature — Phase 4's committed contract is bound to it (D9).
 
 - [ ] **Step 4: Confirm whether `audit_events` already exists**
 
@@ -400,10 +423,12 @@ CREATE TABLE IF NOT EXISTS "audit_events" (
 
 If the generated migration instead contains only an `ALTER TABLE "audit_events" ADD COLUMN "attendance_session_id" uuid REFERENCES "attendance_sessions"("id")` (because Phase 4's `audit_events` table already exists), leave it as-is — that's already correct and idempotent under normal migration-runner semantics (a migration only runs once, tracked by the runner's own migrations-applied table), and no `IF NOT EXISTS` edit is needed for an `ALTER`.
 
-- [ ] **Step 6: Apply the migration and run the tests**
+- [ ] **Step 6: Run the tests — the harness applies the migration (M3)**
 
-Run: `npx drizzle-kit migrate && npx vitest run server/tests/database/schema.test.ts`
-Expected: PASS — both tests green.
+Do NOT run `drizzle-kit migrate` by hand. Commit the generated `migrations/<NNNN>_*.sql` + `migrations/meta/` changes; Vitest's `globalSetup` (`server/tests/support/global-setup.ts` → `migrate()` → `applyMigrations()`) applies every pending migration to the test database before the suite runs — the same `generate` + harness-applied workflow used everywhere else in this plan and in Phase 4.
+
+Run: `npx vitest run server/tests/database/schema.test.ts`
+Expected: PASS — both tests green (globalSetup applies the new migration first).
 
 - [ ] **Step 7: Commit**
 
@@ -608,64 +633,40 @@ git commit -m "feat: add HMAC-based card fingerprint for optional diagnostics re
 
 **Files:**
 - Create: `server/src/attendance/session-lifecycle.ts` (this task only implements `createAttendanceSession` + the `Tx` alias + the error classes; close/reopen are Tasks 8–9)
-- Modify: `server/tests/support/seed.ts` (add `seedInstitutionAndCourse(db)`, D10/B4)
 - Test: `server/tests/attendance/session-lifecycle.test.ts`
+- Note: `server/tests/support/seed.ts` is **not** modified here — `seedInstitutionAndCourse` is created by Phase 4 Task 10 (see Step 1).
 
 **Interfaces:**
-- Consumes: `getRosterWithFallback(db, courseId)` from Phase 4's `server/src/attendance/roster-store.ts` (per D9 — NOT `refreshCourseRoster` directly); `Database` from `server/src/database/client.ts`; `attendanceSessions`, `attendanceSessionMembers`, `auditEvents`, `courses` from `server/src/database/schema.ts`.
-- Produces: `createAttendanceSession(db, courseId, startedByLtiUserId, body, requestId?): Promise<AttendanceSessionRow>` (writes an `attendance_session_created` audit event, S1) — used by `routes/attendance-sessions.ts`'s `POST /api/attendance-sessions` handler. Also exports `Tx`, `SessionClosedError`, `SessionAlreadyClosedError`, `SessionNotClosedError`, `RosterUnavailableError`.
+- Consumes: `getRosterWithFallback(db, courseId, deps: { signingKey: ToolSigningKey; fetchImpl?; sleepImpl?; now? })` from Phase 4's `server/src/attendance/roster-store.ts` (per D9 — NOT `refreshCourseRoster` directly); `ToolSigningKey` (type-only) from `server/src/lti/signing-keys.ts`; `Database` from `server/src/database/client.ts`; `attendanceSessions`, `attendanceSessionMembers`, `auditEvents`, `courses` from `server/src/database/schema.ts`.
+- Produces: `createAttendanceSession(db, courseId, startedByLtiUserId, body, requestId, deps: { signingKey: ToolSigningKey; fetchImpl?; sleepImpl?; now? }): Promise<AttendanceSessionRow>` (writes an `attendance_session_created` audit event, S1) — used by `routes/attendance-sessions.ts`'s `POST /api/attendance-sessions` handler, which supplies `deps.signingKey` from its own route deps (Task 12). Also exports `Tx`, `SessionClosedError`, `SessionAlreadyClosedError`, `SessionNotClosedError`, `RosterUnavailableError`.
 
-- [ ] **Step 1: Add `seedInstitutionAndCourse(db)` to `server/tests/support/seed.ts` (D10/B4)**
+- [ ] **Step 1: Consume Phase 4's `seedInstitutionAndCourse` (do NOT redefine it)**
 
-`seedInstitutionAndRegistration` needs a running `MockCanvasPlatform`; this lighter helper does not. It builds the FULL FK chain so `courses.deploymentId` is an `lti_deployments.id` ROW UUID (never `institutions.id` — that FK violation is B4). If Phase 4's revised plan has already added `seedInstitutionAndCourse` to this file, REUSE it — verify it takes `db` as its first arg and builds the real deployment chain per D10; only add this definition if the export is absent.
+Phase 4 Task 10 adds `seedInstitutionAndCourse` to `server/tests/support/seed.ts` and Phase 4 runs first, so Phase 5 **inherits it unchanged** — this task adds no seed helper. Its committed shape (verify at execution; do not modify `seed.ts` to fit this plan):
 
 ```ts
-// server/tests/support/seed.ts — add alongside seedInstitutionAndRegistration
-import { courses } from '../../src/database/schema.js'; // add to the existing import line
-
-export interface SeededCourse {
-  institutionId: string;
-  registrationId: string;
-  deploymentRowId: string;
+// Already present in server/tests/support/seed.ts after Phase 4 Task 10:
+export interface SeededCourse extends SeededRegistration {
+  // SeededRegistration = { institutionId, registrationId, deploymentRowId, clientId, deploymentId }
   courseId: string;
 }
-
-export async function seedInstitutionAndCourse(db: Database): Promise<SeededCourse> {
-  const s = randomUUID();
-  const [institution] = await db
-    .insert(institutions)
-    .values({ slug: `test-${s}`, displayName: 'Test U', timezone: 'UTC', enabled: true })
-    .returning();
-  const [registration] = await db
-    .insert(ltiRegistrations)
-    .values({
-      institutionId: institution.id,
-      issuer: `https://canvas-${s}.test`,
-      clientId: `client-${s}`,
-      oidcAuthEndpoint: 'https://canvas.test/api/lti/authorize_redirect',
-      tokenEndpoint: 'https://canvas.test/login/oauth2/token',
-      tokenAudience: 'https://canvas.test/login/oauth2/token',
-      platformJwksUri: 'https://canvas.test/api/lti/security/jwks',
-      enabled: true,
-    })
-    .returning();
-  const [deployment] = await db
-    .insert(ltiDeployments)
-    .values({ registrationId: registration.id, deploymentId: `dep-${s}`, enabled: true, configuration: {} })
-    .returning();
-  const [course] = await db
-    .insert(courses)
-    .values({
-      institutionId: institution.id,
-      deploymentId: deployment.id, // ROW UUID, not institution.id
-      ltiContextId: `ctx-${s}`,
-      label: 'TEST101',
-      title: 'Test Course',
-    })
-    .returning();
-  return { institutionId: institution.id, registrationId: registration.id, deploymentRowId: deployment.id, courseId: course.id };
-}
+export async function seedInstitutionAndCourse(
+  db: Database,
+  platform: MockCanvasPlatform,
+  overrides?: SeedOverrides & { nrpsUrl?: string | null },
+): Promise<SeededCourse>;
 ```
+
+`platform` is **required**. It builds the real FK chain `institutions → lti_registrations → lti_deployments → courses` with `courses.deploymentId` = the `lti_deployments.id` ROW UUID (never `institutions.id` — the B4 FK violation). Phase 5 tests that call it construct a `MockCanvasPlatform` at module scope and pass it; because every Phase 5 lifecycle/scan/route test `vi.mock`s `getRosterWithFallback` (D9/Q3), the platform is used only for its `issuer` / `jwksUri` getters during seeding and does **not** need `.start()` / `.stop()`:
+
+```ts
+import { MockCanvasPlatform } from '../support/mock-canvas.js';
+const platform = new MockCanvasPlatform(); // no start() — roster fetch is mocked
+// ...
+const { courseId, institutionId } = await seedInstitutionAndCourse(db, platform);
+```
+
+If Phase 4's helper is somehow absent at execution time, add it to `seed.ts` with **exactly** the signature above (delegating to `seedInstitutionAndRegistration(db, platform, overrides)` then inserting the `courses` row) — never a divergent `db`-only variant.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -675,8 +676,10 @@ import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { seedInstitutionAndCourse } from '../support/seed.js';
+import { MockCanvasPlatform } from '../support/mock-canvas.js';
 import { createAttendanceSession } from '../../src/attendance/session-lifecycle.js';
 import { attendanceSessionMembers, auditEvents } from '../../src/database/schema.js';
+import type { ToolSigningKey } from '../../src/lti/signing-keys.js';
 
 // D9: Start Attendance goes through the shared fallback helper, so that is what we mock.
 // vi.mock (not vi.spyOn) — an ESM named-export spy throws "Cannot redefine property"
@@ -688,6 +691,12 @@ import { getRosterWithFallback } from '../../src/attendance/roster-store.js';
 
 const { db } = getTestDb();
 afterAll(() => closeTestDb());
+
+// Seeding only reads platform.issuer / platform.jwksUri — no .start() needed, the
+// roster fetch is mocked. signingKey is a typed stub: getRosterWithFallback is mocked
+// so the key is never used, but createAttendanceSession's deps type requires it (C1).
+const platform = new MockCanvasPlatform();
+const signingKey = {} as ToolSigningKey;
 
 beforeEach(async () => {
   await resetDb();
@@ -711,11 +720,11 @@ function member(overrides: Partial<import('../../src/lti/nrps.js').CourseRosterM
 
 describe('createAttendanceSession', () => {
   it('snapshots every roster member verbatim into attendance_session_members and writes an attendance_session_created audit event', async () => {
-    const { courseId } = await seedInstitutionAndCourse(db);
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
     const members = [member(), member({ ltiUserId: 'user-2', institutionalId: '2000000', eligibleForAttendance: false, status: 'Inactive' })];
-    vi.mocked(getRosterWithFallback).mockResolvedValue({ members, fetchedAt: new Date().toISOString(), stale: false });
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members, fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
 
-    const session = await createAttendanceSession(db, courseId, 'instructor-1', {}, 'req-1');
+    const session = await createAttendanceSession(db, courseId, 'instructor-1', {}, 'req-1', { signingKey });
 
     const rows = await db.select().from(attendanceSessionMembers).where(eq(attendanceSessionMembers.attendanceSessionId, session.id));
     expect(rows).toHaveLength(2);
@@ -733,10 +742,10 @@ describe('createAttendanceSession', () => {
   });
 
   it('sets state=open, startedByLtiUserId, and optional label/meetingAt from the request body', async () => {
-    const { courseId } = await seedInstitutionAndCourse(db);
-    vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false });
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
 
-    const session = await createAttendanceSession(db, courseId, 'instructor-1', { label: 'Monday lecture', meetingAt: '2026-08-26T14:00:00Z' });
+    const session = await createAttendanceSession(db, courseId, 'instructor-1', { label: 'Monday lecture', meetingAt: '2026-08-26T14:00:00Z' }, undefined, { signingKey });
 
     expect(session.state).toBe('open');
     expect(session.startedByLtiUserId).toBe('instructor-1');
@@ -745,10 +754,10 @@ describe('createAttendanceSession', () => {
   });
 
   it('degrades to a <24h cache: creates the session from the stale roster and records stale=true in the audit event (S2)', async () => {
-    const { courseId } = await seedInstitutionAndCourse(db);
-    vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [member()], fetchedAt: '2026-08-26T09:00:00.000Z', stale: true });
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [member()], fetchedAt: '2026-08-26T09:00:00.000Z', stale: true, refreshed: false });
 
-    const session = await createAttendanceSession(db, courseId, 'instructor-1', {});
+    const session = await createAttendanceSession(db, courseId, 'instructor-1', {}, undefined, { signingKey });
 
     const rows = await db.select().from(attendanceSessionMembers).where(eq(attendanceSessionMembers.attendanceSessionId, session.id));
     expect(rows).toHaveLength(1);
@@ -757,10 +766,10 @@ describe('createAttendanceSession', () => {
   });
 
   it('hard-fails (RosterUnavailableError) only when getRosterWithFallback itself throws — no fetch AND no <24h cache', async () => {
-    const { courseId } = await seedInstitutionAndCourse(db);
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
     vi.mocked(getRosterWithFallback).mockRejectedValue(new Error('canvas down, cache is 3 days old'));
 
-    await expect(createAttendanceSession(db, courseId, 'instructor-1', {})).rejects.toMatchObject({ code: 'roster_unavailable' });
+    await expect(createAttendanceSession(db, courseId, 'instructor-1', {}, undefined, { signingKey })).rejects.toMatchObject({ code: 'roster_unavailable' });
   });
 });
 ```
@@ -777,7 +786,18 @@ Expected: FAIL — module not found.
 import { eq } from 'drizzle-orm';
 import type { Database } from '../database/client.js';
 import { attendanceSessions, attendanceSessionMembers, auditEvents, courses, type AttendanceSessionRow } from '../database/schema.js';
+import type { ToolSigningKey } from '../lti/signing-keys.js';
 import { getRosterWithFallback } from './roster-store.js';
+
+// The optional test-injection fields mirror Phase 4's getRosterWithFallback deps so a
+// caller can stub the Canvas fetch; signingKey is REQUIRED (Phase 4 D5 — no module-level
+// key). Threaded index.ts -> route deps (Task 12) -> here -> getRosterWithFallback.
+export interface CreateAttendanceSessionDeps {
+  signingKey: ToolSigningKey;
+  fetchImpl?: typeof fetch;
+  sleepImpl?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
 
 // Phase 3 ships no db.transaction() precedent, so helpers that receive `tx` type it
 // as this alias rather than the non-existent `typeof db` (Q15 / B5 defect 3).
@@ -808,14 +828,21 @@ export async function createAttendanceSession(
   courseId: string,
   startedByLtiUserId: string,
   body: { label?: string; meetingAt?: string },
-  requestId?: string,
+  requestId: string | undefined,
+  deps: CreateAttendanceSessionDeps,
 ): Promise<AttendanceSessionRow> {
   // D9/S2: getRosterWithFallback returns a fresh fetch, else a <24h cache with
   // stale:true, and only THROWS when there is neither. A transient Canvas 429
-  // mid-class must not block Start Attendance.
-  let roster: { members: import('../lti/nrps.js').CourseRosterMember[]; fetchedAt: string; stale: boolean };
+  // mid-class must not block Start Attendance. deps.signingKey is threaded straight
+  // through — Phase 4's helper needs it to sign the client-assertion JWT on a live fetch.
+  let roster: { members: import('../lti/nrps.js').CourseRosterMember[]; fetchedAt: string; stale: boolean; refreshed: boolean };
   try {
-    roster = await getRosterWithFallback(db, courseId);
+    roster = await getRosterWithFallback(db, courseId, {
+      signingKey: deps.signingKey,
+      fetchImpl: deps.fetchImpl,
+      sleepImpl: deps.sleepImpl,
+      now: deps.now,
+    });
   } catch (err) {
     throw new RosterUnavailableError(err);
   }
@@ -873,10 +900,15 @@ export async function createAttendanceSession(
 Run: `npx vitest run server/tests/attendance/session-lifecycle.test.ts`
 Expected: PASS — 4 tests green.
 
+- [ ] **Step 5b: Typecheck — prove the `signingKey` wiring (C1)**
+
+Run: `npm run typecheck`
+Expected: clean. The test `vi.mock`s `getRosterWithFallback`, so a broken `deps.signingKey` thread (missing param, wrong placement, wrong type) is invisible to the runtime test — only `tsc` catches it. `createAttendanceSession(db, courseId, actor, body, requestId, { signingKey })` must compile against Phase 4's `getRosterWithFallback(db, courseId, { signingKey, ... })` call inside the implementation, and `ToolSigningKey` must resolve to the real export of `server/src/lti/signing-keys.ts`.
+
 - [ ] **Step 6: Commit**
 
 ```bash
-git add server/src/attendance/session-lifecycle.ts server/tests/attendance/session-lifecycle.test.ts server/tests/support/seed.ts
+git add server/src/attendance/session-lifecycle.ts server/tests/attendance/session-lifecycle.test.ts
 git commit -m "feat: add createAttendanceSession — roster snapshot with <24h stale-cache degradation + creation audit event"
 ```
 
@@ -899,11 +931,15 @@ git commit -m "feat: add createAttendanceSession — roster snapshot with <24h s
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { seedInstitutionAndCourse } from '../support/seed.js';
+import { MockCanvasPlatform } from '../support/mock-canvas.js';
 import { submitScan } from '../../src/attendance/scan-service.js';
 import { attendanceSessions, attendanceSessionMembers } from '../../src/database/schema.js';
 import type { IdentityResolver, IdentityResolution } from '../../src/identity/types.js';
 
 const { db } = getTestDb();
+// Seeding reads only platform.issuer / platform.jwksUri — no .start() needed (scan-service
+// never contacts Canvas; the roster snapshot is written directly in these tests).
+const platform = new MockCanvasPlatform();
 afterAll(() => closeTestDb());
 
 beforeEach(async () => {
@@ -915,7 +951,7 @@ function successResolution(overrides: Partial<IdentityResolution> = {}): Identit
 }
 
 async function seedOpenSessionWithMember(institutionalId = '1000000') {
-  const { institutionId, courseId } = await seedInstitutionAndCourse(db);
+  const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
   const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
   await db.insert(attendanceSessionMembers).values({
     attendanceSessionId: session.id,
@@ -994,7 +1030,7 @@ describe('submitScan', () => {
   });
 
   it('rejects scan submission with a 409-mapped error when the session is closed', async () => {
-    const { institutionId, courseId } = await seedInstitutionAndCourse(db);
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'closed' }).returning();
     const resolver: IdentityResolver = { resolveCard: async () => successResolution() };
 
@@ -1142,7 +1178,8 @@ export async function submitScan(
 // Card-fingerprint secret is app-wide (env var), not per-institution, since only
 // one institution is live at this stage. The institutionId parameter is retained
 // so a future per-institution secret is a one-function change -- see "Risks /
-// open items" for the migration path.  (S3: needs a user ruling.)
+// open items" for the migration path.  (User ruling 2026-08-27: app-wide confirmed
+// for Phase 5; per-institution secret is documented future work.)
 function cardFingerprintSecretFor(_institutionId: string): string {
   const secret = process.env.CARD_FINGERPRINT_SECRET;
   if (!secret) throw new Error('CARD_FINGERPRINT_SECRET must be set when card fingerprinting is enabled.');
@@ -1195,7 +1232,7 @@ describe('submitScan -- roster matching edge cases', () => {
   });
 
   it('marks an ambiguous match (duplicate institutionalId in the snapshot) as unexpected, never present', async () => {
-    const { institutionId, courseId } = await seedInstitutionAndCourse(db);
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
     await db.insert(attendanceSessionMembers).values([
       { attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', displayName: 'Jane A', eligibleForAttendance: true, status: 'Active', snapshotData: {} },
@@ -1344,7 +1381,7 @@ import { attendanceRecords } from '../../src/database/schema.js';
 
 describe('closeAttendanceSession', () => {
   it('inserts a system_absence record (scannedAt null) for every eligible member with no qualifying record, sets state=closed, and writes an audit event with requestId', async () => {
-    const { courseId } = await seedInstitutionAndCourse(db);
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
     await db.insert(attendanceSessionMembers).values([
       { attendanceSessionId: session.id, ltiUserId: 'scanned-user', institutionalId: '1000000', displayName: 'Scanned', eligibleForAttendance: true, status: 'Active', snapshotData: {} },
@@ -1377,7 +1414,7 @@ describe('closeAttendanceSession', () => {
   });
 
   it('does not mark system_absence for a member who already has a qualifying record (e.g. a manual excused correction)', async () => {
-    const { courseId } = await seedInstitutionAndCourse(db);
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
     await db.insert(attendanceSessionMembers).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', displayName: 'Jane', eligibleForAttendance: true, status: 'Active', snapshotData: {} });
     await db.insert(attendanceRecords).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', clientScanId: null, status: 'excused', scannedAt: null, source: 'manual' });
@@ -1389,7 +1426,7 @@ describe('closeAttendanceSession', () => {
   });
 
   it('rejects a second close with a 409-mapped error (state guard, Q7)', async () => {
-    const { courseId } = await seedInstitutionAndCourse(db);
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'closed' }).returning();
 
     await expect(closeAttendanceSession(db, session.id, 'instructor-1')).rejects.toMatchObject({ code: 'session_already_closed' });
@@ -1501,7 +1538,7 @@ import { reopenAttendanceSession } from '../../src/attendance/session-lifecycle.
 
 describe('reopenAttendanceSession', () => {
   it('sets state=reopened, clears closedAt, and writes an audit event including reason + requestId', async () => {
-    const { courseId } = await seedInstitutionAndCourse(db);
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'closed', closedAt: new Date() }).returning();
 
     await reopenAttendanceSession(db, session.id, 'instructor-1', 'Student reported a missed scan', 'req-reopen');
@@ -1518,7 +1555,7 @@ describe('reopenAttendanceSession', () => {
   });
 
   it('reopened is a scan-accepting state (not closed)', async () => {
-    const { courseId } = await seedInstitutionAndCourse(db);
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'closed' }).returning();
     await reopenAttendanceSession(db, session.id, 'instructor-1');
 
@@ -1527,7 +1564,7 @@ describe('reopenAttendanceSession', () => {
   });
 
   it('rejects reopening a session that is not closed with a 409-mapped error (state guard, Q7)', async () => {
-    const { courseId } = await seedInstitutionAndCourse(db);
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
 
     await expect(reopenAttendanceSession(db, session.id, 'instructor-1')).rejects.toMatchObject({ code: 'session_not_closed' });
@@ -1608,10 +1645,13 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { and, eq } from 'drizzle-orm';
 import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { seedInstitutionAndCourse } from '../support/seed.js';
+import { MockCanvasPlatform } from '../support/mock-canvas.js';
 import { applyManualCorrection } from '../../src/attendance/manual-correction.js';
 import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents } from '../../src/database/schema.js';
 
 const { db } = getTestDb();
+// Seeding reads only platform.issuer / platform.jwksUri — no .start() needed.
+const platform = new MockCanvasPlatform();
 afterAll(() => closeTestDb());
 
 beforeEach(async () => {
@@ -1619,7 +1659,7 @@ beforeEach(async () => {
 });
 
 async function seedSessionWithScannedMember() {
-  const { courseId } = await seedInstitutionAndCourse(db);
+  const { courseId } = await seedInstitutionAndCourse(db, platform);
   const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
   await db.insert(attendanceSessionMembers).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', displayName: 'Jane', eligibleForAttendance: true, status: 'Active', snapshotData: {} });
   await db.insert(attendanceRecords).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', clientScanId: 'scan-1', status: 'present', scannedAt: new Date(), source: 'card' });
@@ -1656,7 +1696,7 @@ describe('applyManualCorrection', () => {
   });
 
   it('works for a member with no prior record (oldValue is null)', async () => {
-    const { courseId } = await seedInstitutionAndCourse(db);
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
     await db.insert(attendanceSessionMembers).values({ attendanceSessionId: session.id, ltiUserId: 'user-2', institutionalId: '2000000', displayName: 'No Scan', eligibleForAttendance: true, status: 'Active', snapshotData: {} });
 
@@ -1874,7 +1914,7 @@ git commit -m "feat: add server-side buildAttendanceSessionCsv, byte-identical e
 
 **Interfaces:**
 - Consumes: `createAttendanceSession`/`closeAttendanceSession`/`reopenAttendanceSession` (Tasks 4/8/9), `submitScan` (Task 5), `applyManualCorrection` (Task 10), `buildAttendanceSessionCsv` (Task 11), `resolveCurrentRecord` (Task 2); `Database` from `client.ts`; the preHandler functions produced by `createRequireSession(db)` / `createRequireCsrf(env.APP_BASE_URL)` (`server/src/auth/middleware.ts`); `IdentityResolver` from `server/src/identity/types.ts` (the `createHttpIdentityResolverFromEnv() ?? new MockIdentityResolver()` already built in `index.ts`).
-- Produces: `registerAttendanceSessionsRoute(app, deps)` where `deps: AttendanceSessionsRouteDeps { db: Database; resolver: IdentityResolver; requireSession: preHandler; requireCsrf: preHandler }` (D1/D6). Mounted on the ROOT `app` in `index.ts` (like `/api/me`), NOT inside the `/lti/*` rate-limit plugin scope — `POST .../scans` must inherit no rate limit (spec §31.10).
+- Produces: `registerAttendanceSessionsRoute(app, deps)` where `deps: AttendanceSessionsRouteDeps { db: Database; resolver: IdentityResolver; requireSession: preHandler; requireCsrf: preHandler; signingKey: ToolSigningKey }` (D1/D6/C1). Mounted on the ROOT `app` in `index.ts` (like `/api/me`), NOT inside the `/lti/*` rate-limit plugin scope — `POST .../scans` must inherit no rate limit (spec §31.10). `signingKey` comes from `getActiveSigningKey(signingKeys)` in `index.ts` and is threaded into `createAttendanceSession` for the Start-Attendance roster fetch.
 
 Route → preHandler map (D6):
 | route | preHandler |
@@ -1899,21 +1939,28 @@ import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 import { and, eq } from 'drizzle-orm';
 import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { seedInstitutionAndCourse } from '../support/seed.js';
+import { MockCanvasPlatform } from '../support/mock-canvas.js';
 import { registerAttendanceSessionsRoute } from '../../src/routes/attendance-sessions.js';
 import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents } from '../../src/database/schema.js';
 import type { IdentityResolver } from '../../src/identity/types.js';
+import type { ToolSigningKey } from '../../src/lti/signing-keys.js';
 
 // createAttendanceSession degrades through the shared helper -> mock it (Q3).
 vi.mock('../../src/attendance/roster-store.js', () => ({ getRosterWithFallback: vi.fn() }));
 import { getRosterWithFallback } from '../../src/attendance/roster-store.js';
 
 const { db } = getTestDb();
+// Seeding reads only platform.issuer / platform.jwksUri — no .start() needed (the roster
+// helper is mocked). signingKey is a typed stub: it reaches createAttendanceSession's deps
+// but getRosterWithFallback is mocked so it is never dereferenced (C1).
+const platform = new MockCanvasPlatform();
+const signingKey = {} as ToolSigningKey;
 afterAll(() => closeTestDb());
 
 beforeEach(async () => {
   await resetDb();
   vi.mocked(getRosterWithFallback).mockReset();
-  vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false });
+  vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
 });
 
 type FakeSession = { id: string; institutionId: string; deploymentId: string; ltiSubject: string; displayName: string | null; courseId: string; roles: string[]; csrfSecret: string };
@@ -1942,6 +1989,7 @@ function buildTestApp({ resolver, session }: { resolver: IdentityResolver; sessi
     resolver,
     requireSession: fakeRequireSession(session),
     requireCsrf: fakeRequireCsrf(),
+    signingKey,
   });
   return app;
 }
@@ -1959,7 +2007,7 @@ describe('attendance-sessions routes — auth wiring', () => {
   });
 
   it('a mutation without a valid x-csrf-token returns 403', async () => {
-    const { institutionId, courseId } = await seedInstitutionAndCourse(db);
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
     const response = await app.inject({ method: 'POST', url: '/api/attendance-sessions', payload: {} }); // no CSRF header
     expect(response.statusCode).toBe(403);
@@ -1968,7 +2016,7 @@ describe('attendance-sessions routes — auth wiring', () => {
 
 describe('attendance-sessions routes', () => {
   it('POST /api/attendance-sessions creates a session scoped to the caller\'s course and returns a normalized body', async () => {
-    const { institutionId, courseId } = await seedInstitutionAndCourse(db);
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
 
     const response = await app.inject({ method: 'POST', url: '/api/attendance-sessions', headers: CSRF, payload: {} });
@@ -1980,8 +2028,8 @@ describe('attendance-sessions routes', () => {
   });
 
   it('GET /api/attendance-sessions/{id} on another institution\'s session returns 404, not 403', async () => {
-    const { courseId: ownCourseId, institutionId: ownInstitutionId } = await seedInstitutionAndCourse(db);
-    const { courseId: otherCourseId } = await seedInstitutionAndCourse(db);
+    const { courseId: ownCourseId, institutionId: ownInstitutionId } = await seedInstitutionAndCourse(db, platform);
+    const { courseId: otherCourseId } = await seedInstitutionAndCourse(db, platform);
     const [otherSession] = await db.insert(attendanceSessions).values({ courseId: otherCourseId, startedByLtiUserId: 'someone-else', state: 'open' }).returning();
     const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId: ownInstitutionId, courseId: ownCourseId }) });
 
@@ -1991,7 +2039,7 @@ describe('attendance-sessions routes', () => {
   });
 
   it('POST .../scans records a scan and returns the normalized record', async () => {
-    const { institutionId, courseId } = await seedInstitutionAndCourse(db);
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
     await db.insert(attendanceSessionMembers).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', displayName: 'Jane', eligibleForAttendance: true, status: 'Active', snapshotData: {} });
     const resolver: IdentityResolver = { resolveCard: vi.fn().mockResolvedValue({ ok: true, universityId: '1000000', firstName: 'Jane', lastName: 'Smith', email: 'jane@example.edu', raw: {}, error: null }) };
@@ -2005,7 +2053,7 @@ describe('attendance-sessions routes', () => {
   });
 
   it('POST .../scans never echoes the raw cardCode back in the response', async () => {
-    const { institutionId, courseId } = await seedInstitutionAndCourse(db);
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
     await db.insert(attendanceSessionMembers).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', displayName: 'Jane', eligibleForAttendance: true, status: 'Active', snapshotData: {} });
     const resolver: IdentityResolver = { resolveCard: vi.fn().mockResolvedValue({ ok: true, universityId: '1000000', firstName: 'Jane', lastName: 'Smith', email: 'jane@example.edu', raw: {}, error: null }) };
@@ -2017,7 +2065,7 @@ describe('attendance-sessions routes', () => {
   });
 
   it('POST .../scans: a lookup_error followed by a successful retry (same clientScanId) yields a present current record (B6, route-level)', async () => {
-    const { institutionId, courseId } = await seedInstitutionAndCourse(db);
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
     await db.insert(attendanceSessionMembers).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', displayName: 'Jane', eligibleForAttendance: true, status: 'Active', snapshotData: {} });
     let n = 0;
@@ -2043,7 +2091,7 @@ describe('attendance-sessions routes', () => {
   });
 
   it('POST .../close closes the session and marks unscanned eligible members absent', async () => {
-    const { institutionId, courseId } = await seedInstitutionAndCourse(db);
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
     await db.insert(attendanceSessionMembers).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', displayName: 'Jane', eligibleForAttendance: true, status: 'Active', snapshotData: {} });
     const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
@@ -2056,7 +2104,7 @@ describe('attendance-sessions routes', () => {
   });
 
   it('POST .../close on an already-closed session returns 409', async () => {
-    const { institutionId, courseId } = await seedInstitutionAndCourse(db);
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'closed' }).returning();
     const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
 
@@ -2067,7 +2115,7 @@ describe('attendance-sessions routes', () => {
   });
 
   it('POST .../reopen reopens a closed session; reopening an open session returns 409', async () => {
-    const { institutionId, courseId } = await seedInstitutionAndCourse(db);
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const [closedSession] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'closed' }).returning();
     const [openSession] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
     const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
@@ -2077,7 +2125,7 @@ describe('attendance-sessions routes', () => {
   });
 
   it('PATCH .../members/{ltiUserId} applies a manual correction; a "late" status is rejected 400 (deferred)', async () => {
-    const { institutionId, courseId } = await seedInstitutionAndCourse(db);
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
     await db.insert(attendanceSessionMembers).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', displayName: 'Jane', eligibleForAttendance: true, status: 'Active', snapshotData: {} });
     const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
@@ -2091,7 +2139,7 @@ describe('attendance-sessions routes', () => {
   });
 
   it('DELETE .../members/{ltiUserId}/records/{recordId} removes a mis-scanned record and writes an audit event with requestId', async () => {
-    const { institutionId, courseId } = await seedInstitutionAndCourse(db);
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
     const [record] = await db.insert(attendanceRecords).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', clientScanId: 'scan-1', status: 'present', scannedAt: new Date(), source: 'card' }).returning();
     const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
@@ -2106,7 +2154,7 @@ describe('attendance-sessions routes', () => {
   });
 
   it('GET .../export.csv returns a CSV body with the current-record status per member', async () => {
-    const { institutionId, courseId } = await seedInstitutionAndCourse(db);
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
     await db.insert(attendanceSessionMembers).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', displayName: 'Jane Smith', eligibleForAttendance: true, status: 'Active', snapshotData: {} });
     await db.insert(attendanceRecords).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', clientScanId: 'scan-1', status: 'present', scannedAt: new Date('2026-08-26T10:00:00.000Z'), source: 'card' });
@@ -2149,6 +2197,7 @@ import { applyManualCorrection } from '../attendance/manual-correction.js';
 import { buildAttendanceSessionCsv } from '../attendance/csv-export.js';
 import { resolveCurrentRecord } from '../attendance/member-status.js';
 import type { IdentityResolver } from '../identity/types.js';
+import type { ToolSigningKey } from '../lti/signing-keys.js';
 
 type PreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
 
@@ -2157,6 +2206,10 @@ export interface AttendanceSessionsRouteDeps {
   resolver: IdentityResolver;
   requireSession: PreHandler;
   requireCsrf: PreHandler;
+  // C1: the active ToolSigningKey, injected from index.ts (getActiveSigningKey(signingKeys)).
+  // Threaded into createAttendanceSession -> getRosterWithFallback for the Start-Attendance
+  // roster fetch (Phase 4 D5 — no module-level key accessor).
+  signingKey: ToolSigningKey;
 }
 
 const createSessionSchema = z.object({ label: z.string().optional(), meetingAt: z.string().datetime().optional() });
@@ -2209,7 +2262,7 @@ export function registerAttendanceSessionsRoute(app: FastifyInstance, deps: Atte
     const parsed = createSessionSchema.safeParse(request.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: 'invalid_body' });
     try {
-      const created = await createAttendanceSession(db, session.courseId, session.ltiSubject, parsed.data, request.id);
+      const created = await createAttendanceSession(db, session.courseId, session.ltiSubject, parsed.data, request.id, { signingKey: deps.signingKey });
       return reply.code(201).send(serializeSession(created));
     } catch (err) {
       return replyForError(request, reply, err);
@@ -2391,19 +2444,29 @@ function mapCurrent(r: AttendanceRecordRow | null) {
 ```ts
 // server/src/index.ts
 import { createRequireSession, createRequireCsrf } from './auth/middleware.js'; // extend the existing import
+import { getActiveSigningKey } from './lti/signing-keys.js'; // sync; add to the existing signing-keys import line
 import { registerAttendanceSessionsRoute } from './routes/attendance-sessions.js';
 
 // ...where requireSession is currently built:
 const requireSession = createRequireSession(db);
 const requireCsrf = createRequireCsrf(env.APP_BASE_URL);
 registerMeRoute(app, { requireSession, db });
-registerAttendanceSessionsRoute(app, { db, resolver: identityResolver, requireSession, requireCsrf });
+registerAttendanceSessionsRoute(app, {
+  db,
+  resolver: identityResolver,
+  requireSession,
+  requireCsrf,
+  // `signingKeys` is already loaded at boot (~index.ts:36):
+  //   const signingKeys = await loadSigningKeysFromEnv(env.LTI_TOOL_SIGNING_KEYS_JSON)
+  // getActiveSigningKey is synchronous and takes the array (Phase 3 / Phase 4 B2).
+  signingKey: getActiveSigningKey(signingKeys),
+});
 // NOTE: identityResolver must be constructed BEFORE this call -- move the
 // `const identityResolver = createHttpIdentityResolverFromEnv() ?? new MockIdentityResolver();`
 // line above this registration (it is currently just above registerScansRoute).
 ```
 
-`registerScansRoute(app, identityResolver)` and its DELIBERATE comment stay for now — Task 17 removes them once the UI is migrated.
+`registerScansRoute(app, identityResolver)` and its DELIBERATE comment stay for now — Task 17 removes them once the UI is migrated. If Phase 4 already added `getActiveSigningKey` to `index.ts`'s imports (for its own roster routes), reuse that import rather than adding a duplicate.
 
 - [ ] **Step 5: Run test to verify it passes**
 
@@ -3374,7 +3437,7 @@ Expected (after Tasks 12/14): only `server/src/index.ts`, `server/src/routes/sca
 
 - Delete `import { registerScansRoute } from './routes/scans.js';`.
 - Delete the `// DELIBERATE: POST /api/scans stays UNAUTHENTICATED ...` comment block and the `registerScansRoute(app, identityResolver);` line.
-- KEEP `const identityResolver = createHttpIdentityResolverFromEnv() ?? new MockIdentityResolver();` — Task 12's `registerAttendanceSessionsRoute(app, { db, resolver: identityResolver, requireSession, requireCsrf })` still needs it. (Task 12 Step 4 already moved this line above that registration.)
+- KEEP `const identityResolver = createHttpIdentityResolverFromEnv() ?? new MockIdentityResolver();` — Task 12's `registerAttendanceSessionsRoute(app, { db, resolver: identityResolver, requireSession, requireCsrf, signingKey: getActiveSigningKey(signingKeys) })` still needs it. (Task 12 Step 4 already moved this line above that registration.)
 - The `/lti/*` rate-limit plugin scope comment still mentions `/api/scans`; update it to read: `// ... so the limit doesn't apply to POST /api/attendance-sessions/{id}/scans (classroom bursts, spec §31.10).`
 
 - [ ] **Step 3: Delete the dead files**
@@ -3421,22 +3484,21 @@ git commit -m "docs: mark Phase 5 complete in progress.md"
 ## Risks / open items
 
 - **Standalone/demo mode (spec §51) is not wired to the new persisted-session backend.** The CSV-upload roster panel and its `roster.js` matching helpers (`isExpected`/`getRosterRow`) remain in the codebase (unchanged) but are no longer consulted by `scan-pipeline.js`, since `submitScan`'s status now always comes from the server. A future session should decide whether standalone mode gets its own lightweight session concept or is retired in favor of always requiring an LTI launch.
-- **Card-fingerprint secret is a single app-wide `CARD_FINGERPRINT_SECRET` env var, not a per-institution database column.** The design doc's `institutions` table (Phase 3) has no fingerprint-secret column, and only one institution is live at this stage — this is a deliberate YAGNI scope reduction, flagged for revisit if/when a second institution with different fingerprinting needs is onboarded.
+- **Card-fingerprint secret is a single app-wide `CARD_FINGERPRINT_SECRET` env var, not a per-institution database column — USER RULING (2026-08-27): CONFIRMED for Phase 5.** The design doc's `institutions` table (Phase 3) has no fingerprint-secret column and only one institution is live, so app-wide is the accepted design now; this is a deliberate YAGNI scope reduction, not an open question. `computeCardFingerprint` keeps its `secret` argument and the scan path keeps the `institutionId` in scope, so the **per-institution migration path is documented future work**: add `institutions.card_fingerprint_secret`, backfill it with the current env value, then switch the scan service to look the secret up per institution — no call-signature change required at that point. Revisit when a second institution with distinct fingerprinting needs is onboarded.
 - **Rate limiting on the scan API (spec §31.10, ~120–240 req/min/session) is explicitly deferred to Phase 8 hardening**, not this phase, per the design doc. The Phase 5 scan route is registered on the ROOT `app` (D6), outside the `/lti/*` rate-limit plugin scope, so it inherits no limit — a class must scan through quickly.
 - **Grade calculation/synchronization (spec §27–28) is out of scope.** `closeAttendanceSession` implements spec §25.7 steps 1–2 only; steps 3–4 (cumulative recalculation, grade-sync queue) are Phase 6 per §54. It writes the `attendance_session_closed` audit event as the Phase 6 extension point and touches no `grade_*` tables (which do not exist until Phase 6).
-- **DELETE-record route is a hard delete, not a tombstone-append.** This is in tension with the append-only invariant; `resolveCurrentRecord` will fall back to an older row (or `null`) after a delete, and the only history is the `attendance_record_removed` audit event's `oldValue`. The user approved "a DELETE route that writes an audit event"; a future ruling may switch this to a tombstone-append that `resolveCurrentRecord` understands. <!-- reviser note (Q8): flagged for a ruling; kept as a hard delete per the settled decision text. -->
+- **DELETE-record route is a HARD DELETE plus an `audit_events` row — USER RULING (2026-08-27): CONFIRMED, this is the design.** The `DELETE .../records/:recordId` handler removes the row and writes an `attendance_record_removed` audit event (with `oldValue: { status, source }`) in the same transaction. Consequence, accepted: `resolveCurrentRecord` then falls back to the next-most-recent row (or `null`), and **the only recovery path is the audit log** (`oldValue`) — there is no in-band undo and no tombstone row. This is not an open question; a tombstone-append redesign is explicitly out of scope for Phase 5.
 - **`late` status is deferred (settled decision):** not in the `attendance_records` enum, `manualCorrectionSchema`, or any route. Re-enabling it is a schema migration + schema/enum change later.
-- **Card-fingerprint secret is app-wide (S3):** kept the `institutionId` param + documented migration path in code; needs an explicit user ruling that app-wide is acceptable for Phase 5.
 - **`audit_events` migration ordering** (Task 1) depends on whether Phase 4 already ran its migration when this plan executes; Task 1 Step 5 handles both orderings, but re-verify against the actual generated SQL at execution time.
-- **`seedInstitutionAndCourse` may also be added by Phase 4's revised plan** (D10). Task 4 Step 1 adds it only if absent and requires the `db`-first, real-deployment-chain shape either way.
+- **`seedInstitutionAndCourse` is owned by Phase 4 Task 10** (D10) — `seedInstitutionAndCourse(db, platform: MockCanvasPlatform, overrides?)`. Phase 5 does not modify `seed.ts`; Task 4 Step 1 only consumes the helper (re-adding it with that exact signature is a fallback for the unlikely case Phase 4 has not run).
 
 ---
 
 ## Self-review notes
 
-- **Task list (19 tasks, 0–18):** 0 pre-flight · 1 schema + `db.ts` reset set · 2 `member-status.ts` (pure) · 3 `card-fingerprint.ts` (pure) · 4 `createAttendanceSession` + `seedInstitutionAndCourse` + `<24h` degradation + creation audit · 5 `submitScan` (valid/closed/lookup_error-retry/missing-university-id) · 6 scan-service edge cases + retry-recovery test · 7 scan-service idempotency tests · 8 `closeAttendanceSession` + state guard · 9 `reopenAttendanceSession` + state guard · 10 `applyManualCorrection` (no `late`) · 11 `buildAttendanceSessionCsv` · 12 routes behind `requireSession`/`requireCsrf`, tenant isolation, opaque errors, serializers, `index.ts` wiring · 13 `web/api-client.js` CSRF bootstrap + `apiFetch` · 14 `web/scan-pipeline.js` transport + `randomUUID` clientScanId + no-session guard · 15 `web/attendance-session.js` via `apiFetch` · 16 `app.js`/`ui.js`/`index.html` CSRF bootstrap + Start/Close/Reopen wiring · 17 retire `POST /api/scans` · 18 `progress.md`.
+- **Task list (19 tasks, 0–18):** 0 pre-flight · 1 schema + `db.ts` reset set · 2 `member-status.ts` (pure) · 3 `card-fingerprint.ts` (pure) · 4 `createAttendanceSession` (consumes Phase 4's `seedInstitutionAndCourse`) + `<24h` degradation + creation audit + `signingKey` thread · 5 `submitScan` (valid/closed/lookup_error-retry/missing-university-id) · 6 scan-service edge cases + retry-recovery test · 7 scan-service idempotency tests · 8 `closeAttendanceSession` + state guard · 9 `reopenAttendanceSession` + state guard · 10 `applyManualCorrection` (no `late`) · 11 `buildAttendanceSessionCsv` · 12 routes behind `requireSession`/`requireCsrf`, tenant isolation, opaque errors, serializers, `index.ts` wiring · 13 `web/api-client.js` CSRF bootstrap + `apiFetch` · 14 `web/scan-pipeline.js` transport + `randomUUID` clientScanId + no-session guard · 15 `web/attendance-session.js` via `apiFetch` · 16 `app.js`/`ui.js`/`index.html` CSRF bootstrap + Start/Close/Reopen wiring · 17 retire `POST /api/scans` · 18 `progress.md`.
 - **Spec coverage:** §15 (form-encoded rejection → `requireCsrf`, Task 12) · §20 (ambiguous → `unexpected`; `missing-university-id` → `lookup_error`, Tasks 5–6) · §21/§47 (scan flow + all named cases → Tasks 5–7, 14; retry-after-lookup-failure re-resolves → Tasks 5/6/12) · §22 (raw card never persisted → Tasks 3/5/12) · §23 (states + guards → Tasks 4/8/9; immutability → Task 2) · §24 (`late` deferred; statuses `present`/`absent`/`excused`/`lookup_error`/`unexpected`) · §25.3–25.10 (routes → Task 12) · §26 (schema, `scanned_at` nullable → Task 1) · §31.9 (opaque errors + `request.id` correlation, `audit_events.request_id` populated → Tasks 4/8/9/10/12) · §31.10 (scan route not rate-limited → Task 12 mount) · §33 (audit events incl. `attendance_session_created` → Tasks 4/8/9/10/12).
-- **DI:** no `import { db }` anywhere; every DB function takes `db: Database` first; every DB test uses `getTestDb().db` + file-scope `afterAll(closeTestDb)`; route deps carry `{ db, resolver, requireSession, requireCsrf }`.
+- **DI:** no `import { db }` anywhere; every DB function takes `db: Database` first; every DB test uses `getTestDb().db` + file-scope `afterAll(closeTestDb)`; route deps carry `{ db, resolver, requireSession, requireCsrf, signingKey }` and `createAttendanceSession` takes the active `ToolSigningKey` via its `deps` param (C1 — threaded from `index.ts` through the route to `getRosterWithFallback`).
 - **`CourseRosterMember` / `snapshot_data`:** Task 4 snapshots each `CourseRosterMember` verbatim into `attendance_session_members.snapshotData` (jsonb) and maps `ltiUserId`/`institutionalId`/`displayName`/`eligibleForAttendance`/`status` to columns — matches Phase 4's fixed contract (fields unchanged).
 - **Placeholder scan:** every code step contains complete, runnable code; no "TBD"/"similar to Task N".
 
@@ -3470,7 +3532,29 @@ Applied per `.superpowers/sdd/plan-revision-constraints.md` (D1–D12) against t
 - **Q10** partial note as above.
 
 ### Cross-plan
-`CourseRosterMember` fields unchanged; Task 4 stores the whole object in `attendance_session_members.snapshotData` and maps the five columns — shape-compatible with Phase 4's fixed contract. Phase 5 consumes `getRosterWithFallback(db, courseId)` / `refreshCourseRoster(db, courseId)` / `seedInstitutionAndCourse(db)` per the constraints doc, not Phase 4's in-flight text.
+`CourseRosterMember` fields unchanged; Task 4 stores the whole object in `attendance_session_members.snapshotData` and maps the five columns — shape-compatible with Phase 4's fixed contract. Phase 5 consumes Phase 4's committed 3-arg contracts — `getRosterWithFallback(db, courseId, deps)` / `refreshCourseRoster(db, courseId, deps)` (both with a required `deps.signingKey: ToolSigningKey`) and `seedInstitutionAndCourse(db, platform, overrides?)` — not Phase 4's in-flight text. (See the 2026-08-27 fix-pass entry below, which superseded the earlier 2-arg / `db`-only assumptions recorded in B4 / S2 / S3 / Q8 above.)
 
 ### Constraints-doc rulings vs shipped code
 No unworkable ruling found. All of D1–D12 apply cleanly against shipped Phase 3 (`createRequireSession`/`createRequireCsrf` factories, `AppSession` shape, `getTestDb`/`resetDb`/`closeTestDb`, `seedInstitutionAndRegistration`, `MockCanvasPlatform`, `mintIdToken(overrides, options)` all verified). Two cross-plan items depend on Phase 4 having executed first (its `roster-store.ts` `getRosterWithFallback` and, optionally, its own `seedInstitutionAndCourse`) — this is the pre-existing, documented Phase 4→5 ordering dependency, handled in Task 0 Step 3 and Task 4 Step 1, not a conflict.
+
+---
+
+### 2026-08-27 — PLAN-PROSE fix pass (re-review findings C1 / I1 / M2 / M3 + two user rulings)
+
+Applied against `.superpowers/sdd/phase4-5-rereview-findings.md`, reconciled with the committed Phase 4 plan (`2026-08-26-canvas-lti-phase4-nrps.md`) and shipped Phase 3 code. Plan text only — no source, no task renumbering, no scope change.
+
+- **C1 — `signingKey: ToolSigningKey` threaded end-to-end.** Phase 4's committed helpers are `getRosterWithFallback(db, courseId, deps)` / `refreshCourseRoster(db, courseId, deps)` with a **required** `deps.signingKey` (the active key is not module-level — D5). Phase 5 was still on the 2-arg form. Fixed:
+  - Global Constraint (roster acquisition bullet): call shown as `getRosterWithFallback(db, courseId, deps: { signingKey: ToolSigningKey; fetchImpl?; sleepImpl?; now? })`, with a note that `createAttendanceSession` accepts and threads the key.
+  - Grounding note: shared-shape list updated to the 3-arg forms + `seedInstitutionAndCourse(db, platform, overrides?)`.
+  - Contract block: `createAttendanceSession` gains a final `deps: CreateAttendanceSessionDeps` param (`{ signingKey: ToolSigningKey; fetchImpl?; sleepImpl?; now? }`); `requestId` becomes `string | undefined` (a required slot) because TS forbids an optional param before a required one. New `CreateAttendanceSessionDeps` interface added to the contract and to the Task 4 implementation. Placement (last, after `requestId`) is used at every call site.
+  - Task 0 Step 3: rewritten to assert the 3-arg `deps`-bearing shapes and the sync `getActiveSigningKey(keys)` export; dropped the stale "Phase 4's revised plan is committed to [the 2-arg form]" wording.
+  - Task 4: `Interfaces` block, implementation signature, and the `getRosterWithFallback(db, courseId, { signingKey, ... })` call all updated; test file imports `ToolSigningKey`, declares a `const signingKey = {} as ToolSigningKey` stub, and passes `{ signingKey }` (with `undefined` in the `requestId` slot where the old calls omitted it) at all four `createAttendanceSession` call sites. New **Step 5b** runs `npm run typecheck` explicitly, because the tests `vi.mock` `getRosterWithFallback` and would not otherwise catch a broken key thread.
+  - Task 4 stale-cache/degradation mocks and the Task 12 `beforeEach` mock: `mockResolvedValue` objects gained `refreshed` (Phase 4's return also carries `refreshed: boolean`), so the mocks now typecheck against the real signature.
+  - Task 12: `AttendanceSessionsRouteDeps` gains `signingKey: ToolSigningKey`; the route imports the type; `POST /api/attendance-sessions` passes `{ signingKey: deps.signingKey }`; the test `buildTestApp` passes a `signingKey` stub; the `index.ts` wiring snippet imports the sync `getActiveSigningKey` from `server/src/lti/signing-keys.js` and passes `getActiveSigningKey(signingKeys)` (array already loaded at `index.ts:36`). Task 17's KEEP-line updated to match.
+  - Confirmed the exported type name is exactly **`ToolSigningKey`** (`server/src/lti/signing-keys.ts:5`) — no rename needed anywhere.
+- **I1 — `seedInstitutionAndCourse` signature clash resolved in favour of Phase 4.** Phase 5 Task 4 no longer defines its own `seedInstitutionAndCourse(db)` / `SeededCourse`; it consumes Phase 4 Task 10's `seedInstitutionAndCourse(db, platform: MockCanvasPlatform, overrides?: SeedOverrides & { nrpsUrl?: string | null })` → `SeededCourse extends SeededRegistration { courseId }` (superset — also carries `clientId` / `deploymentId` / `deploymentRowId`). Task 4 `Files` list drops the `seed.ts` modification; Task 4 Step 1 rewritten as "consume, do not redefine" with a fallback-only re-add clause. Every Phase 5 call site (`seedInstitutionAndCourse(db)` → `seedInstitutionAndCourse(db, platform)`, ~28 sites across the Task 4 / 5 / 8 / 9 / 10 / 12 test blocks) updated; the four affected test files import `MockCanvasPlatform` and declare a module-scope `const platform = new MockCanvasPlatform()` — no `.start()` needed because every one of those files `vi.mock`s `getRosterWithFallback`, so the platform is used only for its `issuer` / `jwksUri` getters during seeding. File Structure entry for `seed.ts` updated to "NOT modified by Phase 5".
+- **M2 — `audit_events` nullability note.** The verbatim §26 schema block keeps `target_type` / `target_id` nullable but now carries an inline M2 note: Phase 4 Task 2 owns this table and makes both NOT NULL; Phase 5 Task 1 Step 3 only ADDs the `attendance_session_id` FK column and never redefines the table; every Phase 5 audit insert (Tasks 4/8/9/10/12) sets both columns — no conflict on either migration ordering.
+- **M3 — migration command consistency.** Task 1 Step 6 no longer runs `npx drizzle-kit migrate`; it now says commit the generated `migrations/<NNNN>_*.sql` + `meta/` and let Vitest's `globalSetup` (`server/tests/support/global-setup.ts` → `migrate()` → `applyMigrations()`) apply it, matching `generate` + harness-applied everywhere else in both plans.
+- **User ruling — DELETE-record route.** Risks entry rewritten: HARD DELETE + an `audit_events` (`attendance_record_removed`, with `oldValue`) row is the CONFIRMED design (2026-08-27). Recovery is via the audit log only; there is no tombstone and no in-band undo; a tombstone-append redesign is explicitly out of scope for Phase 5. Removed the "a future ruling may switch this" open-question framing and the reviser note.
+- **User ruling — `CARD_FINGERPRINT_SECRET`.** Confirmed APP-WIDE (single env secret) for Phase 5 (2026-08-27). The per-institution migration path (add `institutions.card_fingerprint_secret`, backfill, switch the lookup — no call-signature change) is documented as future work. Resolved the reviser notes at the Global Constraint bullet, the Task 3 code comment, and the two Risks entries (the duplicate S3 Risks bullet was merged into the main one).
+- **Consistency sweep.** Updated the standing "Cross-plan" paragraph in this log to point at Phase 4's 3-arg contracts and this entry; older B4 / S2 / S3 / Q8 log entries left as historical record (they describe the pre-fix state and are now superseded here).

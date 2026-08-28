@@ -245,10 +245,18 @@ export async function findOrCreateCourse(db: Database, params: FindOrCreateCours
 
   // Refresh launch metadata on EVERY launch. Canvas can rotate the NRPS/AGS URLs, so overwrite them
   // whenever the claim is present; never null out a previously-good value when a later launch omits it.
-  const launchUpdate: Record<string, unknown> = { lastLaunchedAt: sql`now()`, updatedAt: sql`now()` };
-  if (params.nrpsUrl != null) launchUpdate.nrpsUrl = params.nrpsUrl;
-  if (params.agsLineitemsUrl != null) launchUpdate.agsLineitemsUrl = params.agsLineitemsUrl;
-  await db.update(courses).set(launchUpdate).where(eq(courses.id, courseId));
+  // Build the SET payload as an inline object literal with conditional spreads so Drizzle infers
+  // `PgUpdateSetSource<typeof courses>` directly — a `const launchUpdate: Record<string, unknown>`
+  // annotation is a strict-mode `.set()` typecheck error.
+  await db
+    .update(courses)
+    .set({
+      lastLaunchedAt: sql`now()`,
+      updatedAt: sql`now()`,
+      ...(params.nrpsUrl != null ? { nrpsUrl: params.nrpsUrl } : {}),
+      ...(params.agsLineitemsUrl != null ? { agsLineitemsUrl: params.agsLineitemsUrl } : {}),
+    })
+    .where(eq(courses.id, courseId));
 
   return { id: courseId };
 }
@@ -321,12 +329,19 @@ afterAll(async () => {
 describe('launch persists NRPS/AGS service endpoints (Phase 3 retrofit)', () => {
   let platform: MockCanvasPlatform;
   let jwksCache: JwksCache;
+  let seeded: Awaited<ReturnType<typeof seedInstitutionAndRegistration>>;
 
   beforeEach(async () => {
     await resetDb();
     platform = new MockCanvasPlatform();
     await platform.start();
     jwksCache = new JwksCache({ fetchJwks: (uri) => fetch(uri).then((r) => r.json()) });
+    // Seed the institution / registration / deployment ONCE per test. seedInstitutionAndRegistration
+    // inserts an lti_registrations row keyed by unique(issuer, clientId) — both fixed constants — so a
+    // second call inside the same test throws; and two deployment UUIDs would create two courses rows.
+    // Each launch() below reuses this single registration/deployment and only mints a fresh OIDC
+    // transaction + id_token, so repeated launches of the same context update ONE courses row in place.
+    seeded = await seedInstitutionAndRegistration(getTestDb().db, platform);
   });
   afterEach(async () => {
     await platform.stop();
@@ -348,7 +363,8 @@ describe('launch persists NRPS/AGS service endpoints (Phase 3 retrofit)', () => 
 
   async function launch(extraClaims: Record<string, unknown>) {
     const { db } = getTestDb();
-    const seeded = await seedInstitutionAndRegistration(db, platform);
+    // No re-seed here — `seeded` is created once in beforeEach. Each call only mints a fresh OIDC
+    // transaction + id_token against the already-seeded institution/registration/deployment.
     const tx = await createOidcTransaction(db, {
       registrationId: seeded.registrationId,
       deploymentId: seeded.deploymentId,
@@ -438,10 +454,11 @@ In `server/src/database/schema.ts`:
     rosterCachedAt: timestamp('roster_cached_at', { withTimezone: true }),
 ```
 
-<!-- reviser note (Q?/D2): courses.roster_cached_at is NOT in spec §26's courses column list. It is an
-     app-level column required to implement the spec §18.4 five-minute roster cache TTL; it is nullable
-     and purely additive. Flagged for re-review in case the controller wants the freshness timestamp
-     derived from max(course_members.last_seen_at) instead of a dedicated column. -->
+<!-- USER RULING (2026-08-27): KEEP the explicit nullable `courses.roster_cached_at` column. Do NOT
+     switch to deriving roster freshness from `max(course_members.last_seen_at)`. This column is the
+     single source of truth for the spec §18.4 five-minute cache TTL and is set on every successful
+     roster fetch (Task 10 `upsertCourseMembers`, Task 12 `getRosterWithFallback`). Not in spec §26's
+     `courses` column list, but a sanctioned additive app-level column. Resolved — plan design unchanged. -->
 
 - [ ] **Step 2: Add the `courseMembers` table (array-form third arg — matches the rest of `schema.ts`)**
 
@@ -679,12 +696,15 @@ git commit -m "feat(lti): add NRPS membership read scope constant"
 
 Design: the NRPS/AGS URL comes only from a signature-verified launch JWT and is persisted verbatim onto `courses` (Task 1). Per spec §31.7 the trust anchor is that provenance — the value is **used exactly as stored**, with no host-allowlist reconstruction. This guard is a cheap structural sanity check for the two things §31.7 still calls out that don't depend on host policy: an absolute `http(s)` scheme and the absence of embedded credentials. Redirect rejection ("disable unrestricted redirects") is enforced at the outbound `fetch` call sites in `nrps.ts` / `token-client.ts` via `redirect: 'manual'` + treating any 3xx as a failure — not here.
 
-<!-- reviser note (SG1/D3): the pre-fix version anchored the host check on new URL(registration.tokenEndpoint).host.
-     Dropped: spec §11 says Instructure-hosted Canvas shares ONE issuer across many per-institution
-     Canvas domains and the OAuth2 token host is a distinct global/regional host, so on real Canvas the
+<!-- USER SIGN-OFF (2026-08-27): APPROVED — no outbound host allowlist is added. Canvas NRPS/AGS URLs
+     are used verbatim from the values persisted on the `courses` row at launch; the SSRF trust anchor
+     is the signature-verified launch JWT's provenance (spec §31.7). Rationale retained for the record:
+     the pre-fix version anchored the host check on `new URL(registration.tokenEndpoint).host`, which is
+     wrong on real Canvas — spec §11 says Instructure-hosted Canvas shares ONE issuer across many
+     per-institution Canvas domains and the OAuth2 token host is a distinct global/regional host, so the
      NRPS host never equals the token host and every production fetch would be rejected. Per constraints
-     D3 the primary rule is verbatim-use; no host allowlist is enforced by default. A future
-     per-institution service-host policy could add one, anchored on the registration issuer origin. -->
+     D3 verbatim-use is the primary rule. A future per-institution service-host policy could add an
+     allowlist anchored on the registration `issuer` origin; none is added now. Resolved. -->
 
 - [ ] **Step 1: Write the failing tests** (note: title uses double quotes so the apostrophe does not break the parser)
 
@@ -2896,10 +2916,12 @@ git commit -m "feat(routes): add GET /api/course/roster with 5-min cache, stale 
 **Interfaces:**
 - Produces: `POST /api/course/roster/refresh`, registered inside `registerCourseRosterRoutes`. `preHandler: [deps.requireSession, deps.requireCsrf]` — it is a state-mutating POST, so it also enforces spec §15 (rejects form-encoded bodies). It force-refreshes (`getRosterWithFallback`, which always attempts Canvas first), writes `roster_refreshed` on a successful live refresh, and degrades to a `<24h` cache on failure exactly like the GET path.
 
-<!-- reviser note (D6): constraints D6 documents the [requireSession, requireCsrf] pattern for Phase 5
-     mutating routes; it is applied here because POST /api/course/roster/refresh is a Phase 4 mutation
-     and spec §15 forbids form-encoded mutations regardless of phase. The web client CSRF/JSON plumbing
-     is Phase 5's job (D7); until then this endpoint is exercised by tests only. -->
+<!-- USER RULING (2026-08-27): APPROVED — `POST /api/course/roster/refresh` is CSRF-gated in Phase 4,
+     ahead of Phase 5's web-client CSRF bootstrap (Phase 5 Task 13). No Phase 4 web caller of this
+     endpoint exists, so there is no dead end; it is exercised by tests only until Phase 5 wires the
+     browser CSRF/JSON plumbing (constraints D7). Rationale retained: constraints D6 documents the
+     [requireSession, requireCsrf] pattern for Phase 5 mutating routes; it is applied here because this
+     is a Phase 4 mutation and spec §15 forbids form-encoded mutations regardless of phase. Resolved. -->
 
 - [ ] **Step 1: Append the failing tests to `server/tests/routes/course-roster.test.ts`**
 
@@ -3281,7 +3303,17 @@ Maps each pre-flight finding (`phase4-plan-review-findings.md`) to the change th
 
 ### Notes left for re-review
 
-- **Task 2** — `courses.roster_cached_at` is not in spec §26's `courses` column list; it is an additive nullable app-level column required for the spec §18.4 five-minute cache TTL. Flagged in case the controller prefers deriving freshness from `max(course_members.last_seen_at)`.
-- **Task 4** — no host allowlist is enforced on outbound Canvas service URLs (constraints D3: verbatim-use is the primary rule; provenance is the signed launch). A future per-institution service-host policy would anchor on the registration `issuer` origin.
-- **Task 12** — `getRosterWithFallback` takes a third `deps` param (constraints D9 wrote a two-arg signature); unavoidable because the injected `ToolSigningKey` (D5) cannot be sourced module-level. The return also gains `refreshed: boolean` for SG4. Phase 5's `createSession` must thread `signingKey` in the same way.
-- **Task 14** — `POST /api/course/roster/refresh` is gated by `requireCsrf` (constraints D6's pattern, spec §15) even though D6 is framed for Phase 5; the web-client CSRF/JSON plumbing (D7) remains a Phase 5 task, so this endpoint is exercised by tests only until then.
+- **Task 2** — `courses.roster_cached_at` is not in spec §26's `courses` column list. **RESOLVED 2026-08-27 (user ruling):** keep the explicit nullable column, set on every successful roster fetch; do NOT derive freshness from `max(course_members.last_seen_at)`. Plan design unchanged.
+- **Task 4** — no host allowlist is enforced on outbound Canvas service URLs. **RESOLVED 2026-08-27 (user sign-off):** approved — verbatim use of the launch-persisted URL is the SSRF trust anchor (spec §31.7); no allowlist to be added. A future per-institution service-host policy could anchor on the registration `issuer` origin.
+- **Task 12** — `getRosterWithFallback` takes a third `deps` param (constraints D9 wrote a two-arg signature); unavoidable because the injected `ToolSigningKey` (D5) cannot be sourced module-level. The return also gains `refreshed: boolean` for SG4. Phase 5's `createSession` must thread `signingKey` in the same way. (Still open — Phase 5 fix-pass item, not a Phase 4 blocker.)
+- **Task 14** — `POST /api/course/roster/refresh` is gated by `requireCsrf` ahead of Phase 5's web-client CSRF bootstrap (Phase 5 Task 13). **RESOLVED 2026-08-27 (user ruling):** approved — no Phase 4 web caller exists, so no dead end; exercised by tests only until Phase 5 wires the browser CSRF/JSON plumbing (D7).
+
+### RE-REVIEW FIX PASS (2026-08-27)
+
+Addresses `.superpowers/sdd/phase4-5-rereview-findings.md` (re-review of `5a2b400`). All edits are plan text inside **Task 1** plus reviser-note resolutions; no task renumbering, no scope change. Phase 5-only items (C1, I1, M2, M3) are out of scope for this pass.
+
+- **I2** (Task 1 Step 7 — retrofit test's `launch()` helper re-seeded on every call) → **fixed.** `seedInstitutionAndRegistration(db, platform)` moves out of `launch()` into `beforeEach`, captured in a describe-scoped `seeded` binding. `launch()` now only mints a fresh OIDC transaction + `id_token` against the already-seeded institution/registration/deployment. The "refreshes a rotated nrpsUrl on the next launch of the same course" test now genuinely exercises one `courses` row updated in place — no second `unique(issuer, clientId)` insert, no second deployment UUID, so `expect(rows).toHaveLength(1)` holds. Test intent otherwise unchanged.
+- **M1** (Task 1 Step 3 — `const launchUpdate: Record<string, unknown>` passed to `db.update(courses).set(...)`) → **fixed.** The `SET` payload is now built as an inline object literal with conditional spreads (`{ lastLaunchedAt: sql\`now()\`, updatedAt: sql\`now()\`, ...(params.nrpsUrl != null ? { nrpsUrl: params.nrpsUrl } : {}), ...(params.agsLineitemsUrl != null ? { agsLineitemsUrl: params.agsLineitemsUrl } : {}) }`), so Drizzle infers `PgUpdateSetSource<typeof courses>` with no explicit annotation. Column names match the rest of the Phase 4 plan (`nrpsUrl`, `agsLineitemsUrl`, `lastLaunchedAt`).
+- **Open item 1** (`courses.roster_cached_at`) → **resolved.** User ruling: keep the explicit nullable column, set on each successful roster fetch. Reviser note in Task 2 Step 1 and the "Notes left for re-review" bullet updated.
+- **Open item 4** (no outbound host allowlist for Canvas NRPS/AGS URLs) → **resolved.** User sign-off: approved; verbatim use, provenance = the signature-verified launch JWT. Reviser note in Task 4 and its "Notes left for re-review" bullet updated.
+- **Open item 5** (`POST /roster/refresh` CSRF-gated in Phase 4 ahead of Phase 5 Task 13) → **resolved.** User ruling: approved; no Phase 4 web caller, so no dead end. Reviser note in Task 14 and its "Notes left for re-review" bullet updated.
