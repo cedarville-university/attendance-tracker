@@ -42,6 +42,18 @@ describe('buildLoginRedirect', () => {
     }
   });
 
+  it('builds a redirect_uri with no double slash even when appBaseUrl carries a trailing slash', async () => {
+    const deps = makeDeps({ appBaseUrl: 'https://app.test/' });
+    const result = await buildLoginRedirect(BASE_PARAMS, deps);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const redirectUri = new URL(result.redirectUrl).searchParams.get('redirect_uri');
+      expect(redirectUri).toBe('https://app.test/lti/launch');
+      expect(redirectUri?.replace('https://', '')).not.toContain('//');
+    }
+  });
+
   it('§45 case 24: rejects a target_link_uri not on the exact-match allowlist (open-redirect attempt)', async () => {
     const deps = makeDeps();
     const result = await buildLoginRedirect(

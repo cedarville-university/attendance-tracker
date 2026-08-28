@@ -56,7 +56,9 @@ export async function buildLoginRedirect(params: LoginParams, deps: LoginDeps): 
   const redirectUrl = new URL(enabled.registration.oidcAuthEndpoint);
   redirectUrl.searchParams.set('client_id', params.clientId);
   redirectUrl.searchParams.set('login_hint', params.loginHint);
-  redirectUrl.searchParams.set('redirect_uri', `${deps.appBaseUrl}/lti/launch`);
+  // new URL(path, base) tolerates a trailing slash on appBaseUrl (env.ts already
+  // normalizes it to an origin, but this keeps the join correct regardless).
+  redirectUrl.searchParams.set('redirect_uri', new URL('/lti/launch', deps.appBaseUrl).toString());
   redirectUrl.searchParams.set('state', state);
   redirectUrl.searchParams.set('nonce', nonce);
   redirectUrl.searchParams.set('response_type', 'id_token');

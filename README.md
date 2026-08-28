@@ -223,6 +223,8 @@ against real hardware (using the Reader Diagnostics debug view to inspect actual
 | `CLOCK_SKEW_SECONDS` | no | `120` | Allowed clock skew when validating a Canvas launch JWT's `exp`/`nbf`/`iat`. |
 | `LOGIN_TRANSACTION_TTL_SECONDS` | no | `300` | How long an `/lti/login`-issued `state`/`nonce` transaction remains valid before it's rejected as expired. |
 | `APP_SESSION_TTL_HOURS` | no | `8` | How long an application session (created at `/lti/launch`) remains valid. |
+| `CARD_FINGERPRINT_SECRET` | no | unset -> card fingerprints are not persisted | HMAC key used to derive the stored per-card fingerprint on a scan. Its **presence is the feature flag**: set it and each scan persists a `card_fingerprint`; leave it unset and no card-derived value is stored. MUST NOT be committed to Git. |
+| `PORT` | no | `3000` | TCP port the HTTP server listens on. |
 | `TEST_DATABASE_URL` | no (tests only) | `postgres://attendance_tracker:attendance_tracker@localhost:5432/attendance_tracker_test` | Database `npm test` uses. Deliberately a **different** database from `DATABASE_URL`: the suite `TRUNCATE`s every table between test files, so sharing one would wipe your dev data. Created automatically on first `npm test` if it doesn't exist. |
 
 ### Running the tests

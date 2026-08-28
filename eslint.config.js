@@ -30,10 +30,12 @@ export default [
   },
   ...tseslint.configs.recommended.map((config) => ({
     ...config,
-    files: ['server/**/*.ts'],
+    // Root-level config files (drizzle.config.ts, vitest.config.ts) are TS too --
+    // without this glob `eslint .` lints them with the plain JS parser and chokes.
+    files: ['server/**/*.ts', '*.ts'],
   })),
   {
-    files: ['server/**/*.ts'],
+    files: ['server/**/*.ts', '*.ts'],
     languageOptions: {
       globals: {
         ...globals.node,

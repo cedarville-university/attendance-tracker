@@ -25,6 +25,21 @@ describe('loadEnv', () => {
     const env = loadEnv({ ...BASE_ENV, CLOCK_SKEW_SECONDS: '60' });
     expect(env.CLOCK_SKEW_SECONDS).toBe(60);
   });
+
+  it('defaults PORT to 3000 and coerces a string override', () => {
+    expect(loadEnv(BASE_ENV).PORT).toBe(3000);
+    expect(loadEnv({ ...BASE_ENV, PORT: '8080' }).PORT).toBe(8080);
+  });
+
+  it('normalizes APP_BASE_URL to its bare origin (drops a trailing slash and any path)', () => {
+    expect(loadEnv({ ...BASE_ENV, APP_BASE_URL: 'https://attendance.example.edu/' }).APP_BASE_URL).toBe(
+      'https://attendance.example.edu',
+    );
+    expect(loadEnv({ ...BASE_ENV, APP_BASE_URL: 'https://attendance.example.edu/lti/' }).APP_BASE_URL).toBe(
+      'https://attendance.example.edu',
+    );
+    expect(loadEnv(BASE_ENV).APP_BASE_URL).toBe('http://localhost:3000');
+  });
 });
 
 describe('parseAllowedTargetLinkUris', () => {

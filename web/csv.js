@@ -4,15 +4,20 @@
 // the CSV entirely in the browser via a Blob and an object URL -- no
 // library, no server round-trip.
 //
-// The column set is the UNION of fields actually present across all scan
-// records (base fields + every key ever seen in a record's lookupData +
-// every key ever seen in a record's rosterData), so new normalized-lookup
-// fields or new roster columns show up in the export automatically without
-// this file needing to know their names in advance.
+// This is the standalone / no-session export path only. When a persisted
+// attendance session is active, app.js downloads the server-authoritative
+// CSV from GET /api/attendance-sessions/{id}/export.csv instead.
+//
+// Phase 5 renamed the scan record's `universityId` -> `institutionalId` and
+// removed the per-record `rosterStatus` / `lookupData` / `rosterData` blobs
+// (roster matching is now server-side), so the column set is a fixed list.
 
 import { logEvent } from './diagnostics.js';
 
-const BASE_COLUMNS = ['timestamp', 'rawCardCode', 'universityId', 'rosterStatus', 'status', 'attendance'];
+// timestamp, rawCardCode, institutionalId, status come straight off the
+// ScanRecord (scan-pipeline.js) / AbsentRow (absentees.js); `attendance` is
+// derived ("Present" / "Absent").
+const BASE_COLUMNS = ['timestamp', 'rawCardCode', 'institutionalId', 'status', 'attendance'];
 
 /**
  * Quotes a CSV field only when necessary (RFC 4180 style): if it contains
@@ -34,40 +39,14 @@ export function csvEscapeField(value) {
  * @returns {string}
  */
 export function buildAttendanceCsv(records) {
-  const lookupKeys = [];
-  const rosterKeys = [];
-  const seenLookup = new Set();
-  const seenRoster = new Set();
-
+  const lines = [BASE_COLUMNS.map(csvEscapeField).join(',')];
   for (const record of records) {
-    for (const key of Object.keys(record.lookupData || {})) {
-      if (!seenLookup.has(key)) {
-        seenLookup.add(key);
-        lookupKeys.push(key);
-      }
-    }
-    for (const key of Object.keys(record.rosterData || {})) {
-      if (!seenRoster.has(key)) {
-        seenRoster.add(key);
-        rosterKeys.push(key);
-      }
-    }
-  }
-
-  const columns = [...BASE_COLUMNS, ...lookupKeys.map((k) => `lookup.${k}`), ...rosterKeys.map((k) => `roster.${k}`)];
-
-  const lines = [columns.map(csvEscapeField).join(',')];
-  for (const record of records) {
-    const values = columns.map((column) => {
+    const values = BASE_COLUMNS.map((column) => {
       if (column === 'attendance') return record.isAbsent ? 'Absent' : 'Present';
-      if (BASE_COLUMNS.includes(column)) return record[column];
-      if (column.startsWith('lookup.')) return (record.lookupData || {})[column.slice('lookup.'.length)];
-      if (column.startsWith('roster.')) return (record.rosterData || {})[column.slice('roster.'.length)];
-      return '';
+      return record[column];
     });
     lines.push(values.map(csvEscapeField).join(','));
   }
-
   return lines.join('\r\n');
 }
 
@@ -86,18 +65,16 @@ function buildExportFilename() {
 }
 
 /**
- * Builds the CSV, triggers a browser download via a Blob + object URL, and
- * revokes the URL shortly after. Never throws -- returns a result object
- * so the caller can show a visible error message on failure.
- * @param {Array<object>} records
+ * Triggers a browser download of an already-built CSV string via a Blob +
+ * object URL, revoking the URL shortly after. Never throws.
+ * @param {string} csvString
+ * @param {string} [filename]
  * @returns {{ok: boolean, filename?: string, error?: string}}
  */
-export function downloadAttendanceCsv(records) {
+export function downloadCsvText(csvString, filename = buildExportFilename()) {
   try {
-    const csvString = buildAttendanceCsv(records);
     const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
-    const filename = buildExportFilename();
 
     const anchor = document.createElement('a');
     anchor.href = url;
@@ -108,6 +85,21 @@ export function downloadAttendanceCsv(records) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 
     return { ok: true, filename };
+  } catch (err) {
+    logEvent('error', { kind: 'csv-export-failed', message: err.message });
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
+ * Builds the CSV from in-memory records, then downloads it. Standalone /
+ * no-session path only. Never throws.
+ * @param {Array<object>} records
+ * @returns {{ok: boolean, filename?: string, error?: string}}
+ */
+export function downloadAttendanceCsv(records) {
+  try {
+    return downloadCsvText(buildAttendanceCsv(records));
   } catch (err) {
     logEvent('error', { kind: 'csv-export-failed', message: err.message });
     return { ok: false, error: err.message };

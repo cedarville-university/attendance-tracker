@@ -10,5 +10,5 @@
     "outDir": "dist",
     "noEmit": true
   },
-  "include": ["server/src/**/*.ts", "server/tests/**/*.ts"]
+  "include": ["server/src/**/*.ts", "server/tests/**/*.ts", "*.ts"]
 }

@@ -18,34 +18,28 @@
  * @property {string} id
  * @property {string} timestamp - '' (no scan ever happened)
  * @property {string} rawCardCode - '' (never scanned)
- * @property {string} universityId
- * @property {Record<string, any>} lookupData - always {} (no lookup is performed for absent rows)
- * @property {Record<string, string>} rosterData - the full matched roster CSV row
- * @property {string} rosterStatus - '' (deliberately not reusing ScanRecord's enum)
- * @property {string} status - '' (ditto)
+ * @property {string} institutionalId - matches ScanRecord's field name (Phase 5 rename)
+ * @property {string} status - '' (deliberately not reusing ScanRecord's enum)
  * @property {true} isAbsent - read by csv.js to derive the `attendance` column
  */
 
 /**
- * Diffs the roster against the set of University IDs that have already
+ * Diffs the roster against the set of institutional IDs that have already
  * scanned, returning one row per roster entry with no matching scan.
  *
  * @param {Object} args
  * @param {{index: Map<string, Record<string,string>>}} args.rosterState
- * @param {Set<string>} args.scannedIds - normalized university IDs already scanned this session
+ * @param {Set<string>} args.scannedIds - normalized institutional IDs already scanned this session
  * @returns {AbsentRow[]}
  */
 export function computeAbsentRows({ rosterState, scannedIds }) {
   const absentEntries = [...rosterState.index.entries()].filter(([id]) => !scannedIds.has(id));
 
-  return absentEntries.map(([universityId, rosterRow]) => ({
-    id: `absent-${universityId}`,
+  return absentEntries.map(([institutionalId]) => ({
+    id: `absent-${institutionalId}`,
     timestamp: '',
     rawCardCode: '',
-    universityId,
-    lookupData: {},
-    rosterData: rosterRow,
-    rosterStatus: '',
+    institutionalId,
     status: '',
     isAbsent: true,
   }));

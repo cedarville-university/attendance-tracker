@@ -43,10 +43,22 @@ const allowedTargetLinkUris = createAllowlist(parseAllowedTargetLinkUris(env));
 // is where the real, discovery-sourced endpoints live. Read once at boot; a newly seeded
 // registration needs a restart, which is already true of every other boot-time config here.
 const registrationRows = await db
-  .select({ oidcAuthEndpoint: ltiRegistrations.oidcAuthEndpoint })
+  .select({ id: ltiRegistrations.id, issuer: ltiRegistrations.issuer, oidcAuthEndpoint: ltiRegistrations.oidcAuthEndpoint })
   .from(ltiRegistrations)
   .where(eq(ltiRegistrations.enabled, true));
-const canvasOidcOrigins = [...new Set(registrationRows.map((row) => new URL(row.oidcAuthEndpoint).origin))];
+const canvasOidcOrigins = [
+  ...new Set(
+    registrationRows.map((row) => {
+      try {
+        return new URL(row.oidcAuthEndpoint).origin;
+      } catch {
+        throw new Error(
+          `lti_registrations row ${row.id} (issuer ${row.issuer}) has a malformed oidc_auth_endpoint: ${JSON.stringify(row.oidcAuthEndpoint)}`,
+        );
+      }
+    }),
+  ),
+];
 
 const cspDirectives: Record<string, string[] | null> = {
   defaultSrc: ["'self'"],
@@ -133,8 +145,7 @@ registerAttendanceSessionsRoute(app, {
 
 app.get('/health', async () => ({ status: 'ok' }));
 
-const port = Number(process.env.PORT ?? 3000);
-app.listen({ port, host: '0.0.0.0' }).catch((err) => {
+app.listen({ port: env.PORT, host: '0.0.0.0' }).catch((err) => {
   app.log.error(err);
   process.exit(1);
 });
