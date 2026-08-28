@@ -1,4 +1,4 @@
-import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
 
 const { ScanPipeline } = await import('../scan-pipeline.js');
 
@@ -13,6 +13,7 @@ const lookupCardMock = vi.fn();
  * lookupCardMock.mockReturnValueOnce(...)/expect(lookupCardMock)...
  * assertion below keeps working unchanged across the transport swap.
  */
+const realFetch = global.fetch;
 global.fetch = vi.fn((_url, init) => {
   const { cardCode } = JSON.parse(init.body);
   return lookupCardMock(cardCode).then((result) => ({
@@ -96,6 +97,10 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+afterAll(() => {
+  global.fetch = realFetch;
 });
 
 describe('ScanPipeline', () => {
