@@ -3,7 +3,8 @@ import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { seedInstitutionAndCourse } from '../support/seed.js';
 import { MockCanvasPlatform } from '../support/mock-canvas.js';
 import { submitScan } from '../../src/attendance/scan-service.js';
-import { attendanceSessions, attendanceSessionMembers } from '../../src/database/schema.js';
+import { and, eq } from 'drizzle-orm';
+import { attendanceSessions, attendanceSessionMembers, attendanceRecords } from '../../src/database/schema.js';
 import type { IdentityResolver, IdentityResolution } from '../../src/identity/types.js';
 
 const { db } = getTestDb();
@@ -107,5 +108,72 @@ describe('submitScan', () => {
     await expect(
       submitScan(db, session.id, { clientScanId: 'scan-1', cardCode: 'CARD001', scannedAt: new Date().toISOString() }, { resolver, institution: { id: institutionId, cardFingerprintEnabled: false } })
     ).rejects.toMatchObject({ code: 'session_closed' });
+  });
+});
+
+describe('submitScan -- roster matching edge cases', () => {
+  it('marks a resolved identity not present in the session snapshot as unexpected, not present', async () => {
+    const { institutionId, sessionId } = await seedOpenSessionWithMember('1000000'); // only 1000000 is on the roster
+    const resolver: IdentityResolver = { resolveCard: async () => successResolution({ universityId: '9999999' }) };
+
+    const record = await submitScan(db, sessionId, { clientScanId: 'scan-1', cardCode: 'CARD999', scannedAt: new Date().toISOString() }, { resolver, institution: { id: institutionId, cardFingerprintEnabled: false } });
+
+    expect(record.status).toBe('unexpected');
+    expect(record.ltiUserId).toBeNull();
+    expect(record.institutionalId).toBe('9999999');
+  });
+
+  it('marks an ambiguous match (duplicate institutionalId in the snapshot) as unexpected, never present', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
+    await db.insert(attendanceSessionMembers).values([
+      { attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', displayName: 'Jane A', eligibleForAttendance: true, status: 'Active', snapshotData: {} },
+      { attendanceSessionId: session.id, ltiUserId: 'user-2', institutionalId: '1000000', displayName: 'Jane B', eligibleForAttendance: true, status: 'Active', snapshotData: {} },
+    ]);
+    const resolver: IdentityResolver = { resolveCard: async () => successResolution({ universityId: '1000000' }) };
+
+    const record = await submitScan(db, session.id, { clientScanId: 'scan-1', cardCode: 'CARD001', scannedAt: new Date().toISOString() }, { resolver, institution: { id: institutionId, cardFingerprintEnabled: false } });
+
+    expect(record.status).toBe('unexpected');
+    expect(record.ltiUserId).toBeNull();
+  });
+
+  it('records a lookup_error status (with lookupErrorKind) when the resolver fails, rather than dropping the scan', async () => {
+    const { institutionId, sessionId } = await seedOpenSessionWithMember();
+    const resolver: IdentityResolver = { resolveCard: async () => ({ ok: false, universityId: null, firstName: null, lastName: null, email: null, raw: null, error: { kind: 'timeout', message: 'Lookup timed out' } }) };
+
+    const record = await submitScan(db, sessionId, { clientScanId: 'scan-1', cardCode: 'CARD001', scannedAt: new Date().toISOString() }, { resolver, institution: { id: institutionId, cardFingerprintEnabled: false } });
+
+    expect(record.status).toBe('lookup_error');
+    expect(record.lookupErrorKind).toBe('timeout');
+    expect(record.ltiUserId).toBeNull();
+    expect(record.institutionalId).toBeNull();
+  });
+
+  it('re-resolves a prior lookup_error on retry (same clientScanId) and updates the SAME row to present — no dead end (spec §47, B6)', async () => {
+    const { institutionId, sessionId } = await seedOpenSessionWithMember('1000000');
+    let attempt = 0;
+    const resolver: IdentityResolver = {
+      resolveCard: async () => {
+        attempt += 1;
+        return attempt === 1
+          ? { ok: false, universityId: null, firstName: null, lastName: null, email: null, raw: null, error: { kind: 'timeout', message: 'down' } }
+          : successResolution({ universityId: '1000000' });
+      },
+    };
+    const input = { clientScanId: 'retry-1', cardCode: 'CARD001', scannedAt: new Date().toISOString() };
+    const deps = { resolver, institution: { id: institutionId, cardFingerprintEnabled: false } };
+
+    const first = await submitScan(db, sessionId, input, deps);
+    expect(first.status).toBe('lookup_error');
+
+    const second = await submitScan(db, sessionId, input, deps);
+    expect(second.id).toBe(first.id); // updated in place, not a new row
+    expect(second.status).toBe('present');
+    expect(second.ltiUserId).toBe('user-1');
+
+    const rows = await db.select().from(attendanceRecords).where(and(eq(attendanceRecords.attendanceSessionId, sessionId), eq(attendanceRecords.clientScanId, 'retry-1')));
+    expect(rows).toHaveLength(1);
+    expect(attempt).toBe(2); // resolver WAS called again on the retry
   });
 });
