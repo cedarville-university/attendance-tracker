@@ -12,6 +12,19 @@ const ltiClaimsSchema = z.object({
     title: z.string().optional(),
   }),
   'https://purl.imsglobal.org/spec/lti/claim/roles': z.array(z.string()).min(1),
+  'https://purl.imsglobal.org/spec/lti-nrps/claim/namesroleservice': z
+    .object({
+      context_memberships_url: z.string().url(),
+      service_versions: z.array(z.string()).optional(),
+    })
+    .optional(),
+  'https://purl.imsglobal.org/spec/lti-ags/claim/endpoint': z
+    .object({
+      lineitems: z.string().url().optional(),
+      lineitem: z.string().url().optional(),
+      scope: z.array(z.string()).optional(),
+    })
+    .optional(),
 });
 
 export type ValidatedLtiClaims = z.infer<typeof ltiClaimsSchema>;

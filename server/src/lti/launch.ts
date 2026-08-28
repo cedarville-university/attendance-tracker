@@ -236,14 +236,17 @@ export async function verifyLaunch(input: VerifyLaunchInput, deps: VerifyLaunchD
   const { claims, roles } = claimsRoleResult.result;
 
   const context = claims['https://purl.imsglobal.org/spec/lti/claim/context'];
+  const nrpsClaim = claims['https://purl.imsglobal.org/spec/lti-nrps/claim/namesroleservice'];
+  const agsClaim = claims['https://purl.imsglobal.org/spec/lti-ags/claim/endpoint'];
   const course = await findOrCreateCourse(deps.db, {
     institutionId: registration.institutionId,
-    // `deployment.id` is the lti_deployments ROW UUID, which is what courses.deployment_id FKs to.
-    // Do NOT pass transaction.deploymentId here -- that is Canvas's business deployment ID string.
+    // deployment.id is the lti_deployments ROW UUID, which is what courses.deployment_id FKs to.
     deploymentId: deployment.id,
     ltiContextId: context.id,
     label: context.label,
     title: context.title,
+    nrpsUrl: nrpsClaim?.context_memberships_url ?? null,
+    agsLineitemsUrl: agsClaim?.lineitems ?? null,
   });
 
   const displayName = typeof signatureResult.payload.name === 'string' ? signatureResult.payload.name : null;

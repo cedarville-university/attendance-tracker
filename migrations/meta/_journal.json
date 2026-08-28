@@ -8,6 +8,13 @@
       "when": 1787796066506,
       "tag": "0000_lethal_rockslide",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1787888014104,
+      "tag": "0001_slimy_paibok",
+      "breakpoints": true
     }
   ]
 }
