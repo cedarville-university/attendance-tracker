@@ -3,8 +3,8 @@ import { eq } from 'drizzle-orm';
 import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { seedInstitutionAndCourse } from '../support/seed.js';
 import { MockCanvasPlatform } from '../support/mock-canvas.js';
-import { createAttendanceSession } from '../../src/attendance/session-lifecycle.js';
-import { attendanceSessionMembers, auditEvents } from '../../src/database/schema.js';
+import { createAttendanceSession, closeAttendanceSession } from '../../src/attendance/session-lifecycle.js';
+import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents } from '../../src/database/schema.js';
 import type { ToolSigningKey } from '../../src/lti/signing-keys.js';
 
 // D9: Start Attendance goes through the shared fallback helper, so that is what we mock.
@@ -96,5 +96,59 @@ describe('createAttendanceSession', () => {
     vi.mocked(getRosterWithFallback).mockRejectedValue(new Error('canvas down, cache is 3 days old'));
 
     await expect(createAttendanceSession(db, courseId, 'instructor-1', {}, undefined, { signingKey })).rejects.toMatchObject({ code: 'roster_unavailable' });
+  });
+});
+
+describe('closeAttendanceSession', () => {
+  it('inserts a system_absence record (scannedAt null) for every eligible member with no qualifying record, sets state=closed, and writes an audit event with requestId', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
+    await db.insert(attendanceSessionMembers).values([
+      { attendanceSessionId: session.id, ltiUserId: 'scanned-user', institutionalId: '1000000', displayName: 'Scanned', eligibleForAttendance: true, status: 'Active', snapshotData: {} },
+      { attendanceSessionId: session.id, ltiUserId: 'unscanned-user', institutionalId: '2000000', displayName: 'Unscanned', eligibleForAttendance: true, status: 'Active', snapshotData: {} },
+      { attendanceSessionId: session.id, ltiUserId: 'ineligible-user', institutionalId: '3000000', displayName: 'Ineligible', eligibleForAttendance: false, status: 'Inactive', snapshotData: {} },
+    ]);
+    await db.insert(attendanceRecords).values({
+      attendanceSessionId: session.id, ltiUserId: 'scanned-user', institutionalId: '1000000',
+      clientScanId: 'scan-1', status: 'present', scannedAt: new Date(), source: 'card',
+    });
+
+    await closeAttendanceSession(db, session.id, 'instructor-1', 'req-close');
+
+    const [closed] = await db.select().from(attendanceSessions).where(eq(attendanceSessions.id, session.id));
+    expect(closed.state).toBe('closed');
+    expect(closed.closedAt).not.toBeNull();
+
+    const records = await db.select().from(attendanceRecords).where(eq(attendanceRecords.attendanceSessionId, session.id));
+    const absenceRecords = records.filter((r) => r.source === 'system_absence');
+    expect(absenceRecords).toHaveLength(1);
+    expect(absenceRecords[0].ltiUserId).toBe('unscanned-user');
+    expect(absenceRecords[0].status).toBe('absent');
+    expect(absenceRecords[0].scannedAt).toBeNull();
+
+    const events = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'attendance_session_closed'));
+    expect(events).toHaveLength(1);
+    expect(events[0].actorLtiUserId).toBe('instructor-1');
+    expect(events[0].requestId).toBe('req-close');
+    expect(events[0].institutionId).not.toBeNull();
+  });
+
+  it('does not mark system_absence for a member who already has a qualifying record (e.g. a manual excused correction)', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
+    await db.insert(attendanceSessionMembers).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', displayName: 'Jane', eligibleForAttendance: true, status: 'Active', snapshotData: {} });
+    await db.insert(attendanceRecords).values({ attendanceSessionId: session.id, ltiUserId: 'user-1', institutionalId: '1000000', clientScanId: null, status: 'excused', scannedAt: null, source: 'manual' });
+
+    await closeAttendanceSession(db, session.id, 'instructor-1');
+
+    const records = await db.select().from(attendanceRecords).where(eq(attendanceRecords.attendanceSessionId, session.id));
+    expect(records.filter((r) => r.source === 'system_absence')).toHaveLength(0);
+  });
+
+  it('rejects a second close with a 409-mapped error (state guard, Q7)', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'closed' }).returning();
+
+    await expect(closeAttendanceSession(db, session.id, 'instructor-1')).rejects.toMatchObject({ code: 'session_already_closed' });
   });
 });

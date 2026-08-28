@@ -3,6 +3,7 @@ import type { Database } from '../database/client.js';
 import {
   attendanceSessions,
   attendanceSessionMembers,
+  attendanceRecords,
   auditEvents,
   courses,
   type AttendanceSessionRow,
@@ -10,6 +11,7 @@ import {
 import type { ToolSigningKey } from '../lti/signing-keys.js';
 import type { CourseRosterMember } from '../lti/nrps.js';
 import { getRosterWithFallback } from './roster-store.js';
+import { resolveCurrentRecord } from './member-status.js';
 
 // The optional test-injection fields mirror Phase 4's getRosterWithFallback deps so a
 // caller can stub the Canvas fetch; signingKey is REQUIRED (Phase 4 D5 — no module-level
@@ -117,5 +119,64 @@ export async function createAttendanceSession(
     });
 
     return session;
+  });
+}
+
+export async function closeAttendanceSession(
+  db: Database,
+  sessionId: string,
+  actorLtiUserId: string,
+  requestId?: string,
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [session] = await tx.select().from(attendanceSessions).where(eq(attendanceSessions.id, sessionId));
+    if (!session) throw new Error(`Attendance session ${sessionId} not found.`);
+    if (session.state === 'closed') throw new SessionAlreadyClosedError(); // Q7 state guard
+
+    // B5: load the course once and use course.institutionId unconditionally
+    // (audit_events.institutionId is NOT NULL).
+    const [course] = await tx.select().from(courses).where(eq(courses.id, session.courseId));
+
+    const members = await tx.select().from(attendanceSessionMembers).where(eq(attendanceSessionMembers.attendanceSessionId, sessionId));
+    const records = await tx.select().from(attendanceRecords).where(eq(attendanceRecords.attendanceSessionId, sessionId));
+    const recordsByLtiUserId = new Map<string, typeof records>();
+    for (const record of records) {
+      if (!record.ltiUserId) continue;
+      const list = recordsByLtiUserId.get(record.ltiUserId) ?? [];
+      list.push(record);
+      recordsByLtiUserId.set(record.ltiUserId, list);
+    }
+
+    const now = new Date();
+    const absentInserts = members
+      .filter((m) => m.eligibleForAttendance)
+      .filter((m) => resolveCurrentRecord(recordsByLtiUserId.get(m.ltiUserId) ?? []) === null)
+      .map((m) => ({
+        attendanceSessionId: sessionId,
+        ltiUserId: m.ltiUserId,
+        institutionalId: m.institutionalId,
+        clientScanId: null,
+        status: 'absent' as const,
+        scannedAt: null, // system_absence rows were never "scanned at" an instant (spec §26)
+        source: 'system_absence' as const,
+      }));
+
+    if (absentInserts.length > 0) {
+      await tx.insert(attendanceRecords).values(absentInserts);
+    }
+
+    await tx.update(attendanceSessions).set({ state: 'closed', closedAt: now, updatedAt: now }).where(eq(attendanceSessions.id, sessionId));
+
+    await tx.insert(auditEvents).values({
+      institutionId: course.institutionId,
+      courseId: session.courseId,
+      attendanceSessionId: sessionId,
+      actorLtiUserId,
+      eventType: 'attendance_session_closed',
+      targetType: 'attendance_session',
+      targetId: sessionId,
+      newValue: { markedAbsentCount: absentInserts.length },
+      requestId: requestId ?? null,
+    });
   });
 }
