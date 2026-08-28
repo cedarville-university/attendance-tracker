@@ -86,5 +86,27 @@ export function registerCourseRosterRoutes(app: FastifyInstance, deps: CourseRos
     }
   });
 
-  // POST /api/course/roster/refresh is added in Task 14, inside this same function.
+  app.post(
+    '/api/course/roster/refresh',
+    { preHandler: [deps.requireSession, deps.requireCsrf] },
+    async (request, reply) => {
+      const session = request.appSession;
+      if (!session) {
+        return reply.code(401).send({ error: 'unauthenticated' });
+      }
+
+      try {
+        const roster = await getRosterWithFallback(deps.db, session.courseId, { signingKey: deps.signingKey });
+        if (roster.refreshed) {
+          await writeRosterRefreshedAuditEvent(deps.db, session, roster.members.length, request.id);
+        }
+        return { members: roster.members.map(serializeMember), fetchedAt: roster.fetchedAt, stale: roster.stale };
+      } catch (err) {
+        if (err instanceof RosterUnavailableError) {
+          return reply.code(502).send({ error: 'roster_refresh_failed', message: err.message });
+        }
+        throw err;
+      }
+    },
+  );
 }

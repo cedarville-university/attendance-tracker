@@ -14,7 +14,7 @@ import { createHttpIdentityResolverFromEnv } from './identity/http-resolver.js';
 import { loadEnv, parseAllowedTargetLinkUris } from './config/env.js';
 import { createDbClient, applyMigrations } from './database/client.js';
 import { ltiRegistrations } from './database/schema.js';
-import { loadSigningKeysFromEnv } from './lti/signing-keys.js';
+import { loadSigningKeysFromEnv, getActiveSigningKey } from './lti/signing-keys.js';
 import { createDefaultJwksCache } from './lti/jwks-cache.js';
 import { createAllowlist } from './lti/login.js';
 import { findEnabledDeployment } from './lti/registrations.js';
@@ -23,7 +23,8 @@ import { registerLtiJwksRoute } from './routes/lti-jwks.js';
 import { registerLtiLoginRoute } from './routes/lti-login.js';
 import { registerLtiLaunchRoute } from './routes/lti-launch.js';
 import { registerMeRoute } from './routes/me.js';
-import { createRequireSession } from './auth/middleware.js';
+import { registerCourseRosterRoutes } from './routes/course-roster.js';
+import { createRequireSession, createRequireCsrf } from './auth/middleware.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const webRoot = path.resolve(__dirname, '../../web');
@@ -110,7 +111,14 @@ await app.register(async (instance) => {
 registerLtiJwksRoute(app, signingKeys);
 
 const requireSession = createRequireSession(db);
+const requireCsrf = createRequireCsrf(env.APP_BASE_URL);
 registerMeRoute(app, { requireSession, db });
+registerCourseRosterRoutes(app, {
+  db,
+  requireSession,
+  requireCsrf,
+  signingKey: getActiveSigningKey(signingKeys),
+});
 
 app.get('/health', async () => ({ status: 'ok' }));
 
