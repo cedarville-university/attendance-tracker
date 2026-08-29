@@ -18,6 +18,7 @@ import { createDefaultJwksCache } from './lti/jwks-cache.js';
 import { MockIdentityResolver } from './identity/mock-resolver.js';
 import { createHttpIdentityResolverFromEnv } from './identity/http-resolver.js';
 import { buildApp } from './app.js';
+import { installShutdownHandlers } from './lifecycle.js';
 
 const env = loadEnv();
 const dbClient = createDbClient(env.DATABASE_URL);
@@ -37,7 +38,7 @@ const app = await buildApp(env, {
   identityResolver,
 });
 
-// Task 11: installShutdownHandlers(app, dbClient.pool) goes here.
+installShutdownHandlers(app, dbClient.pool);
 
 app.listen({ port: env.PORT, host: '0.0.0.0' }).catch((err) => {
   app.log.error(err);

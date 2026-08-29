@@ -134,6 +134,25 @@ export async function getGradeSyncSummary(db: Database, courseId: string): Promi
   return { state, counts, lastError };
 }
 
+/**
+ * Global job count by state — a cheap `GROUP BY` aggregate for the worker's observability gauges
+ * (spec §44). Unlike getGradeSyncSummary, which loads every row for one course, this scans nothing
+ * back to the process: Postgres returns at most three rows.
+ */
+export async function countGradeJobsByState(
+  db: Database,
+): Promise<{ pending: number; synced: number; failed: number }> {
+  const rows = await db
+    .select({ state: gradeSyncJobs.state, count: sql<number>`count(*)::int` })
+    .from(gradeSyncJobs)
+    .groupBy(gradeSyncJobs.state);
+  const counts = { pending: 0, synced: 0, failed: 0 };
+  for (const row of rows) {
+    counts[row.state] = Number(row.count);
+  }
+  return counts;
+}
+
 /** Re-queue every failed job for a course (spec §25.9 retry route). Returns the number reset. */
 export async function resetFailedJobs(db: Database, courseId: string, now: Date): Promise<number> {
   const reset = await db

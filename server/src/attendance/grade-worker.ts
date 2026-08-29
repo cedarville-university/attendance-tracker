@@ -41,6 +41,8 @@ export interface ProcessGradeSyncJobsDeps {
   now?: () => Date;
   maxJobs?: number;
   rand?: () => number;
+  /** Cooperative cancellation — checked between courses so a SIGTERM'd worker stops cleanly. */
+  shouldStop?: () => boolean;
 }
 
 export interface ProcessGradeSyncJobsResult {
@@ -146,6 +148,7 @@ export async function processGradeSyncJobs(
   const AGS_SCOPES = [AGS_LINEITEM_SCOPE, AGS_SCORE_SCOPE];
 
   for (const [courseId, courseJobs] of byCourse) {
+    if (deps.shouldStop?.()) break;
     const ctx = await loadCourseAgsContext(db, courseId);
 
     // Q3: distinguish "no URL was ever persisted" from "a malformed URL was persisted at launch" —
