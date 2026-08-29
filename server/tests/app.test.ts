@@ -4,6 +4,13 @@
 // (with the dynamic Canvas OIDC origin folded into form-action), the Permissions-Policy hook, and
 // the encapsulated rate-limit scope (spec §31.10 — /lti/login + /lti/launch only, never the
 // classroom scan endpoint). DB setup mirrors server/tests/routes/course-roster-integration.test.ts.
+// Silence pino before buildApp imports/calls loggerOptions(): loggerOptions reads
+// process.env.LOG_LEVEL at call time, so helmet / the Permissions-Policy hook / request telemetry
+// all still register and run through the real chain — pino just emits nothing. Scoped to this file
+// on purpose (no global vitest env entry); do NOT swap to `logger: false` — loggerOptions itself is
+// part of what this test covers.
+process.env.LOG_LEVEL = 'silent';
+
 import { beforeEach, afterAll, describe, it, expect } from 'vitest';
 import { getTestDb, resetDb, closeTestDb } from './support/db.js';
 import { seedInstitutionAndRegistration } from './support/seed.js';
@@ -41,6 +48,8 @@ afterAll(async () => {
 
 describe('buildApp — security headers via the real middleware chain', () => {
   it('emits the locked-down CSP including the seeded Canvas OIDC origin in form-action', async () => {
+    // MockCanvasPlatform is constructed but never .start()ed on purpose — buildApp only reads the
+    // registration's oidc_auth_endpoint column, so no live platform HTTP server is needed here.
     await seedInstitutionAndRegistration(getTestDb().db, new MockCanvasPlatform(), {
       oidcAuthEndpoint: 'https://canvas.example.test/api/lti/authorize_redirect',
     });
