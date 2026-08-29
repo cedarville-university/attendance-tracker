@@ -15,6 +15,8 @@ export interface SeededRegistration {
 export interface SeedOverrides {
   clientId?: string;
   deploymentId?: string;
+  /** Override the registration's oidc_auth_endpoint column (defaults to the mock-canvas host). */
+  oidcAuthEndpoint?: string;
 }
 
 export async function seedInstitutionAndRegistration(
@@ -36,7 +38,7 @@ export async function seedInstitutionAndRegistration(
       institutionId: institution.id,
       issuer: platform.issuer,
       clientId,
-      oidcAuthEndpoint: 'https://mock-canvas.test/api/lti/authorize_redirect',
+      oidcAuthEndpoint: overrides.oidcAuthEndpoint ?? 'https://mock-canvas.test/api/lti/authorize_redirect',
       // Point at the live mock so tests that actually acquire a client-credentials token
       // (refreshCourseRoster) reach it -- mirrors platformJwksUri already using the live port.
       tokenEndpoint: platform.tokenUrl,
