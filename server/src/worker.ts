@@ -5,9 +5,9 @@
 // scheduling is sufficient"). Deploys as the same image as the web server with a different command.
 // Deliberately NOT wired into the Fastify process (2026-08-28 user ruling).
 //
-// Like server/src/index.ts this is an unwrapped top-level-await entrypoint. Phase 7 decides whether
-// the web or the worker owns `applyMigrations` at deploy time; for local `npm run worker` the worker
-// applies pending migrations so a fresh DB works out of the box. No automated test — the
+// Like server/src/index.ts this is an unwrapped top-level-await entrypoint. In deployed environments
+// a dedicated CI job runs `node dist/migrate.js`; the worker only migrates at boot when
+// `RUN_MIGRATIONS_ON_BOOT` is set (local dev). No automated test — the
 // testable `runWorkerOnce()` extraction is whole-branch follow-up #8 (Phase 7); all worker logic is
 // covered by Task 9's suite and Task 13's integration test.
 
@@ -18,7 +18,9 @@ import { processGradeSyncJobs } from './attendance/grade-worker.js';
 
 const env = loadEnv();
 const dbClient = createDbClient(env.DATABASE_URL);
-await applyMigrations(dbClient);
+if (env.RUN_MIGRATIONS_ON_BOOT) {
+  await applyMigrations(dbClient);
+}
 const { db, pool } = dbClient;
 
 const signingKey = getActiveSigningKey(await loadSigningKeysFromEnv(env.LTI_TOOL_SIGNING_KEYS_JSON));

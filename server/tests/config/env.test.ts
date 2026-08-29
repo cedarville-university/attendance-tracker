@@ -42,6 +42,28 @@ describe('loadEnv', () => {
   });
 });
 
+describe('RUN_MIGRATIONS_ON_BOOT', () => {
+  it('defaults to true when NODE_ENV is not production', () => {
+    const env = loadEnv({ ...BASE_ENV, NODE_ENV: 'development' });
+    expect(env.RUN_MIGRATIONS_ON_BOOT).toBe(true);
+  });
+
+  it('defaults to false when NODE_ENV is production', () => {
+    const env = loadEnv({ ...BASE_ENV, NODE_ENV: 'production' });
+    expect(env.RUN_MIGRATIONS_ON_BOOT).toBe(false);
+  });
+
+  it('honours an explicit "false" even outside production', () => {
+    const env = loadEnv({ ...BASE_ENV, NODE_ENV: 'development', RUN_MIGRATIONS_ON_BOOT: 'false' });
+    expect(env.RUN_MIGRATIONS_ON_BOOT).toBe(false);
+  });
+
+  it('honours an explicit "true" in production', () => {
+    const env = loadEnv({ ...BASE_ENV, NODE_ENV: 'production', RUN_MIGRATIONS_ON_BOOT: 'true' });
+    expect(env.RUN_MIGRATIONS_ON_BOOT).toBe(true);
+  });
+});
+
 describe('parseAllowedTargetLinkUris', () => {
   it('splits, trims, and drops empty entries', () => {
     const env = loadEnv(BASE_ENV);

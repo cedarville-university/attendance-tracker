@@ -31,7 +31,9 @@ const webRoot = path.resolve(__dirname, '../../web');
 
 const env = loadEnv();
 const dbClient = createDbClient(env.DATABASE_URL);
-await applyMigrations(dbClient);
+if (env.RUN_MIGRATIONS_ON_BOOT) {
+  await applyMigrations(dbClient);
+}
 const { db } = dbClient;
 
 const signingKeys = await loadSigningKeysFromEnv(env.LTI_TOOL_SIGNING_KEYS_JSON);

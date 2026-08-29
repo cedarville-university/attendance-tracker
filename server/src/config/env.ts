@@ -17,12 +17,29 @@ const envSchema = z.object({
   CLOCK_SKEW_SECONDS: z.coerce.number().int().positive().default(120),
   LOGIN_TRANSACTION_TTL_SECONDS: z.coerce.number().int().positive().default(300),
   APP_SESSION_TTL_HOURS: z.coerce.number().int().positive().default(8),
+  NODE_ENV: z.string().optional(),
+  // Boot-time schema migration. Unset -> true unless NODE_ENV=production (see refine below).
+  // In Azure the runtime image sets NODE_ENV=production, so web/worker never migrate at boot;
+  // only the CI migrate job (node dist/migrate.js) touches schema. Local `npm run dev`/`worker`
+  // set this true explicitly.
+  RUN_MIGRATIONS_ON_BOOT: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v === undefined ? undefined : v === 'true')),
+  // Optional retention window for maintenance/purge (spec §34). Unset -> retention sweep is a no-op.
+  RETENTION_DAYS: z.coerce.number().int().positive().optional(),
 });
 
-export type Env = z.infer<typeof envSchema>;
+const withDefaults = envSchema.transform((env) => ({
+  ...env,
+  RUN_MIGRATIONS_ON_BOOT:
+    env.RUN_MIGRATIONS_ON_BOOT ?? env.NODE_ENV !== 'production',
+}));
+
+export type Env = z.infer<typeof withDefaults>;
 
 export function loadEnv(source: Record<string, string | undefined> = process.env): Env {
-  const parsed = envSchema.safeParse(source);
+  const parsed = withDefaults.safeParse(source);
   if (!parsed.success) {
     throw new Error(`Invalid environment configuration: ${parsed.error.message}`);
   }
