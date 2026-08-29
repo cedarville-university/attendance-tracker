@@ -56,6 +56,14 @@ export async function upsertGradeSyncJobs(
 /**
  * Pending jobs whose next_attempt_at has passed, oldest-scheduled first.
  *
+ * The due-check compares next_attempt_at against the DATABASE clock (`sql`now()``), not a JS
+ * `new Date()` from the calling process. Every next_attempt_at value is DB-clock-generated or
+ * safely in the past: `upsertGradeSyncJobs` / the retry route write `sql`now()`; `markJobRetry`
+ * writes `computeBackoff(...)` (a JS Date, but always minutes ahead, so sub-second host/VM skew is
+ * irrelevant); `resetFailedJobs` writes a JS `now` that is immediately past. Comparing them against
+ * DB `now()` is therefore correct and immune to clock drift between the Node process and Postgres
+ * (routine after a laptop sleep/suspend, and across multiple web/worker hosts in prod).
+ *
  * This is a plain SELECT, NOT a claim: it does no state transition and no `FOR UPDATE SKIP LOCKED`.
  * Running two passes concurrently would select the same rows and double-post to Canvas. The
  * single-process invariant is enforced by `npm run worker` being a one-shot entrypoint (Task 10);
@@ -63,11 +71,11 @@ export async function upsertGradeSyncJobs(
  * idempotent-by-overwrite, so the worst case of an accidental overlap is wasted quota, not a wrong
  * grade. The name is kept as `claimDueJobs` for continuity with the Fixed contract.
  */
-export function claimDueJobs(db: Database, now: Date, limit: number): Promise<GradeSyncJobRow[]> {
+export function claimDueJobs(db: Database, limit: number): Promise<GradeSyncJobRow[]> {
   return db
     .select()
     .from(gradeSyncJobs)
-    .where(and(eq(gradeSyncJobs.state, 'pending'), lte(gradeSyncJobs.nextAttemptAt, now)))
+    .where(and(eq(gradeSyncJobs.state, 'pending'), lte(gradeSyncJobs.nextAttemptAt, sql`now()`)))
     .orderBy(asc(gradeSyncJobs.nextAttemptAt))
     .limit(limit);
 }

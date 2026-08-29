@@ -30,10 +30,10 @@ async function seedCourseWithAgs(opts: { withUrl?: boolean } = {}) {
   });
   return { courseId, key };
 }
-// NOTE: any test that injects a fixed `now` into processGradeSyncJobs MUST also pass an explicit
-// past `nextAttemptAt` here — the column otherwise defaults to DB `now()` (real wall clock), and
-// claimDueJobs's `lte(nextAttemptAt, injectedNow)` would then never claim the row. Tests that let
-// `now` default to `new Date()` are safe because that is always after the insert.
+// NOTE: claimDueJobs compares next_attempt_at against the DB clock (`sql`now()``), not the `now`
+// injected into processGradeSyncJobs, so injecting a fixed `now` no longer hides a freshly-inserted
+// row from the claim. The explicit `nextAttemptAt` values below are still meaningful — some assert
+// retry scheduling relative to the injected `now` — so they are kept as-is.
 async function insertJob(courseId: string, over: Partial<typeof gradeSyncJobs.$inferInsert>) {
   const [row] = await db.insert(gradeSyncJobs).values({ courseId, ltiUserId: 'u1', score: 100, ...over }).returning();
   return row;
@@ -80,7 +80,8 @@ describe('processGradeSyncJobs', () => {
   it('a 429 on the score post schedules a retry (pending, attempt+1, future next_attempt_at) — no failure audit', async () => {
     const { courseId } = await seedCourseWithAgs();
     const now = new Date('2026-08-28T00:00:00.000Z');
-    // next_attempt_at must be <= the injected `now`, or claimDueJobs skips the row (see insertJob note).
+    // next_attempt_at is set in the past so the row is due; the retry assertions below are relative
+    // to the injected `now`.
     const job = await insertJob(courseId, {
       ltiUserId: 'u1', score: 100, attemptCount: 0,
       nextAttemptAt: new Date(now.getTime() - 60_000),

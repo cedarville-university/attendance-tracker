@@ -88,16 +88,17 @@ describe('upsertGradeSyncJobs', () => {
 });
 
 describe('claimDueJobs / markJob*', () => {
-  it('claims only pending jobs whose next_attempt_at <= now, oldest first, up to the limit', async () => {
+  it('claims only pending jobs whose next_attempt_at is due (DB clock), oldest first, up to the limit', async () => {
     const { courseId, sessionId } = await seedSessionAndCourse();
     await upsertGradeSyncJobs(db, courseId, sessionId, new Map([['u1', { scoreGiven: 10 }], ['u2', { scoreGiven: 20 }], ['u3', { scoreGiven: 30 }]]));
     const rows = await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, courseId));
-    // push u3 into the future
-    await markJobRetry(db, rows.find((r) => r.ltiUserId === 'u3')!.id, 1, new Date(Date.now() + 60_000), 'ags:rate-limited', new Date());
-    // mark u2 synced
+    // push u3's next_attempt_at into the future — the due-check must exclude it
+    await markJobRetry(db, rows.find((r) => r.ltiUserId === 'u3')!.id, 1, new Date(Date.now() + 3_600_000), 'ags:rate-limited', new Date());
+    // mark u2 synced — not pending, must be excluded
     await markJobSynced(db, rows.find((r) => r.ltiUserId === 'u2')!.id, new Date());
 
-    const due = await claimDueJobs(db, new Date(), 10);
+    // claimDueJobs compares next_attempt_at against the DB clock, so no `now` argument is passed.
+    const due = await claimDueJobs(db, 10);
     expect(due.map((j) => j.ltiUserId)).toEqual(['u1']);
   });
 });

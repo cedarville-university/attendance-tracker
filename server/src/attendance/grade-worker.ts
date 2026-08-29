@@ -98,7 +98,7 @@ export async function processGradeSyncJobs(
   const rand = deps.rand ?? Math.random;
   const result: ProcessGradeSyncJobsResult = { processed: 0, synced: 0, retried: 0, failed: 0 };
 
-  const due = await claimDueJobs(db, now, deps.maxJobs ?? 50);
+  const due = await claimDueJobs(db, deps.maxJobs ?? 50);
   if (due.length === 0) return result;
 
   const byCourse = new Map<string, GradeSyncJobRow[]>();
