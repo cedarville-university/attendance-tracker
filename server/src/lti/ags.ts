@@ -8,6 +8,7 @@
 // (structural check only — spec §31.7 trust anchor is the signed launch's provenance).
 
 import { validateCanvasServiceUrl } from './service-url.js';
+import { assertSameOrigin } from '../security/same-origin.js';
 
 export const ATTENDANCE_RESOURCE_ID = 'attendance-cumulative-v1';
 export const ATTENDANCE_TAG = 'attendance';
@@ -118,6 +119,24 @@ function toEnsured(raw: Record<string, unknown>): EnsuredLineItem {
   };
 }
 
+// Backlog 6.1: the line-item `id` comes from a Canvas response body; before any later bearer-token
+// score POST targets it, confirm it is on the same origin as the launch-persisted line-items URL.
+function ensuredOrUntrusted(
+  raw: Record<string, unknown>,
+  lineItemsUrl: string,
+): AgsResult<EnsuredLineItem> {
+  const ensured = toEnsured(raw);
+  try {
+    assertSameOrigin(ensured.canvasLineItemUrl, lineItemsUrl);
+  } catch {
+    return {
+      ok: false,
+      error: { kind: 'client-error', message: 'ags:untrusted-lineitem-origin', retryable: false },
+    };
+  }
+  return { ok: true, value: ensured };
+}
+
 export async function ensureLineItem(
   lineItemsUrl: string,
   accessToken: string,
@@ -155,7 +174,7 @@ export async function ensureLineItem(
   const match = existing.find(
     (li) => li && li.tag === ATTENDANCE_TAG && li.resourceId === ATTENDANCE_RESOURCE_ID && typeof li.id === 'string',
   );
-  if (match) return { ok: true, value: toEnsured(match) }; // spec §27.1 step 2 — reuse
+  if (match) return ensuredOrUntrusted(match, lineItemsUrl); // spec §27.1 step 2 — reuse
 
   // 2. Create only if none exists (spec §27.1 step 3). Canvas dedupes on resourceId, so a
   //    concurrent double-create still converges — this operation is idempotent.
@@ -187,7 +206,7 @@ export async function ensureLineItem(
   if (!createdJson || typeof (createdJson as Record<string, unknown>).id !== 'string') {
     return badJson();
   }
-  return { ok: true, value: toEnsured(createdJson as Record<string, unknown>) };
+  return ensuredOrUntrusted(createdJson as Record<string, unknown>, lineItemsUrl);
 }
 
 export async function postScore(
