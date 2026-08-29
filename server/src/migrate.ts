@@ -7,12 +7,14 @@
 //   - `npm run migrate` locally.
 // Needs only DATABASE_URL from the environment.
 
-import { loadEnv } from './config/env.js';
 import { createDbClient, applyMigrations } from './database/client.js';
 
 async function main(): Promise<void> {
-  const env = loadEnv();
-  const client = createDbClient(env.DATABASE_URL);
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) {
+    throw new Error('DATABASE_URL is required');
+  }
+  const client = createDbClient(databaseUrl);
   try {
     await applyMigrations(client);
     // Tally line only — no connection string, no schema detail (spec §31.8).
