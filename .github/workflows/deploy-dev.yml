@@ -88,8 +88,8 @@ jobs:
           PG_NAME=$(az postgres flexible-server list -g "${{ vars.RESOURCE_GROUP }}" --query '[0].name' -o tsv)
           echo "pg=$PG_NAME" >> "$GITHUB_OUTPUT"
           az postgres flexible-server firewall-rule create \
-            -g "${{ vars.RESOURCE_GROUP }}" -s "$PG_NAME" \
-            --rule-name "ci-migrate-${{ github.run_id }}" \
+            -g "${{ vars.RESOURCE_GROUP }}" --server-name "$PG_NAME" \
+            --name "ci-migrate-${{ github.run_id }}" \
             --start-ip-address "$RUNNER_IP" --end-ip-address "$RUNNER_IP"
       - name: Run migrations
         run: |
@@ -101,8 +101,8 @@ jobs:
         if: always()
         run: |
           az postgres flexible-server firewall-rule delete \
-            -g "${{ vars.RESOURCE_GROUP }}" -s "${{ steps.fw.outputs.pg }}" \
-            --rule-name "ci-migrate-${{ github.run_id }}" --yes || true
+            -g "${{ vars.RESOURCE_GROUP }}" --server-name "${{ steps.fw.outputs.pg }}" \
+            --name "ci-migrate-${{ github.run_id }}" --yes || true
 
   deploy:
     needs: [build-push, migrate]
