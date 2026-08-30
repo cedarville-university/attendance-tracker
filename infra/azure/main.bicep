@@ -26,9 +26,9 @@ param postgresAdminObjectId string = ''
 param postgresAdminLogin string = 'attendance_admin'
 @description('Container image ref (registry/repo:tag). Supplied by the deploy pipeline on the CLI; never committed to a .bicepparam.')
 param containerImage string = 'REPLACED_BY_PIPELINE'
-@description('Postgres administrator password. Supplied on the CLI from the bootstrap / deploy workflow; never committed (spec §36). The empty default keeps `az bicep build-params` working — every real deployment overrides it with `-p postgresAdministratorPassword=...`.')
+@description('Postgres administrator password. Supplied on the CLI from the bootstrap / deploy workflow; never committed (spec §36).')
 @secure()
-param postgresAdministratorPassword string = ''
+param postgresAdministratorPassword string
 @description('Identity API base URL for the real ProxID resolver (decision #3). Non-secret; empty disables the HTTP resolver.')
 param identityApiUrl string = ''
 param identityApiKeyName string = 'attendance-resolver'

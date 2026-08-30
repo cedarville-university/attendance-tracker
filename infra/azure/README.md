@@ -5,9 +5,10 @@ This tree defines the **foundation** resources (a user-assigned managed identity
 Azure Container Registry, Log Analytics workspace + workspace-based Application
 Insights, and a Key Vault) plus the **compute** layer: a Postgres Flexible Server,
 a Container Apps managed environment, the web Container App, the grade-worker
-Container Apps Job, and Azure Monitor alerts. The container image tag and the
-Postgres administrator password are supplied by the deploy pipeline on the CLI and
-are never committed.
+Container Apps Job, and Azure Monitor alerts. The container image tag is supplied
+by the deploy pipeline on the CLI and the Postgres administrator password via the
+`PG_ADMIN_PASSWORD` environment variable — neither is ever committed (see
+[Secrets supplied at deploy time](#secrets-supplied-at-deploy-time)).
 
 **No secret values live in this tree.** The `.bicepparam` files hold only
 non-secret configuration; `CHANGEME` placeholders must be replaced per
@@ -56,10 +57,32 @@ infra/azure/
 - Edit the relevant `environments/<env>.bicepparam` and replace every `CHANGEME`
   (at minimum `appHostname` and `alertEmail`).
 
-## Validate (local compile only, no Azure calls)
+## Secrets supplied at deploy time
+
+No secret value lives in this tree. Two parameters are injected by the caller:
+
+- **`postgresAdministratorPassword`** — each `.bicepparam` reads it from the
+  `PG_ADMIN_PASSWORD` environment variable (`readEnvironmentVariable`, no
+  fallback). The deploy pipeline / bootstrap script exports it from Key Vault or a
+  generated value; if it is unset the Bicep compile fails `BCP427` on purpose.
+- **`containerImage`** — has a `'REPLACED_BY_PIPELINE'` default in `main.bicep`;
+  pass the real `registry/repo:sha` ref with `-p containerImage=...`.
+
+```bash
+export PG_ADMIN_PASSWORD="$(openssl rand -base64 24)"   # throwaway for local checks
+```
+
+## Validate
+
+Template compile (no Azure calls):
 
 ```bash
 az bicep build --file infra/azure/main.bicep
+```
+
+Per-environment param-file compile (needs `PG_ADMIN_PASSWORD` exported, above):
+
+```bash
 for e in dev stage prod; do
   az bicep build-params --file infra/azure/environments/$e.bicepparam
 done
@@ -67,29 +90,26 @@ done
 
 ## Preview changes (what-if)
 
-`containerImage` and `postgresAdministratorPassword` are **not** in the
-`.bicepparam` files (a committed password violates spec §36) — pass them on the
-CLI. The deploy pipeline supplies the real image ref and pulls the password from
-Key Vault / the bootstrap secret.
-
 ```bash
+export PG_ADMIN_PASSWORD="$(openssl rand -base64 24)"
+
 az deployment group what-if \
   -g rg-attendance-dev \
   -f infra/azure/main.bicep \
   -p infra/azure/environments/dev.bicepparam \
-  -p containerImage='mcr.microsoft.com/k8se/quickstart:latest' \
-  -p postgresAdministratorPassword="$(openssl rand -base64 24)"
+  -p containerImage='mcr.microsoft.com/k8se/quickstart:latest'
 ```
 
 ## Deploy
 
 ```bash
+export PG_ADMIN_PASSWORD="<from Key Vault / bootstrap>"
+
 az deployment group create \
   -g rg-attendance-dev \
   -f infra/azure/main.bicep \
   -p infra/azure/environments/dev.bicepparam \
-  -p containerImage="$ACR_LOGIN_SERVER/attendance-tracker:$GIT_SHA" \
-  -p postgresAdministratorPassword="$PG_ADMIN_PASSWORD"
+  -p containerImage="$ACR_LOGIN_SERVER/attendance-tracker:$GIT_SHA"
 ```
 
 Swap `dev` for `stage` / `prod` (resource group **and** param file) for the other
