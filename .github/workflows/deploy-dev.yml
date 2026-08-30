@@ -2,7 +2,7 @@ name: deploy-dev
 
 on:
   push:
-    branches: [main, canvas-lti-phase7]  # TEMP: canvas-lti-phase7 for the first pre-merge dev deploy; revert after
+    branches: [main]
   workflow_dispatch:
 
 permissions:
