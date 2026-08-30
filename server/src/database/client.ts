@@ -16,8 +16,11 @@ export type Database = DbClient['db'];
 
 // Resolve the migrations directory from THIS module's location, never from process.cwd():
 //  - source/tests   server/src/database/client.ts  -> ../../migrations = server/migrations
-//  - built image    server/dist/database/client.js -> ../../migrations = server/dist/migrations
-// Task 13's Dockerfile copies server/migrations -> server/dist/migrations so the built path exists.
+//  - built image    server/dist/database/client.js -> ../../migrations = server/migrations
+//    (../../ from server/dist/database/ walks database -> dist -> server, so the dist/
+//     level is consumed; the resolved path is server/migrations, NOT server/dist/migrations)
+// Task 13's Dockerfile copies server/migrations -> server/migrations (load-bearing) and also
+// -> server/dist/migrations to satisfy the documented layout / brief layout check.
 export function resolveMigrationsFolder(): string {
   return fileURLToPath(new URL('../../migrations', import.meta.url));
 }
