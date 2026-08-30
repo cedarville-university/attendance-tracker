@@ -175,7 +175,18 @@ The federated credential is always:
 - **subject** — `repo:cedarville-university/attendance-tracker:environment:<ENV>`
 - **audience** — `api://AzureADTokenExchange`
 
-### Step 1 — Resource group + first `main.bicep` deploy
+> **Two-pass bootstrap.** `web.bicep` and `worker-job.bicep` declare their
+> `configuration.secrets[]` as Key Vault references, which the Container Apps
+> resource provider resolves **when it provisions the revision**. On a
+> from-scratch environment those secrets do not exist yet, so the **first**
+> `az deployment group create` provisions the whole foundation (identity, ACR,
+> Log Analytics, App Insights, Key Vault + its managed-identity role assignment,
+> Postgres, the Container Apps environment) but the `web` app and `worker` job
+> **fail** with `unable to fetch secret '…' using Managed identity`. That is
+> expected. Seed the secrets (Step 2), then run the **same** deploy command
+> again — it is idempotent and `web` + `worker` provision on the second pass.
+
+### Step 1 — Resource group + first `main.bicep` deploy (foundation)
 
 `postgresAdministratorPassword` is **not** a CLI parameter: every
 `environments/<ENV>.bicepparam` resolves it with
@@ -192,6 +203,13 @@ az group create -n rg-attendance-<ENV> -l eastus
 PG_PW="$(openssl rand -base64 24)"          # keep this value — reused in Step 2 and Step 5
 export PG_ADMIN_PASSWORD="$PG_PW"           # consumed by <ENV>.bicepparam's readEnvironmentVariable
 
+# Recommended: schema-check against live ARM before the real create.
+az deployment group validate -g rg-attendance-<ENV> \
+  -f infra/azure/main.bicep \
+  -p infra/azure/environments/<ENV>.bicepparam \
+  -p containerImage='mcr.microsoft.com/k8se/quickstart:latest' -o table
+
+# First pass — foundation succeeds; web + worker fail (secrets not seeded yet).
 az deployment group create -g rg-attendance-<ENV> \
   -f infra/azure/main.bicep \
   -p infra/azure/environments/<ENV>.bicepparam \
@@ -199,19 +217,36 @@ az deployment group create -g rg-attendance-<ENV> \
   --query 'properties.outputs' -o json | tee /tmp/<ENV>-outputs.json
 ```
 
-Expected outputs: `containerRegistryLoginServer`, `managedIdentityClientId`,
-`managedIdentityPrincipalId`, `keyVaultName`, `keyVaultUri`, `webAppName`,
-`workerJobName`, `postgresFqdn`, `appInsightsConnectionString`.
+Even though the deployment reports `Failed`, the outputs are still emitted and the
+foundation resources exist. Expected outputs: `containerRegistryLoginServer`,
+`managedIdentityClientId`, `managedIdentityPrincipalId`, `keyVaultName`,
+`keyVaultUri`, `webAppName`, `workerJobName`, `postgresFqdn`,
+`appInsightsConnectionString`. (Grab the values from `az deployment group show -g
+rg-attendance-<ENV> -n main --query properties.outputs` if the pipe did not
+capture them.)
 
-### Step 2 — Seed the five Key Vault secrets
+### Step 2 — Grant yourself vault access, seed the five secrets, re-deploy
 
-Full commands and ordering are in
-[Seed Key Vault secrets](#seed-key-vault-secrets); the vault name is the
-`keyVaultName` output from Step 1. There are exactly five: `database-url`,
-`card-fingerprint-secret`, `lti-tool-signing-keys-json`, `identity-api-key`,
-`appinsights-connection-string`. The signing-keys secret is produced by the
-committed generator (`scripts/generate-signing-keys.mjs` — emits a
-`[{ kid, privateKeyPkcs8Pem, status }]` array matching
+The Key Vault is created with **RBAC authorization** (`enableRbacAuthorization:
+true`). Subscription Owner / Contributor and directory "global admin" grant the
+management plane only — **no** data-plane access to secret *values*. The operator
+seeding secrets needs a data-plane role on the vault, e.g. **Key Vault Secrets
+Officer** (read+write secrets). Grant it once, scoped to the vault:
+
+```bash
+az role assignment create \
+  --assignee-object-id "$(az ad signed-in-user show --query id -o tsv)" \
+  --assignee-principal-type User \
+  --role "Key Vault Secrets Officer" \
+  --scope "$(az keyvault show -n "$(jq -r .keyVaultName.value /tmp/<ENV>-outputs.json)" --query id -o tsv)"
+# wait ~1-2 min for the assignment to propagate before the secret sets below
+```
+
+There are exactly five secrets: `database-url`, `card-fingerprint-secret`,
+`lti-tool-signing-keys-json`, `identity-api-key`, `appinsights-connection-string`
+(see also [Seed Key Vault secrets](#seed-key-vault-secrets)). The signing-keys
+secret is produced by the committed generator (`scripts/generate-signing-keys.mjs`
+— emits a `[{ kid, privateKeyPkcs8Pem, status }]` array matching
 `rawSigningKeyConfigArraySchema` in `server/src/lti/signing-keys.ts`; contains no
 key material itself):
 
@@ -227,10 +262,16 @@ az keyvault secret set --vault-name "$KV" --name card-fingerprint-secret \
 az keyvault secret set --vault-name "$KV" --name lti-tool-signing-keys-json \
   --value "$(node scripts/generate-signing-keys.mjs)"
 az keyvault secret set --vault-name "$KV" --name identity-api-key \
-  --value "<REAL_CEDARVILLE_PROXID_KEY_OR_PLACEHOLDER>"
+  --value "<REAL_CEDARVILLE_PROXID_KEY_OR_PLACEHOLDER>"   # dev: any placeholder (mock resolver, identityApiUrl='')
 az keyvault secret set --vault-name "$KV" --name appinsights-connection-string \
   --value "$AI_CS"
 ```
+
+Then re-run the **identical** deploy command from Step 1 (second pass). It should
+report `Succeeded`; `web` + `worker` now provision. The `web` revision may still
+show `ActivationFailed` until Task 19 pushes the real application image — the
+`mcr.microsoft.com/k8se/quickstart` placeholder does not listen on port 3000 or
+serve `/health/*`; that is expected at this stage.
 
 ### Step 3 — Federated identity credential
 
