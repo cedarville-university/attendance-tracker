@@ -24,6 +24,14 @@ param alertEmail string
 @description('Object ID of the Postgres administrator (an Entra group is recommended). Empty = password auth only.')
 param postgresAdminObjectId string = ''
 param postgresAdminLogin string = 'attendance_admin'
+@description('Container image ref (registry/repo:tag). Supplied by the deploy pipeline on the CLI; never committed to a .bicepparam.')
+param containerImage string = 'REPLACED_BY_PIPELINE'
+@description('Postgres administrator password. Supplied on the CLI from the bootstrap / deploy workflow; never committed (spec §36). The empty default keeps `az bicep build-params` working — every real deployment overrides it with `-p postgresAdministratorPassword=...`.')
+@secure()
+param postgresAdministratorPassword string = ''
+@description('Identity API base URL for the real ProxID resolver (decision #3). Non-secret; empty disables the HTTP resolver.')
+param identityApiUrl string = ''
+param identityApiKeyName string = 'attendance-resolver'
 
 var namePrefix = 'attendance-${environmentName}'
 var tags = {
@@ -75,6 +83,91 @@ module keyvault 'modules/keyvault.bicep' = {
   }
 }
 
+module postgres 'modules/postgres.bicep' = {
+  name: 'postgres'
+  params: {
+    name: 'psql-${namePrefix}'
+    location: location
+    tags: tags
+    skuName: postgresSkuName
+    skuTier: postgresSkuTier
+    storageGb: postgresStorageGb
+    backupRetentionDays: postgresBackupRetentionDays
+    geoRedundantBackup: postgresGeoRedundantBackup
+    administratorLogin: postgresAdminLogin
+    administratorPassword: postgresAdministratorPassword
+    aadAdminObjectId: postgresAdminObjectId
+  }
+}
+
+module caeEnv 'modules/containerapp-env.bicep' = {
+  name: 'cae'
+  params: {
+    name: 'cae-${namePrefix}'
+    location: location
+    tags: tags
+    logAnalyticsCustomerId: observability.outputs.workspaceCustomerId
+    logAnalyticsSharedKey: observability.outputs.workspacePrimarySharedKey
+  }
+}
+
+module web 'modules/web.bicep' = {
+  name: 'web'
+  params: {
+    name: 'ca-${namePrefix}-web'
+    location: location
+    tags: tags
+    environmentId: caeEnv.outputs.id
+    image: containerImage
+    managedIdentityId: identity.outputs.id
+    managedIdentityClientId: identity.outputs.clientId
+    acrLoginServer: registry.outputs.loginServer
+    keyVaultUri: keyvault.outputs.uri
+    appBaseUrl: 'https://${appHostname}'
+    allowedTargetLinkUris: 'https://${appHostname}/index.html'
+    cpu: containerCpu
+    memory: containerMemory
+    minReplicas: webMinReplicas
+    maxReplicas: webMaxReplicas
+    identityApiUrl: identityApiUrl
+    identityApiKeyName: identityApiKeyName
+  }
+}
+
+module workerJob 'modules/worker-job.bicep' = {
+  name: 'worker'
+  params: {
+    name: 'caj-${namePrefix}-grade-worker'
+    location: location
+    tags: tags
+    environmentId: caeEnv.outputs.id
+    image: containerImage
+    managedIdentityId: identity.outputs.id
+    managedIdentityClientId: identity.outputs.clientId
+    acrLoginServer: registry.outputs.loginServer
+    keyVaultUri: keyvault.outputs.uri
+    identityApiUrl: identityApiUrl
+    identityApiKeyName: identityApiKeyName
+    appBaseUrl: 'https://${appHostname}'
+    allowedTargetLinkUris: 'https://${appHostname}/index.html'
+    cpu: containerCpu
+    memory: containerMemory
+  }
+}
+
+module alerts 'modules/alerts.bicep' = {
+  name: 'alerts'
+  params: {
+    namePrefix: namePrefix
+    location: location
+    tags: tags
+    alertEmail: alertEmail
+    appInsightsId: resourceId('Microsoft.Insights/components', 'appi-${namePrefix}')
+    postgresResourceId: resourceId('Microsoft.DBforPostgreSQL/flexibleServers', 'psql-${namePrefix}')
+    webContainerAppId: web.outputs.name
+  }
+}
+
 output containerRegistryLoginServer string = registry.outputs.loginServer
 output managedIdentityId string = identity.outputs.id
 output managedIdentityClientId string = identity.outputs.clientId
@@ -84,3 +177,7 @@ output keyVaultUri string = keyvault.outputs.uri
 output logAnalyticsWorkspaceId string = observability.outputs.workspaceId
 @secure()
 output appInsightsConnectionString string = observability.outputs.appInsightsConnectionString
+output webAppFqdn string = web.outputs.fqdn
+output webAppName string = web.outputs.name
+output workerJobName string = workerJob.outputs.name
+output postgresFqdn string = postgres.outputs.fqdn

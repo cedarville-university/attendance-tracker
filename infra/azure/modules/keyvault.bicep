@@ -4,6 +4,7 @@ param location string
 param tags object = {}
 param tenantId string = subscription().tenantId
 @description('Principal ID of the managed identity that needs Key Vault Secrets User.')
+#disable-next-line secure-secrets-in-params
 param secretsReaderPrincipalId string
 @description('Optional additional principal (e.g. the deploy identity) that needs Secrets User for the migrate job.')
 param deployPrincipalId string = ''

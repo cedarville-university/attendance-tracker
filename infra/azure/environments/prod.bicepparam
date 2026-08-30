@@ -15,3 +15,5 @@ param webMaxReplicas = 5
 param logRetentionDays = 90
 param acrSku = 'Standard'
 param alertEmail = 'CHANGEME@example.edu'
+param identityApiUrl = ''
+param identityApiKeyName = 'attendance-resolver'

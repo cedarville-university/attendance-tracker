@@ -31,5 +31,8 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
 
 output workspaceId string = workspace.id
 output workspaceCustomerId string = workspace.properties.customerId
+@description('Primary shared key for the Container Apps managed environment log sink. Resolved inside this module so callers do not need a start-of-deployment listKeys() on a module output.')
+@secure()
+output workspacePrimarySharedKey string = workspace.listKeys().primarySharedKey
 @secure()
 output appInsightsConnectionString string = appInsights.properties.ConnectionString
