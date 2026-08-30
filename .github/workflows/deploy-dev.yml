@@ -88,7 +88,7 @@ jobs:
           PG_NAME=$(az postgres flexible-server list -g "${{ vars.RESOURCE_GROUP }}" --query '[0].name' -o tsv)
           echo "pg=$PG_NAME" >> "$GITHUB_OUTPUT"
           az postgres flexible-server firewall-rule create \
-            -g "${{ vars.RESOURCE_GROUP }}" -n "$PG_NAME" \
+            -g "${{ vars.RESOURCE_GROUP }}" -s "$PG_NAME" \
             --rule-name "ci-migrate-${{ github.run_id }}" \
             --start-ip-address "$RUNNER_IP" --end-ip-address "$RUNNER_IP"
       - name: Run migrations
@@ -101,7 +101,7 @@ jobs:
         if: always()
         run: |
           az postgres flexible-server firewall-rule delete \
-            -g "${{ vars.RESOURCE_GROUP }}" -n "${{ steps.fw.outputs.pg }}" \
+            -g "${{ vars.RESOURCE_GROUP }}" -s "${{ steps.fw.outputs.pg }}" \
             --rule-name "ci-migrate-${{ github.run_id }}" --yes || true
 
   deploy:
@@ -115,6 +115,8 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Ensure containerapp CLI extension
+        run: az extension add --name containerapp --upgrade --only-show-errors
       - name: Roll web + worker to the new image
         run: |
           az containerapp update -g "${{ vars.RESOURCE_GROUP }}" -n "${{ vars.WEB_APP_NAME }}" \
