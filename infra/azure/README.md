@@ -172,8 +172,17 @@ Placeholders used below:
 The federated credential is always:
 
 - **issuer** — `https://token.actions.githubusercontent.com`
-- **subject** — `repo:cedarville-university/attendance-tracker:environment:<ENV>`
+- **subject** — `repo:cedarville-university@<ORG_ID>/attendance-tracker@<REPO_ID>:environment:<ENV>`
+  (for this repo: `repo:cedarville-university@48759751/attendance-tracker@1345554752:environment:<ENV>`).
+  GitHub presents this `name@id` form, **not** the plain
+  `repo:cedarville-university/attendance-tracker:environment:<ENV>` — the Azure
+  federated credential `--subject` must match the presented value exactly.
 - **audience** — `api://AzureADTokenExchange`
+
+The exact subject prefix comes from
+`gh api /repos/cedarville-university/attendance-tracker/actions/oidc/customization/sub`
+(field `sub_claim_prefix`); the same prefix applies to every environment (`stage`,
+`prod`) because it is a repo-level property.
 
 > **Two-pass bootstrap.** `web.bicep` and `worker-job.bicep` declare their
 > `configuration.secrets[]` as Key Vault references, which the Container Apps
@@ -280,8 +289,14 @@ az identity federated-credential create \
   --name "github-env-<ENV>" \
   --identity-name "id-attendance-<ENV>" -g rg-attendance-<ENV> \
   --issuer "https://token.actions.githubusercontent.com" \
-  --subject "repo:cedarville-university/attendance-tracker:environment:<ENV>" \
+  --subject "repo:cedarville-university@<ORG_ID>/attendance-tracker@<REPO_ID>:environment:<ENV>" \
   --audiences "api://AzureADTokenExchange"
+# dev values: <ORG_ID>=48759751, <REPO_ID>=1345554752 — i.e.
+#   --subject "repo:cedarville-university@48759751/attendance-tracker@1345554752:environment:dev"
+# The name@id prefix is what GitHub actually presents (not the plain
+# repo:cedarville-university/attendance-tracker:...); confirm it with
+#   gh api /repos/cedarville-university/attendance-tracker/actions/oidc/customization/sub
+# (field sub_claim_prefix). It is repo-level, so stage and prod use the same prefix.
 ```
 
 ### Step 4 — Grant the managed identity deploy permissions

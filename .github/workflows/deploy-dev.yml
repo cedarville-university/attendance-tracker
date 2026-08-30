@@ -63,7 +63,8 @@ jobs:
         run: |
           az deployment group create -g "${{ vars.RESOURCE_GROUP }}" \
             -f infra/azure/main.bicep -p infra/azure/environments/dev.bicepparam \
-            -p containerImage='${{ needs.build-push.outputs.image }}'
+            -p containerImage='${{ needs.build-push.outputs.image }}' \
+            -p deployRoleAssignments=false
 
   migrate:
     needs: [build-push, infra]

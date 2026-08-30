@@ -8,6 +8,8 @@ param tenantId string = subscription().tenantId
 param secretsReaderPrincipalId string
 @description('Optional additional principal (e.g. the deploy identity) that needs Secrets User for the migrate job.')
 param deployPrincipalId string = ''
+@description('When false, skip the Key Vault Secrets User role assignments (already created at bootstrap by an Owner; CI runs as a Contributor that cannot write role assignments).')
+param deployRoleAssignments bool = true
 
 resource kv 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: name
@@ -26,7 +28,7 @@ resource kv 'Microsoft.KeyVault/vaults@2023-07-01' = {
 
 var secretsUserRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
 
-resource readerAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource readerAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployRoleAssignments) {
   name: guid(kv.id, secretsReaderPrincipalId, 'KeyVaultSecretsUser')
   scope: kv
   properties: {
@@ -36,7 +38,7 @@ resource readerAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' =
   }
 }
 
-resource deployAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(deployPrincipalId)) {
+resource deployAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployRoleAssignments && !empty(deployPrincipalId)) {
   name: guid(kv.id, deployPrincipalId, 'KeyVaultSecretsUser')
   scope: kv
   properties: {

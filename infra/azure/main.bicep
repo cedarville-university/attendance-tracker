@@ -32,6 +32,8 @@ param postgresAdministratorPassword string
 @description('Identity API base URL for the real ProxID resolver (decision #3). Non-secret; empty disables the HTTP resolver.')
 param identityApiUrl string = ''
 param identityApiKeyName string = 'attendance-resolver'
+@description('When false, skip creating the managed-identity role assignments in the foundation modules. Set false for CI/pipeline deploys — the assignments are created once at bootstrap by an Owner. Default true so a first bootstrap works.')
+param deployRoleAssignments bool = true
 
 var namePrefix = 'attendance-${environmentName}'
 var tags = {
@@ -69,6 +71,7 @@ module registry 'modules/registry.bicep' = {
     tags: tags
     sku: acrSku
     pullPrincipalId: identity.outputs.principalId
+    deployRoleAssignments: deployRoleAssignments
   }
 }
 
@@ -80,6 +83,7 @@ module keyvault 'modules/keyvault.bicep' = {
     location: location
     tags: tags
     secretsReaderPrincipalId: identity.outputs.principalId
+    deployRoleAssignments: deployRoleAssignments
   }
 }
 

@@ -6,6 +6,8 @@ param tags object = {}
 param sku string = 'Standard'
 @description('Principal ID of the managed identity that needs AcrPull.')
 param pullPrincipalId string
+@description('When false, skip the AcrPull role assignment (already created at bootstrap by an Owner; CI runs as a Contributor that cannot write role assignments).')
+param deployRoleAssignments bool = true
 
 resource acr 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = {
   name: name
@@ -19,7 +21,7 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = {
 }
 
 // AcrPull for the managed identity (role definition id is well-known and constant).
-resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployRoleAssignments) {
   name: guid(acr.id, pullPrincipalId, 'AcrPull')
   scope: acr
   properties: {
