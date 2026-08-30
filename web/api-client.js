@@ -38,7 +38,7 @@ export function getCsrfToken() {
  * The Content-Type header is conditional because Fastify's JSON body parser
  * rejects a request that declares `Content-Type: application/json` but carries
  * no body with `400 Body cannot be empty` -- which is exactly the shape of the
- * bodyless mutations here (close / reopen / grade-sync retry).
+ * bodyless mutations here (close / grade-sync retry).
  * @param {string} url
  * @param {{ method?: string, body?: unknown, headers?: Record<string,string> }} [options]
  * @returns {Promise<Response>}
