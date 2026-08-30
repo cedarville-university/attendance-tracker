@@ -31,8 +31,14 @@ export function getCsrfToken() {
 }
 
 /**
- * fetch() wrapper: for a non-GET method, sets a JSON content type, JSON-encodes
- * `body`, and attaches x-csrf-token. GET requests pass straight through.
+ * fetch() wrapper: for a non-GET method, JSON-encodes `body` (when present),
+ * sets a JSON content type ONLY when a body is actually sent, and attaches
+ * x-csrf-token. GET requests pass straight through.
+ *
+ * The Content-Type header is conditional because Fastify's JSON body parser
+ * rejects a request that declares `Content-Type: application/json` but carries
+ * no body with `400 Body cannot be empty` -- which is exactly the shape of the
+ * bodyless mutations here (close / reopen / grade-sync retry).
  * @param {string} url
  * @param {{ method?: string, body?: unknown, headers?: Record<string,string> }} [options]
  * @returns {Promise<Response>}
@@ -42,14 +48,15 @@ export function apiFetch(url, options = {}) {
   if (method === 'GET') {
     return fetch(url, { method: 'GET', headers: { Accept: 'application/json', ...(options.headers ?? {}) } });
   }
+  const hasBody = options.body !== undefined;
   return fetch(url, {
     method,
     headers: {
-      'Content-Type': 'application/json',
+      ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
       Accept: 'application/json',
       'x-csrf-token': csrfToken ?? '',
       ...(options.headers ?? {}),
     },
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    body: hasBody ? JSON.stringify(options.body) : undefined,
   });
 }

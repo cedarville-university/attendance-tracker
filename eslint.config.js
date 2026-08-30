@@ -28,14 +28,25 @@ export default [
       },
     },
   },
+  {
+    // The Playwright webServer launcher is a plain Node ESM script (not TS).
+    files: ['e2e/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
   ...tseslint.configs.recommended.map((config) => ({
     ...config,
     // Root-level config files (drizzle.config.ts, vitest.config.ts) are TS too --
     // without this glob `eslint .` lints them with the plain JS parser and chokes.
-    files: ['server/**/*.ts', '*.ts'],
+    files: ['server/**/*.ts', 'e2e/**/*.ts', '*.ts'],
   })),
   {
-    files: ['server/**/*.ts', '*.ts'],
+    files: ['server/**/*.ts', 'e2e/**/*.ts', '*.ts'],
     languageOptions: {
       globals: {
         ...globals.node,
