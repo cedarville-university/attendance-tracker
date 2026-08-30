@@ -153,9 +153,161 @@ az keyvault secret set --vault-name "$KV" --name appinsights-connection-string \
 > a `.bicepparam` file, in a deployment parameter, or in shell history that is
 > checked in. The `.bicepparam` files carry non-secret configuration only.
 
-## TODO (Task 18)
+## GitHub OIDC federation (per environment)
 
-GitHub OIDC federated-credential setup for the deploy identity (federated
-credential subject/issuer, `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` /
-`AZURE_SUBSCRIPTION_ID` repo configuration, and the role assignments the deploy
-identity needs on each resource group). Filled in by Task 18.
+One-time bootstrap that stands up an environment's resource group, seeds its Key
+Vault, and wires GitHub Actions to deploy into it with a federated (password-less)
+credential. Run it once per `<ENV>` (`dev`, then `stage`, then `prod`); every
+step is parameterised so the three runs differ only in `<ENV>`.
+
+Placeholders used below:
+
+| Placeholder | Meaning | Example |
+| --- | --- | --- |
+| `<SUBSCRIPTION_ID>` | target Azure subscription GUID | `00000000-0000-0000-0000-000000000000` |
+| `<ENV>` | environment name | `dev` / `stage` / `prod` |
+| `rg-attendance-<ENV>` | resource group | `rg-attendance-dev` |
+| `id-attendance-<ENV>` | user-assigned managed identity (created by `main.bicep`) | `id-attendance-dev` |
+
+The federated credential is always:
+
+- **issuer** — `https://token.actions.githubusercontent.com`
+- **subject** — `repo:cedarville-university/attendance-tracker:environment:<ENV>`
+- **audience** — `api://AzureADTokenExchange`
+
+### Step 1 — Resource group + first `main.bicep` deploy
+
+`postgresAdministratorPassword` is **not** a CLI parameter: every
+`environments/<ENV>.bicepparam` resolves it with
+`readEnvironmentVariable('PG_ADMIN_PASSWORD')` at param-file compile time, so it
+must be exported into the environment **before** the `az deployment` call (see
+[Secrets supplied at deploy time](#secrets-supplied-at-deploy-time)). The web app
+starts on the Microsoft quickstart image; Task 19's first pipeline run replaces it
+with the real `registry/repo:sha`.
+
+```bash
+az account set --subscription "<SUBSCRIPTION_ID>"
+az group create -n rg-attendance-<ENV> -l eastus
+
+PG_PW="$(openssl rand -base64 24)"          # keep this value — reused in Step 2 and Step 5
+export PG_ADMIN_PASSWORD="$PG_PW"           # consumed by <ENV>.bicepparam's readEnvironmentVariable
+
+az deployment group create -g rg-attendance-<ENV> \
+  -f infra/azure/main.bicep \
+  -p infra/azure/environments/<ENV>.bicepparam \
+  -p containerImage='mcr.microsoft.com/k8se/quickstart:latest' \
+  --query 'properties.outputs' -o json | tee /tmp/<ENV>-outputs.json
+```
+
+Expected outputs: `containerRegistryLoginServer`, `managedIdentityClientId`,
+`managedIdentityPrincipalId`, `keyVaultName`, `keyVaultUri`, `webAppName`,
+`workerJobName`, `postgresFqdn`, `appInsightsConnectionString`.
+
+### Step 2 — Seed the five Key Vault secrets
+
+Full commands and ordering are in
+[Seed Key Vault secrets](#seed-key-vault-secrets); the vault name is the
+`keyVaultName` output from Step 1. There are exactly five: `database-url`,
+`card-fingerprint-secret`, `lti-tool-signing-keys-json`, `identity-api-key`,
+`appinsights-connection-string`. The signing-keys secret is produced by the
+committed generator (`scripts/generate-signing-keys.mjs` — emits a
+`[{ kid, privateKeyPkcs8Pem, status }]` array matching
+`rawSigningKeyConfigArraySchema` in `server/src/lti/signing-keys.ts`; contains no
+key material itself):
+
+```bash
+KV=$(jq -r .keyVaultName.value /tmp/<ENV>-outputs.json)
+PG_FQDN=$(jq -r .postgresFqdn.value /tmp/<ENV>-outputs.json)
+AI_CS=$(jq -r .appInsightsConnectionString.value /tmp/<ENV>-outputs.json)
+
+az keyvault secret set --vault-name "$KV" --name database-url \
+  --value "postgres://attendance_admin:${PG_PW}@${PG_FQDN}:5432/attendance?sslmode=require"
+az keyvault secret set --vault-name "$KV" --name card-fingerprint-secret \
+  --value "$(openssl rand -base64 32)"
+az keyvault secret set --vault-name "$KV" --name lti-tool-signing-keys-json \
+  --value "$(node scripts/generate-signing-keys.mjs)"
+az keyvault secret set --vault-name "$KV" --name identity-api-key \
+  --value "<REAL_CEDARVILLE_PROXID_KEY_OR_PLACEHOLDER>"
+az keyvault secret set --vault-name "$KV" --name appinsights-connection-string \
+  --value "$AI_CS"
+```
+
+### Step 3 — Federated identity credential
+
+```bash
+az identity federated-credential create \
+  --name "github-env-<ENV>" \
+  --identity-name "id-attendance-<ENV>" -g rg-attendance-<ENV> \
+  --issuer "https://token.actions.githubusercontent.com" \
+  --subject "repo:cedarville-university/attendance-tracker:environment:<ENV>" \
+  --audiences "api://AzureADTokenExchange"
+```
+
+### Step 4 — Grant the managed identity deploy permissions
+
+Key Vault Secrets User is already assigned by `keyvault.bicep`. The deploy
+identity additionally needs to push images and update the Container App / job:
+
+```bash
+MI_PRINCIPAL=$(jq -r .managedIdentityPrincipalId.value /tmp/<ENV>-outputs.json)
+SUB="<SUBSCRIPTION_ID>"
+RG_SCOPE="/subscriptions/$SUB/resourceGroups/rg-attendance-<ENV>"
+
+az role assignment create --assignee-object-id "$MI_PRINCIPAL" \
+  --assignee-principal-type ServicePrincipal --role "AcrPush" --scope "$RG_SCOPE"
+az role assignment create --assignee-object-id "$MI_PRINCIPAL" \
+  --assignee-principal-type ServicePrincipal --role "Contributor" --scope "$RG_SCOPE"
+```
+
+(Phase 8 tightens `Contributor` to `Container Apps Contributor` +
+`Managed Identity Operator`.)
+
+### Step 5 — GitHub Environment + variables
+
+```bash
+gh api -X PUT repos/cedarville-university/attendance-tracker/environments/<ENV>
+
+for kv in \
+  "AZURE_CLIENT_ID=$(jq -r .managedIdentityClientId.value /tmp/<ENV>-outputs.json)" \
+  "AZURE_TENANT_ID=$(az account show --query tenantId -o tsv)" \
+  "AZURE_SUBSCRIPTION_ID=<SUBSCRIPTION_ID>" \
+  "ACR_LOGIN_SERVER=$(jq -r .containerRegistryLoginServer.value /tmp/<ENV>-outputs.json)" \
+  "RESOURCE_GROUP=rg-attendance-<ENV>" \
+  "WEB_APP_NAME=$(jq -r .webAppName.value /tmp/<ENV>-outputs.json)" \
+  "WORKER_JOB_NAME=$(jq -r .workerJobName.value /tmp/<ENV>-outputs.json)" \
+  "POSTGRES_FQDN=$(jq -r .postgresFqdn.value /tmp/<ENV>-outputs.json)" \
+  "KEY_VAULT_NAME=$(jq -r .keyVaultName.value /tmp/<ENV>-outputs.json)" \
+  "APP_HOSTNAME=attendance-<ENV>.CHANGEME.edu" ; do
+  gh variable set "${kv%%=*}" --env <ENV> --body "${kv#*=}"
+done
+```
+
+Then set the one **environment secret** (not a variable) on the same environment:
+
+```bash
+gh secret set PG_ADMIN_PASSWORD --env <ENV> --body "$PG_PW"
+```
+
+`PG_ADMIN_PASSWORD` is stored as a GitHub **environment secret** because it is the
+Postgres admin password used at deploy time **and** the value every workflow job
+exports before compiling a `.bicepparam` (its `readEnvironmentVariable` has no
+fallback — the compile fails `BCP427` if it is unset). It must equal the `$PG_PW`
+used in Steps 1–2.
+
+### GitHub Environment variables the `deploy-*.yml` workflows expect
+
+One row per variable; all ten are plain environment **variables** (the sole
+secret, `PG_ADMIN_PASSWORD`, is covered above).
+
+| Variable | Source | Example |
+| --- | --- | --- |
+| `AZURE_CLIENT_ID` | Step 1 output `managedIdentityClientId` | `11111111-2222-3333-4444-555555555555` |
+| `AZURE_TENANT_ID` | `az account show --query tenantId -o tsv` | `66666666-7777-8888-9999-000000000000` |
+| `AZURE_SUBSCRIPTION_ID` | `<SUBSCRIPTION_ID>` (Step 1 `az account set`) | `00000000-0000-0000-0000-000000000000` |
+| `ACR_LOGIN_SERVER` | Step 1 output `containerRegistryLoginServer` | `acrattendancedev.azurecr.io` |
+| `RESOURCE_GROUP` | fixed: `rg-attendance-<ENV>` | `rg-attendance-dev` |
+| `WEB_APP_NAME` | Step 1 output `webAppName` | `attendance-web-dev` |
+| `WORKER_JOB_NAME` | Step 1 output `workerJobName` | `attendance-grade-worker-dev` |
+| `POSTGRES_FQDN` | Step 1 output `postgresFqdn` | `psql-attendance-dev.postgres.database.azure.com` |
+| `KEY_VAULT_NAME` | Step 1 output `keyVaultName` | `kv-attendance-dev` |
+| `APP_HOSTNAME` | operator-chosen public hostname (matches `appHostname` in the `.bicepparam`) | `attendance-dev.cedarville.edu` |
