@@ -44,3 +44,30 @@ export function computeAbsentRows({ rosterState, scannedIds }) {
     isAbsent: true,
   }));
 }
+
+/**
+ * Same idea as computeAbsentRows, but sourced from the live Canvas roster index
+ * (course-roster.js buildMemberIndex) so each absent row carries the member's
+ * display name rather than only an ID.
+ *
+ * @param {Object} args
+ * @param {Map<string, {institutionalId: string, displayName: string|null}>} args.memberIndex
+ * @param {Set<string>} args.scannedIds - normalized institutional IDs already scanned this session
+ * @returns {AbsentRow[]}
+ */
+export function computeAbsentRowsFromMembers({ memberIndex, scannedIds }) {
+  const rows = [];
+  for (const [normId, member] of memberIndex.entries()) {
+    if (scannedIds.has(normId)) continue;
+    rows.push({
+      id: `absent-${normId}`,
+      timestamp: '',
+      rawCardCode: '',
+      institutionalId: member.institutionalId,
+      displayName: member.displayName ?? null,
+      status: '',
+      isAbsent: true,
+    });
+  }
+  return rows;
+}

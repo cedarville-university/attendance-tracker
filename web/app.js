@@ -14,7 +14,7 @@ import { loadRosterCsv, buildRosterIndex, normalizeId } from './roster.js';
 import { fetchCourseRoster, refreshCourseRoster, buildMemberIndex, countEligible } from './course-roster.js';
 import { ScanPipeline } from './scan-pipeline.js';
 import { downloadAttendanceCsv, downloadCsvText } from './csv.js';
-import { computeAbsentRows } from './absentees.js';
+import { computeAbsentRows, computeAbsentRowsFromMembers } from './absentees.js';
 import * as storage from './storage.js';
 import * as ui from './ui.js';
 import { bootstrapSession } from './api-client.js';
@@ -72,6 +72,7 @@ async function loadCanvasRoster({ refresh = false } = {}) {
   canvasRosterState.loaded = true;
   ui.renderCanvasRoster(result);
   ui.setRosterCountText(countEligible(result.members));
+  refreshExportControls();
 }
 
 // ---- Scan pipeline ----------------------------------------------------------
@@ -319,7 +320,10 @@ elements.retryGradeSyncBtn.addEventListener('click', async () => {
 // Called after any change to rosterState (load/column-select/clear/enable):
 // refreshes whether the Present/Absent export mode selector is shown.
 function refreshExportControls() {
-  ui.setExportControlsAvailability({ rosterActive: rosterState.enabled && rosterState.index.size > 0 });
+  const rosterActive =
+    (canvasRosterState.loaded && canvasRosterState.index.size > 0) ||
+    (rosterState.enabled && rosterState.index.size > 0);
+  ui.setExportControlsAvailability({ rosterActive });
 }
 
 elements.loadRosterBtn.addEventListener('click', () => {
@@ -415,7 +419,9 @@ elements.downloadCsvBtn.addEventListener('click', async () => {
     return;
   }
 
-  const rosterActive = rosterState.enabled && rosterState.index.size > 0;
+  const canvasRosterActive = canvasRosterState.loaded && canvasRosterState.index.size > 0;
+  const csvRosterActive = rosterState.enabled && rosterState.index.size > 0;
+  const rosterActive = canvasRosterActive || csvRosterActive;
   const mode = rosterActive ? elements.exportModeSelect.value : 'present';
   const presentRecords = scanPipeline.getRecords();
 
@@ -428,7 +434,9 @@ elements.downloadCsvBtn.addEventListener('click', async () => {
   }
 
   const scannedIds = new Set(presentRecords.map((record) => record.institutionalId).filter(Boolean).map(normalizeId));
-  const absentRows = computeAbsentRows({ rosterState, scannedIds });
+  const absentRows = canvasRosterActive
+    ? computeAbsentRowsFromMembers({ memberIndex: canvasRosterState.index, scannedIds })
+    : computeAbsentRows({ rosterState, scannedIds });
 
   if (absentRows.length === 0) {
     ui.showAppMessage('info', 'No absent students found — everyone on the roster was scanned.');
