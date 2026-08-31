@@ -31,6 +31,16 @@ export const elements = {
   rosterRowCount: document.getElementById('roster-row-count'),
   rosterIdColumnSelect: document.getElementById('roster-id-column-select'),
 
+  courseContext: document.getElementById('course-context'),
+  courseContextName: document.getElementById('course-context-name'),
+  courseContextInstitution: document.getElementById('course-context-institution'),
+  courseContextInstructor: document.getElementById('course-context-instructor'),
+  courseContextRosterCount: document.getElementById('course-context-roster-count'),
+  refreshRosterBtn: document.getElementById('btn-refresh-roster'),
+  canvasRosterStatus: document.getElementById('canvas-roster-status'),
+  canvasRosterTableBody: document.getElementById('canvas-roster-table-body'),
+  canvasRosterEmpty: document.getElementById('canvas-roster-empty'),
+
   latestScanPanel: document.getElementById('latest-scan-panel'),
   latestScanStatusText: document.getElementById('latest-scan-status-text'),
   latestScanName: document.getElementById('latest-scan-name'),
@@ -132,6 +142,66 @@ export function setRosterStatus({ filename, rowCount, headers, selectedHeader })
 export function setRosterControlsAvailability({ hasRows, hasIdColumn }) {
   elements.rosterEnableToggle.disabled = !(hasRows && hasIdColumn);
   elements.clearRosterBtn.disabled = !hasRows;
+}
+
+// ---- Canvas course context + roster ------------------------------------
+
+/** @param {{user?: {displayName?: string}, institution?: {name?: string}, course?: {label?: string, title?: string}}} me */
+export function renderCourseContext(me) {
+  const course = me?.course ?? {};
+  elements.courseContextName.textContent = course.title || course.label || '—';
+  elements.courseContextInstitution.textContent = me?.institution?.name || '—';
+  elements.courseContextInstructor.textContent = me?.user?.displayName || '—';
+  elements.courseContext.hidden = false;
+}
+
+/** @param {number} count */
+export function setRosterCountText(count) {
+  elements.courseContextRosterCount.textContent = `${count} ${count === 1 ? 'student' : 'students'}`;
+}
+
+/** @param {string} iso @returns {string} */
+function shortTime(iso) {
+  if (!iso) return '';
+  try {
+    return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  } catch {
+    return iso;
+  }
+}
+
+/** @param {{members: import('./course-roster.js').CanvasRosterMember[], fetchedAt: string, stale: boolean}} roster */
+export function renderCanvasRoster({ members, fetchedAt, stale }) {
+  const body = elements.canvasRosterTableBody;
+  while (body.firstChild) body.removeChild(body.firstChild);
+
+  for (const member of members) {
+    const tr = document.createElement('tr');
+    const name = document.createElement('td');
+    name.textContent = member.displayName || '—';
+    const id = document.createElement('td');
+    id.textContent = member.institutionalId || '—';
+    const status = document.createElement('td');
+    status.textContent = member.eligibleForAttendance ? 'Enrolled' : member.status || '—';
+    tr.append(name, id, status);
+    body.appendChild(tr);
+  }
+
+  elements.canvasRosterEmpty.hidden = members.length > 0;
+  const when = shortTime(fetchedAt);
+  const staleNote = stale ? ' · showing the last cached copy (Canvas was unreachable)' : '';
+  elements.canvasRosterStatus.textContent = members.length
+    ? `${members.length} enrolled${when ? ` · updated ${when}` : ''}${staleNote}`
+    : `No students returned by Canvas${when ? ` · checked ${when}` : ''}`;
+  elements.refreshRosterBtn.disabled = false;
+}
+
+/** @param {{kind: string, status?: number, message?: string}} error */
+export function renderCanvasRosterError(error) {
+  const detail = error?.status ? ` (HTTP ${error.status})` : '';
+  elements.canvasRosterStatus.textContent =
+    `Couldn't load the Canvas roster${detail}. You can retry, or use the Manual Roster (CSV fallback) below.`;
+  elements.refreshRosterBtn.disabled = false;
 }
 
 // ---- Export controls -------------------------------------------------------

@@ -11,6 +11,12 @@
   <header class="app-header">
     <h1>Classroom Attendance Tracker</h1>
     <p class="app-subtitle">WebHID card-reader attendance tracking, launched from Canvas and backed by a course-scoped server.</p>
+    <dl id="course-context" class="course-context" hidden>
+      <div><dt>Course</dt><dd id="course-context-name">&mdash;</dd></div>
+      <div><dt>Institution</dt><dd id="course-context-institution">&mdash;</dd></div>
+      <div><dt>Instructor</dt><dd id="course-context-instructor">&mdash;</dd></div>
+      <div><dt>Roster</dt><dd id="course-context-roster-count">&mdash;</dd></div>
+    </dl>
   </header>
 
   <div id="app-messages" class="app-messages" role="status" aria-live="polite"></div>
@@ -29,9 +35,27 @@
       <summary>Settings</summary>
 
       <div class="settings-body">
+        <!-- Canvas Roster (Phase 4 / Task 22B) -->
+        <section class="panel" aria-labelledby="canvas-roster-heading">
+          <h2 id="canvas-roster-heading">Canvas Roster</h2>
+          <p id="canvas-roster-status" class="muted" role="status" aria-live="polite">Loading roster from Canvas&hellip;</p>
+          <div class="button-row">
+            <button id="btn-refresh-roster" type="button" class="secondary" disabled>Refresh from Canvas</button>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr><th>Name</th><th>Institutional ID</th><th>Status</th></tr>
+              </thead>
+              <tbody id="canvas-roster-table-body"></tbody>
+            </table>
+          </div>
+          <p id="canvas-roster-empty" class="muted" hidden>Canvas returned no students for this course.</p>
+        </section>
+
         <!-- Roster -->
         <section class="panel" aria-labelledby="roster-heading">
-          <h2 id="roster-heading">Expected Students / Class Roster</h2>
+          <h2 id="roster-heading">Manual Roster (CSV fallback)</h2>
           <label class="toggle-row">
             <input type="checkbox" id="roster-enable-toggle" disabled />
             Enable roster checking

@@ -11,6 +11,7 @@ import { DEBUG_MODE_DEFAULT } from './config.js';
 import * as diagnostics from './diagnostics.js';
 import { HidReader, isWebHidSupported, isSecureContext } from './hid-reader.js';
 import { loadRosterCsv, buildRosterIndex, normalizeId } from './roster.js';
+import { fetchCourseRoster, refreshCourseRoster, buildMemberIndex, countEligible } from './course-roster.js';
 import { ScanPipeline } from './scan-pipeline.js';
 import { downloadAttendanceCsv, downloadCsvText } from './csv.js';
 import { computeAbsentRows } from './absentees.js';
@@ -45,6 +46,33 @@ const rosterState = {
   idColumnHeader: null,
   index: new Map(),
 };
+
+// ---- Canvas roster state (owned here; course-roster.js provides pure helpers) ----
+
+const canvasRosterState = {
+  members: [],
+  index: new Map(), // normalized institutional ID -> CanvasRosterMember
+  fetchedAt: null,
+  stale: false,
+  loaded: false,
+};
+
+async function loadCanvasRoster({ refresh = false } = {}) {
+  elements.refreshRosterBtn.disabled = true;
+  const result = refresh ? await refreshCourseRoster() : await fetchCourseRoster();
+  if (!result.ok) {
+    ui.renderCanvasRosterError(result.error);
+    diagnostics.logEvent('error', { kind: 'canvas-roster-load-failed', message: result.error.message });
+    return;
+  }
+  canvasRosterState.members = result.members;
+  canvasRosterState.index = buildMemberIndex(result.members);
+  canvasRosterState.fetchedAt = result.fetchedAt;
+  canvasRosterState.stale = result.stale;
+  canvasRosterState.loaded = true;
+  ui.renderCanvasRoster(result);
+  ui.setRosterCountText(countEligible(result.members));
+}
 
 // ---- Scan pipeline ----------------------------------------------------------
 
@@ -367,6 +395,10 @@ elements.rosterEnableToggle.addEventListener('change', () => {
   schedulePersist();
 });
 
+elements.refreshRosterBtn.addEventListener('click', () => {
+  loadCanvasRoster({ refresh: true });
+});
+
 // ---- Attendance table / export -------------------------------------------------
 
 elements.downloadCsvBtn.addEventListener('click', async () => {
@@ -682,6 +714,8 @@ async function init() {
     // it here so no mutation goes out without a CSRF token.
     elements.startSessionBtn.disabled = true;
   } else {
+    ui.renderCourseContext(boot.me);
+    await loadCanvasRoster();
     // C1: resume an attendance session that is still open on the server (page
     // reload / Canvas re-launch) instead of silently dropping every scan or
     // creating a duplicate open session.
