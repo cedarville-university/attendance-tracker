@@ -59,11 +59,17 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      - name: Deploy Bicep (idempotent)
+      - name: Ensure containerapp CLI extension
+        run: az extension add --name containerapp --upgrade --only-show-errors
+      - name: Deploy Bicep (idempotent; pins the CURRENT image — the roll to the new image happens in the deploy job, after migrate)
         run: |
+          CURRENT_IMAGE=$(az containerapp show -g "${{ vars.RESOURCE_GROUP }}" -n "${{ vars.WEB_APP_NAME }}" \
+            --query 'properties.template.containers[0].image' -o tsv 2>/dev/null || true)
+          if [ -z "$CURRENT_IMAGE" ]; then CURRENT_IMAGE='mcr.microsoft.com/k8se/quickstart:latest'; fi
+          echo "infra pass pins containerImage=$CURRENT_IMAGE (new image ${{ needs.build-push.outputs.image }} is rolled post-migrate)"
           az deployment group create -g "${{ vars.RESOURCE_GROUP }}" \
             -f infra/azure/main.bicep -p infra/azure/environments/dev.bicepparam \
-            -p containerImage='${{ needs.build-push.outputs.image }}' \
+            -p containerImage="$CURRENT_IMAGE" \
             -p deployRoleAssignments=false
 
   migrate:
