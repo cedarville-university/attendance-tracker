@@ -17,8 +17,30 @@ param maxReplicas int
 @description('Identity API base URL for the real ProxID resolver (decision #3). Non-secret.')
 param identityApiUrl string
 param identityApiKeyName string
+@description('Bare public hostname for the Container App custom domain, e.g. attendance-dev.cedarville.edu. Empty or a CHANGEME placeholder disables the binding.')
+param appHostname string = ''
 
 var kvRef = '${keyVaultUri}secrets/'
+
+// Only bind a custom domain when a real hostname is supplied. Placeholder envs
+// (prod today still has appHostname = 'CHANGEME...') deploy cleanly with no binding.
+var useCustomDomain = !empty(appHostname) && !contains(toLower(appHostname), 'changeme')
+
+var environmentName = last(split(environmentId, '/'))
+
+resource managedEnv 'Microsoft.App/managedEnvironments@2024-03-01' existing = {
+  name: environmentName
+}
+
+resource webCert 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' = if (useCustomDomain) {
+  parent: managedEnv
+  name: 'cert-${replace(appHostname, '.', '-')}'
+  location: location
+  properties: {
+    subjectName: appHostname
+    domainControlValidation: 'CNAME'
+  }
+}
 
 resource app 'Microsoft.App/containerApps@2024-03-01' = {
   name: name
@@ -37,6 +59,13 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
         targetPort: 3000
         transport: 'auto'
         allowInsecure: false
+        customDomains: useCustomDomain ? [
+          {
+            name: appHostname
+            bindingType: 'SniEnabled'
+            certificateId: webCert.id
+          }
+        ] : null
       }
       registries: [
         { server: acrLoginServer, identity: managedIdentityId }

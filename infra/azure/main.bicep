@@ -129,6 +129,7 @@ module web 'modules/web.bicep' = {
     keyVaultUri: keyvault.outputs.uri
     appBaseUrl: 'https://${appHostname}'
     allowedTargetLinkUris: 'https://${appHostname}/index.html'
+    appHostname: appHostname
     cpu: containerCpu
     memory: containerMemory
     minReplicas: webMinReplicas
