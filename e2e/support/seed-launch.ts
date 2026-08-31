@@ -148,7 +148,7 @@ export async function seedInstructorLaunch(): Promise<SeededInstructorLaunch> {
       login_hint: 'e2e-instructor-1',
       target_link_uri: targetLinkUri,
       client_id: seeded.clientId,
-      deployment_id: seeded.deploymentId,
+      lti_deployment_id: seeded.deploymentId,
     }).toString(),
   });
   if (loginRes.status !== 302) {

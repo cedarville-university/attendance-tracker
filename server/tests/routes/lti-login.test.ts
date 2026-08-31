@@ -29,7 +29,7 @@ const QUERY = {
   login_hint: 'hint-123',
   target_link_uri: 'https://app.test/index.html',
   client_id: 'client-1',
-  deployment_id: 'deploy-1',
+  lti_deployment_id: 'deploy-1',
 };
 
 describe('GET/POST /lti/login', () => {
@@ -81,6 +81,61 @@ describe('GET/POST /lti/login', () => {
     // allowlist check runs before anything is written, so no oidc_transactions row is created
     // either. These two assertions pin exactly that.
     expect(deps.createTransaction).not.toHaveBeenCalled();
+    expect(deps.findEnabledDeployment).not.toHaveBeenCalled();
+  });
+});
+
+describe('/lti/login — real Canvas login-initiation payload', () => {
+  // Field names captured verbatim from a real Canvas (test env) OIDC login POST to /lti/login
+  // during Phase 7 Task 22 verification (HAR, 2026-08-31). Opaque values are replaced; the point
+  // of this fixture is the *parameter names*. Note `lti_deployment_id` — the LTI 1.3 OIDC
+  // login-initiation spelling — not the bare `deployment_id` claim name that appears in the launch
+  // id_token. spec §12.1's parameter list said `deployment_id`; real Canvas does not send that.
+  const CANVAS_LOGIN_POST = {
+    iss: 'https://canvas.test.instructure.com',
+    login_hint: 'REDACTED-LOGIN-HINT',
+    client_id: '126240000000000360',
+    lti_deployment_id: '4695:REDACTED',
+    target_link_uri: 'https://app.test/index.html',
+    lti_message_hint: 'REDACTED-JWT',
+    canvas_environment: 'test',
+    canvas_region: 'us-east-1',
+    lti_storage_target: 'post_message_forwarding',
+  };
+
+  it('redirects (302) on the exact parameter set Canvas sends, resolving lti_deployment_id', async () => {
+    const deps = makeDeps();
+    const app = buildTestApp(deps);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/lti/login',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: new URLSearchParams(CANVAS_LOGIN_POST).toString(),
+    });
+
+    expect(response.statusCode).toBe(302);
+    expect(deps.findEnabledDeployment).toHaveBeenCalledWith(
+      'https://canvas.test.instructure.com',
+      '126240000000000360',
+      '4695:REDACTED',
+    );
+  });
+
+  it('rejects (400) a payload carrying the bare `deployment_id` claim name instead of `lti_deployment_id`', async () => {
+    const deps = makeDeps();
+    const app = buildTestApp(deps);
+    const { lti_deployment_id, ...rest } = CANVAS_LOGIN_POST;
+    const payload = new URLSearchParams({ ...rest, deployment_id: lti_deployment_id }).toString();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/lti/login',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload,
+    });
+
+    expect(response.statusCode).toBe(400);
     expect(deps.findEnabledDeployment).not.toHaveBeenCalled();
   });
 });

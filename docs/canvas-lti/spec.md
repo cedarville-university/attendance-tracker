@@ -449,12 +449,16 @@ iss
 login_hint
 target_link_uri
 client_id
-deployment_id
+lti_deployment_id
 ```
+
+`lti_deployment_id` is the LTI 1.3 OIDC login-initiation parameter name (this is what Canvas
+sends). The bare `deployment_id` spelling is the `id_token` *claim* name used at launch
+(`https://purl.imsglobal.org/spec/lti/claim/deployment_id`), not the login parameter.
 
 On receipt:
 
-1. Validate that `iss`, `client_id`, and `deployment_id` identify an enabled configured deployment.
+1. Validate that `iss`, `client_id`, and `lti_deployment_id` identify an enabled configured deployment.
 2. Validate `target_link_uri` against an explicit allowlist of this application's own launch destinations.
 3. Generate a cryptographically random `state`.
 4. Generate a cryptographically random OIDC `nonce`.

@@ -7,7 +7,12 @@ const loginParamsSchema = z.object({
   login_hint: z.string().min(1),
   target_link_uri: z.string().min(1),
   client_id: z.string().min(1),
-  deployment_id: z.string().min(1),
+  // LTI 1.3 OIDC third-party login initiation names this `lti_deployment_id`. The bare
+  // `deployment_id` is the *id_token claim* name (used at /lti/launch), not the login parameter --
+  // real Canvas sends `lti_deployment_id` here (spec §12.1's list was imprecise). The spec marks it
+  // OPTIONAL, but this is a Canvas-only integration, Canvas always sends it, and
+  // findEnabledDeployment() needs it to key the lookup -- so require it deliberately.
+  lti_deployment_id: z.string().min(1),
 });
 
 export function registerLtiLoginRoute(app: FastifyInstance, deps: LoginDeps): void {
@@ -24,7 +29,7 @@ export function registerLtiLoginRoute(app: FastifyInstance, deps: LoginDeps): vo
         loginHint: parsed.data.login_hint,
         targetLinkUri: parsed.data.target_link_uri,
         clientId: parsed.data.client_id,
-        deploymentId: parsed.data.deployment_id,
+        deploymentId: parsed.data.lti_deployment_id,
       },
       deps,
     );

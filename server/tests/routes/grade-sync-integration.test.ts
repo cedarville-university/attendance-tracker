@@ -87,7 +87,7 @@ async function loginAndLaunch(
       login_hint: 'instructor-1',
       target_link_uri: TARGET,
       client_id: seeded.clientId,
-      deployment_id: seeded.deploymentId,
+      lti_deployment_id: seeded.deploymentId,
     }).toString(),
   });
   expect(loginRes.statusCode).toBe(302);

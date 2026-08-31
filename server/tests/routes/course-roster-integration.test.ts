@@ -82,7 +82,7 @@ describe('Phase 4 integration: real launch through GET /api/course/roster', () =
         login_hint: 'lti-u1',
         target_link_uri: TARGET,
         client_id: seeded.clientId,
-        deployment_id: seeded.deploymentId,
+        lti_deployment_id: seeded.deploymentId,
       }).toString(),
     });
     expect(loginRes.statusCode).toBe(302);
