@@ -2,7 +2,7 @@ name: deploy-dev
 
 on:
   push:
-    branches: [main]
+    branches: [main, canvas-lti-phase7]  # canvas-lti-phase7 kept until Phase 7 merges to main
   workflow_dispatch:
 
 permissions:
