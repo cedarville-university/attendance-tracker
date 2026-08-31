@@ -367,3 +367,49 @@ secret, `PG_ADMIN_PASSWORD`, is covered above).
 | `POSTGRES_FQDN` | Step 1 output `postgresFqdn` | `psql-attendance-dev.postgres.database.azure.com` |
 | `KEY_VAULT_NAME` | Step 1 output `keyVaultName` | `kv-attendance-dev` |
 | `APP_HOSTNAME` | operator-chosen public hostname (matches `appHostname` in the `.bicepparam`) | `attendance-dev.cedarville.edu` |
+
+## Alert verification
+
+Phase 7 Task 20 observability check against the live `dev` deployment
+(2026-08-30/31). Recorded for future operators.
+
+- **Structured logs to Log Analytics: verified.** Container stdout JSON lines
+  land in the `ContainerAppConsoleLogs_CL` table in the `log-attendance-dev`
+  workspace. Sampled lines carry only the Task 7 safe-field allowlist
+  (`requestId`, `route`, `httpStatus`, `durationMs`) — no `authorization`
+  header, no `set-cookie`, no card codes, no tokens, no signing keys, no
+  Canvas URLs.
+- **Application Insights traces/requests: verified working as of 2026-08-31**,
+  after commit `b0ef163` added the OpenTelemetry ESM `--import` preload
+  (`server/src/telemetry/otel-preload.js`, wired into the web + worker
+  container `command`). Before that fix the app ran as pure ESM with no
+  loader hook, so `useAzureMonitor()` auto-instrumentation could not patch
+  module loading and `appi-attendance-dev` received zero
+  `requests`/`dependencies`/`traces`. After redeploy, `requests` rows appear
+  for live traffic. Any future entrypoint change must keep the
+  `node --import ./server/dist/telemetry/otel-preload.js ...` prefix (see
+  `Dockerfile`, `modules/web.bicep`, `modules/worker-job.bicep`) or App
+  Insights goes dark again.
+- **Alert rules: verified present and Enabled.** Three rules in
+  `rg-attendance-dev`:
+  - `attendance-dev-db-down` (sev1) — metric alert on Postgres
+    `connections_failed` > 5, `Total` over `PT5M`, evaluated `PT1M`.
+  - `attendance-dev-5xx` (sev2) — metric alert on App Insights
+    `requests/failed`.
+  - `attendance-dev-lti-launch-failures` — scheduled-query-rule alert.
+
+  All three route to action group `attendance-dev-ag`, which has a single
+  Enabled email receiver — the operator address in the `.bicepparam`
+  `alertEmail` (dev: `nbiggs112@cedarville.edu`), common alert schema on.
+- **End-to-end alert fire test: NOT yet exercised — deferred to Phase 8.** A
+  manual test-fire of `attendance-dev-db-down` (temporarily lowering the
+  threshold to force a breach) on 2026-08-30 did not produce a fired alert or
+  notification email within the observed window; the cause was not isolated
+  (likely metric-alert rule-edit propagation lag of 15–30 min beating the
+  threshold restore, or `az monitor metrics alert update --set` on a nested
+  `criteria.allOf[0]` path not persisting). The rule configuration and the
+  action-group email path are both verified by inspection; only the live
+  fire-to-email round trip is unproven. A proper re-test (change the
+  threshold, confirm via `az monitor metrics alert show` that it persisted,
+  wait a full 30 min, check fired history plus inbox, then restore) is a
+  Phase 8 item.
