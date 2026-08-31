@@ -723,11 +723,13 @@ async function init() {
     elements.startSessionBtn.disabled = true;
   } else {
     ui.renderCourseContext(boot.me);
-    await loadCanvasRoster();
     // C1: resume an attendance session that is still open on the server (page
     // reload / Canvas re-launch) instead of silently dropping every scan or
-    // creating a duplicate open session.
+    // creating a duplicate open session -- must run before the Canvas roster
+    // fetch (which can block on a live NRPS call) so the duplicate-open-session
+    // guard isn't delayed behind it.
     await resumeOpenSessionIfAny();
+    await loadCanvasRoster();
   }
 
   if (storage.hasSavedSession()) {

@@ -47,8 +47,10 @@ export function computeAbsentRows({ rosterState, scannedIds }) {
 
 /**
  * Same idea as computeAbsentRows, but sourced from the live Canvas roster index
- * (course-roster.js buildMemberIndex) so each absent row carries the member's
- * display name rather than only an ID.
+ * (course-roster.js buildMemberIndex). Each absent row carries the member's
+ * `displayName` on the object for parity with scan records and possible future
+ * use; note csv.js BASE_COLUMNS is a fixed list that omits it, so the current
+ * CSV export does not emit the name.
  *
  * @param {Object} args
  * @param {Map<string, {institutionalId: string, displayName: string|null}>} args.memberIndex

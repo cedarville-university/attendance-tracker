@@ -43,6 +43,37 @@ body {
   color: var(--color-muted);
 }
 
+/* Canvas course-context strip in the header: lay the dt/dd pairs out
+   horizontally and compactly instead of the browser-default dl indentation. */
+.course-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.5rem;
+  margin: 0.5rem 0 0;
+}
+
+.course-context[hidden] {
+  display: none;
+}
+
+.course-context div {
+  display: flex;
+  gap: 0.35rem;
+  align-items: baseline;
+}
+
+.course-context dt {
+  color: var(--color-muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.course-context dd {
+  margin: 0;
+  font-weight: 600;
+}
+
 .app-messages {
   padding: 0 1.5rem;
   display: flex;

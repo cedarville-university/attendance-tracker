@@ -182,7 +182,11 @@ export function renderCanvasRoster({ members, fetchedAt, stale }) {
     const id = document.createElement('td');
     id.textContent = member.institutionalId || '—';
     const status = document.createElement('td');
-    status.textContent = member.eligibleForAttendance ? 'Enrolled' : member.status || '—';
+    // Non-learner rows (instructors etc.) come back eligibleForAttendance:false;
+    // label them so their raw NRPS status ("Active") doesn't read as present.
+    status.textContent = member.eligibleForAttendance
+      ? 'Enrolled'
+      : `Not counted (${member.status || '—'})`;
     tr.append(name, id, status);
     body.appendChild(tr);
   }
@@ -190,8 +194,12 @@ export function renderCanvasRoster({ members, fetchedAt, stale }) {
   elements.canvasRosterEmpty.hidden = members.length > 0;
   const when = shortTime(fetchedAt);
   const staleNote = stale ? ' · showing the last cached copy (Canvas was unreachable)' : '';
+  // The status line counts attendance-eligible learners only, matching the
+  // #course-context-roster-count strip (GET /api/course/roster returns all NRPS
+  // members, including non-learners marked eligibleForAttendance:false).
+  const eligibleCount = members.filter((m) => m.eligibleForAttendance).length;
   elements.canvasRosterStatus.textContent = members.length
-    ? `${members.length} enrolled${when ? ` · updated ${when}` : ''}${staleNote}`
+    ? `${eligibleCount} student${eligibleCount === 1 ? '' : 's'}${when ? ` · updated ${when}` : ''}${staleNote}`
     : `No students returned by Canvas${when ? ` · checked ${when}` : ''}`;
   elements.refreshRosterBtn.disabled = false;
 }
