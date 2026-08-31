@@ -15,8 +15,11 @@ param webMaxReplicas = 2
 param logRetentionDays = 30
 param acrSku = 'Basic'
 param alertEmail = 'nbiggs112@cedarville.edu'
+// Real ProxID resolver URL template is supplied at deploy time via the IDENTITY_API_URL
+// GitHub 'dev' environment variable (-p identityApiUrl=... in deploy-dev.yml). Non-secret
+// template; contains {CARD_CODE}/{KEY_NAME}/{KEY} placeholders, no key value.
 param identityApiUrl = ''
-param identityApiKeyName = 'attendance-resolver'
+param identityApiKeyName = 'ATTENDANCE'
 // No secret value is committed: the password is read from the environment at
 // compile time. The deploy pipeline / bootstrap exports PG_ADMIN_PASSWORD; for a
 // local compile check, `export PG_ADMIN_PASSWORD=$(openssl rand -base64 24)` first.

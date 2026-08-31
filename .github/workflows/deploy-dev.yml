@@ -2,8 +2,10 @@ name: deploy-dev
 
 on:
   push:
-    branches: [main, canvas-lti-phase7]  # canvas-lti-phase7 kept until Phase 7 merges to main
+    tags: ['v*']  # non-prod release is cut with `git tag vX.Y.Z && git push origin vX.Y.Z`
   workflow_dispatch:
+# A `v*` tag pushed from the still-unmerged canvas-lti-phase7 branch triggers this
+# workflow as it exists on the tagged commit — no default-branch presence needed.
 
 permissions:
   contents: read
@@ -70,9 +72,12 @@ jobs:
           # Postgres Flexible Server serialises control-plane ops; the require_secure_transport
           # config re-PUT intermittently returns ServerIsBusy. The deploy is idempotent, so retry.
           n=0
+          # identityApiUrl: -p override wins over dev.bicepparam's ''. When vars.IDENTITY_API_URL
+          # is unset the arg is '' — identical to prior behaviour, so safe to land before the var exists.
           until az deployment group create -g "${{ vars.RESOURCE_GROUP }}" \
             -f infra/azure/main.bicep -p infra/azure/environments/dev.bicepparam \
             -p containerImage="$CURRENT_IMAGE" \
+            -p identityApiUrl='${{ vars.IDENTITY_API_URL }}' \
             -p deployRoleAssignments=false ; do
             n=$((n + 1))
             if [ "$n" -ge 3 ]; then echo "infra deploy failed after $n attempts"; exit 1; fi

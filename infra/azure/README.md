@@ -115,6 +115,43 @@ az deployment group create \
 Swap `dev` for `stage` / `prod` (resource group **and** param file) for the other
 environments.
 
+## CI/CD deploy trigger and promotion model
+
+`deploy-dev.yml` runs on a `v*` tag push (`git tag vX.Y.Z && git push origin
+vX.Y.Z`) or `workflow_dispatch` — there is no branch-push trigger. The promotion
+model is `tag v*` → `dev` (the single non-prod environment). `prod` is
+authored-only for now; its pipeline is Task 23.
+
+## Real ProxID resolver on `dev`
+
+`dev` runs the **real** Cedarville ProxID resolver, not the mock:
+
+- The `identity-api-key` Key Vault secret holds the **real** resolver key (it
+  replaces the earlier `dev-placeholder-resolver-key`). The key value never
+  appears in the repo.
+- The `IDENTITY_API_URL` GitHub `dev`-environment **variable** holds the
+  non-secret URL **template**
+  `https://cedarvilledataproxyapi.azurewebsites.net/api/ProxId?id={CARD_CODE}&keyname={KEY_NAME}&key={KEY}`.
+  `deploy-dev.yml` passes it through as `-p identityApiUrl='${{ vars.IDENTITY_API_URL }}'`,
+  which overrides the empty value in `dev.bicepparam`.
+- `identityApiKeyName` is committed in `dev.bicepparam` as `ATTENDANCE` (the
+  resolver's `keyname` — an identifier, not a secret). `web.bicep` maps it to the
+  `IDENTITY_API_KEY_NAME` container env var, `identityApiUrl` to `IDENTITY_API_URL`,
+  and the `identity-api-key` KV secret to `IDENTITY_API_KEY` (`secretRef`).
+
+Resolver env contract (`server/src/identity/http-resolver.ts`):
+`createHttpIdentityResolverFromEnv()` needs `IDENTITY_API_URL` +
+`IDENTITY_API_KEY_NAME` + `IDENTITY_API_KEY` **all** set, or it returns `null` and
+the app falls back to `MockIdentityResolver`.
+
+> **Known gap — response field names not wired.** `http-resolver.ts` defaults
+> `universityIdField` to `redwoodId` (and `firstNameField` / `lastNameField` /
+> `emailField` to `firstName` / `lastName` / `email`), and `web.bicep` does **not**
+> set `IDENTITY_API_UNIVERSITY_ID_FIELD` or the other field-override env vars. If
+> the live ProxID JSON uses different keys, the first real scan (Task 22) fails
+> with `missing-university-id`. Fix when confirmed: add those override env vars to
+> `web.bicep`. Not fixed here.
+
 ## Seed Key Vault secrets
 
 Run **after** the deployment has created the Key Vault. The vault name is emitted
@@ -271,7 +308,7 @@ az keyvault secret set --vault-name "$KV" --name card-fingerprint-secret \
 az keyvault secret set --vault-name "$KV" --name lti-tool-signing-keys-json \
   --value "$(node scripts/generate-signing-keys.mjs)"
 az keyvault secret set --vault-name "$KV" --name identity-api-key \
-  --value "<REAL_CEDARVILLE_PROXID_KEY_OR_PLACEHOLDER>"   # dev: any placeholder (mock resolver, identityApiUrl='')
+  --value "<REAL_CEDARVILLE_PROXID_KEY>"   # dev: the REAL resolver key (see "Real ProxID resolver on dev")
 az keyvault secret set --vault-name "$KV" --name appinsights-connection-string \
   --value "$AI_CS"
 ```
