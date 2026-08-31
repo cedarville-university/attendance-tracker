@@ -44,7 +44,7 @@ jobs:
     needs: build-push
     runs-on: ubuntu-latest
     environment: dev
-    timeout-minutes: 20
+    timeout-minutes: 25
     # environments/dev.bicepparam resolves postgresAdministratorPassword via
     # readEnvironmentVariable('PG_ADMIN_PASSWORD') when the param file is compiled
     # on the runner, so the password must be present in the job environment here.
@@ -67,10 +67,18 @@ jobs:
             --query 'properties.template.containers[0].image' -o tsv 2>/dev/null || true)
           if [ -z "$CURRENT_IMAGE" ]; then CURRENT_IMAGE='mcr.microsoft.com/k8se/quickstart:latest'; fi
           echo "infra pass pins containerImage=$CURRENT_IMAGE (new image ${{ needs.build-push.outputs.image }} is rolled post-migrate)"
-          az deployment group create -g "${{ vars.RESOURCE_GROUP }}" \
+          # Postgres Flexible Server serialises control-plane ops; the require_secure_transport
+          # config re-PUT intermittently returns ServerIsBusy. The deploy is idempotent, so retry.
+          n=0
+          until az deployment group create -g "${{ vars.RESOURCE_GROUP }}" \
             -f infra/azure/main.bicep -p infra/azure/environments/dev.bicepparam \
             -p containerImage="$CURRENT_IMAGE" \
-            -p deployRoleAssignments=false
+            -p deployRoleAssignments=false ; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then echo "infra deploy failed after $n attempts"; exit 1; fi
+            echo "infra deploy attempt $n failed (likely transient); retrying in 90s"
+            sleep 90
+          done
 
   migrate:
     needs: [build-push, infra]
