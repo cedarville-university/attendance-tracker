@@ -22,7 +22,7 @@
 - **Structured logs never contain** names, student IDs, raw card codes, tokens, signing-key material, or Canvas service URLs (spec §31.8, §31.9, §44). Use the safe-field allowlist.
 - **Repo:** `cedarville-university/attendance-tracker`. Default branch `main`.
 - **Design of record:** `docs/superpowers/specs/2026-08-29-canvas-lti-phase7-infra-cicd-design.md`. Spec: `docs/canvas-lti/spec.md` §6, §35–§44, §46, §54 (Phase 7). Real-Canvas checklist: `docs/canvas-installation.md`.
-- **Decisions locked (do not re-litigate):** full Azure access — deploy dev + stage; live Canvas test/beta available; **real ProxID resolver from first deploy** (real `IDENTITY_API_*` in dev + stage Key Vault; `MockIdentityResolver` stays the local default); npm workspaces `["server", "packages/*"]`, `web/` stays static, `packages/shared/` not created yet; migrations run as a **separate GitHub Actions runner job** with a just-in-time Postgres firewall rule; backlog item 6.1 (AGS line-item origin check) folded in; the five `docs/*.md` deliverables and the `service-url.ts`/`csrf.ts` relocation deferred to Phase 8; real-Canvas gate runs against **staging**; production is authored only.
+- **Decisions locked (do not re-litigate):** full Azure access — deploy dev + stage; live Canvas test/beta available; **real ProxID resolver from first deploy** (real `IDENTITY_API_*` in dev + stage Key Vault; `MockIdentityResolver` stays the local default); npm workspaces `["server", "packages/*"]`, `web/` stays static, `packages/shared/` not created yet; migrations run as a **separate GitHub Actions runner job** with a just-in-time Postgres firewall rule; backlog item 6.1 (AGS line-item origin check) folded in; the five `docs/*.md` deliverables and the `service-url.ts`/`csrf.ts` relocation deferred to Phase 8; real-Canvas gate runs against **staging**; production is authored only. **[AMENDED 2026-08-31 — see `.superpowers/sdd/progress.md` "PLAN CHANGE 2026-08-31": Phase 7 collapses to TWO environments (`dev` + `prod`, no `stage`); `dev` runs the real ProxID resolver and is `v*`-tag-triggered; the real-Canvas gate runs against `dev`. Tasks 21–23 below are HISTORICAL — the operative specs are `.superpowers/sdd/task-2{1,2,3}-brief.md`.]**
 - **Infra-as-code / workflow tasks are not classic TDD.** Their "test" is a validation command (`az bicep build`, `az deployment group what-if`, `actionlint`) or a live deploy + smoke check, called out explicitly per task.
 
 ---
@@ -3906,6 +3906,10 @@ Claude-Session: https://claude.ai/code/session_01A3nhkWXAJX5nANhFxiw8rZ"
 
 ---
 
+> **SUPERSEDED 2026-08-31** — no `stage` env. Task 21 is now a `deploy-dev.yml` retrofit
+> (`v*`-tag trigger) + wiring the real ProxID resolver into `dev`. Operative spec:
+> `.superpowers/sdd/task-21-brief.md`.
+
 ## Task 21: `deploy-stage.yml` + staging environment (with the real ProxID resolver)
 
 **Files:**
@@ -4074,6 +4078,9 @@ Traces, custom metrics, and redacted structured logs from the dev deployment are
 
 ---
 
+> **SUPERSEDED 2026-08-31** — the gate runs against `dev` (the single non-prod env), not a
+> separate staging env. Operative spec: `.superpowers/sdd/task-22-brief.md`.
+
 ## Task 22: Real-Canvas verification gate against staging — THE EXIT CRITERION (spec §54 Phase 7)
 
 **Files:**
@@ -4150,6 +4157,9 @@ Claude-Session: https://claude.ai/code/session_01A3nhkWXAJX5nANhFxiw8rZ"
 A tagged/approved release deployed to staging with **no long-lived Azure deployment password in GitHub**; an instructor LTI launch from a **real Canvas course** against the deployed staging instance **succeeded** (scanner opened in a new tab); a **learner-role launch was refused with HTTP 403**. Recorded in `docs/canvas-lti/progress.md`.
 
 ---
+
+> **SUPERSEDED 2026-08-31** — `deploy-prod.yml` mirrors the FINAL `deploy-dev.yml` (there is no
+> `deploy-stage.yml`). Operative spec: `.superpowers/sdd/task-23-brief.md`.
 
 ## Task 23: Production delivery — authored, not run (M8)
 
