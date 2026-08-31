@@ -99,19 +99,46 @@ Save, toggle the resulting key/app **On**, and copy its **Client ID**.
 In the Canvas test course: **Settings → Apps → + App → By Client ID**, paste the Client ID, install
 it, and note the generated **Deployment ID** (shown after installation).
 
-## 3. Fetch Canvas's real endpoints
+## 3. Get Canvas's real LTI 1.3 endpoints
 
-**Never derive these from the Canvas hostname by pattern-matching a URL** — the spec explicitly
-forbids this (spec §11), because Canvas's actual issuer/JWKS/token endpoints do not follow a fixed
-pattern across all Canvas instances. Fetch them for real:
+**Never derive these by pattern-matching the *institution's* Canvas hostname** (e.g.
+`https://<school>.instructure.com/...`) — the spec forbids it (spec §11). Instructure-hosted Canvas
+delivers LTI 1.3 from a small set of **environment-level** endpoints that are the same for every
+account in that environment, and it does **not** publish them via
+`https://<school>.instructure.com/.well-known/openid-configuration`. That path serves Canvas's
+*generic* Canvas-API OAuth2 config (`scopes_supported: ["openid"]`, `client_secret_*` auth) — a
+different protocol. Two of its three values are **wrong** for LTI 1.3:
+
+- its `issuer` is the account subdomain — but the LTI `id_token` `iss` is the environment issuer
+  below;
+- its `authorization_endpoint` is `/login/oauth2/auth` (the human API-login flow) — but LTI's OIDC
+  redirect target is `/api/lti/authorize_redirect`.
+
+Use these values instead, per Canvas's LTI configuration reference (spec §58). Pick the row matching
+the environment you registered in — **confirm the current strings against Canvas's own docs; do not
+trust this table over them:**
+
+| Environment | `--issuer` (`id_token` `iss`) | `--oidc-auth-endpoint` | `--token-endpoint` | `--platform-jwks-uri` |
+|---|---|---|---|---|
+| Production | `https://canvas.instructure.com` | `https://sso.canvaslms.com/api/lti/authorize_redirect` | `https://sso.canvaslms.com/login/oauth2/token` | `https://sso.canvaslms.com/api/lti/security/jwks` |
+| Beta | `https://canvas.beta.instructure.com` | `https://sso.beta.canvaslms.com/api/lti/authorize_redirect` | `https://sso.beta.canvaslms.com/login/oauth2/token` | `https://sso.beta.canvaslms.com/api/lti/security/jwks` |
+| Test | `https://canvas.test.instructure.com` | `https://sso.test.canvaslms.com/api/lti/authorize_redirect` | `https://sso.test.canvaslms.com/login/oauth2/token` | `https://sso.test.canvaslms.com/api/lti/security/jwks` |
+
+The issuer is fixed per environment **regardless of the account subdomain** the tool launches from
+(a launch from `cedarville.test.instructure.com` still carries `iss:
+https://canvas.test.instructure.com`). Seeding the account subdomain as the issuer makes every
+launch fail the `(issuer, client_id)` registration lookup.
+
+Confirm the platform JWKS actually responds before seeding:
 
 ```bash
-curl -s https://<canvas-domain>/.well-known/openid-configuration | jq '{issuer, authorization_endpoint, token_endpoint}'
-curl -s https://<canvas-domain>/api/lti/security/jwks | jq '.keys | length'   # just to confirm it responds
+curl -s https://sso.test.canvaslms.com/api/lti/security/jwks | jq '.keys | length'   # expect a small integer, e.g. 3
 ```
 
-Use the `authorization_endpoint` value as `--oidc-auth-endpoint`, `token_endpoint` as
-`--token-endpoint`, and `https://<canvas-domain>/api/lti/security/jwks` as `--platform-jwks-uri`.
+`seed-registration.ts` sets `token_audience` equal to whatever you pass as `--token-endpoint`. If
+AGS/NRPS token requests later return 401, Canvas may require the audience to be the bare production
+URL `https://canvas.instructure.com/login/oauth2/token` even from beta/test — delete the
+`lti_registrations` row and re-seed with that as `--token-endpoint`.
 
 ## 4. Seed the registration
 

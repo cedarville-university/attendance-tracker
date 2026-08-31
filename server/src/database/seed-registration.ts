@@ -5,13 +5,18 @@
 // institution and deployment rows; running it twice for the same issuer+client_id does NOT update
 // an existing registration's endpoints -- delete that row manually first if you need to re-seed it.
 //
-// Usage:
+// For the issuer / oidc-auth-endpoint / token-endpoint / platform-jwks-uri values, use the
+// per-environment table in docs/canvas-installation.md §3 -- NOT the account subdomain, and NOT
+// `<school>.instructure.com/.well-known/openid-configuration` (that is Canvas's generic API OAuth2
+// config, a different protocol from LTI 1.3).
+//
+// Usage (values shown are the Canvas *test* environment):
 //   npx tsx server/src/database/seed-registration.ts \
 //     --institution-slug cedarville --institution-name "Cedarville University" \
-//     --issuer https://canvas.instructure.com --client-id <client-id> \
-//     --oidc-auth-endpoint https://<canvas-domain>/api/lti/authorize_redirect \
-//     --token-endpoint https://<canvas-domain>/login/oauth2/token \
-//     --platform-jwks-uri https://<canvas-domain>/api/lti/security/jwks \
+//     --issuer https://canvas.test.instructure.com --client-id <client-id> \
+//     --oidc-auth-endpoint https://sso.test.canvaslms.com/api/lti/authorize_redirect \
+//     --token-endpoint https://sso.test.canvaslms.com/login/oauth2/token \
+//     --platform-jwks-uri https://sso.test.canvaslms.com/api/lti/security/jwks \
 //     --deployment-id <deployment-id>
 
 import { and, eq } from 'drizzle-orm';
