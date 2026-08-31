@@ -14,9 +14,10 @@
 // `RUN_MIGRATIONS_ON_BOOT` is set (local dev).
 
 import { startTelemetry } from './telemetry/otel.js';
-// ES imports are hoisted, so this runs before the pass is *invoked*, not before the deps modules
-// are loaded — enough today (startTelemetry only wires the Azure Monitor exporter), mirroring
-// index.ts.
+// In deployed envs, Azure Monitor auto-instrumentation is hooked in *before* this module by the
+// `node --import ./server/dist/telemetry/otel-preload.js` preload (wired in the Dockerfile CMD and
+// the worker-job bicep `command`). This retained call covers the loader-less `tsx` dev path
+// (`npm run dev:worker`); under `--import` it is an idempotent no-op, mirroring index.ts.
 await startTelemetry();
 
 import { loadEnv } from './config/env.js';

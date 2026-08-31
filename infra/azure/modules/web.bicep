@@ -55,7 +55,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'web'
           image: image
           resources: { cpu: json(cpu), memory: memory }
-          command: ['node', 'server/dist/index.js']
+          command: ['node', '--import', './server/dist/telemetry/otel-preload.js', 'server/dist/index.js']
           env: [
             { name: 'NODE_ENV', value: 'production' }
             { name: 'PORT', value: '3000' }

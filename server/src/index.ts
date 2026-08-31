@@ -5,10 +5,11 @@
 // All Fastify wiring lives in server/src/app.ts. An unwrapped top-level-await entrypoint, like
 // worker.ts.
 import { startTelemetry } from './telemetry/otel.js';
-// ES imports are hoisted, so this runs before buildApp is *called*, not before the deps modules are
-// loaded. That is enough today (startTelemetry only wires the Azure Monitor exporter). If OTel
-// auto-instrumentation is ever added, move this into a self-executing ./telemetry/otel-preload.js
-// imported as the very first line so it runs before any instrumented module loads.
+// In deployed envs, Azure Monitor auto-instrumentation is hooked in *before* this module by the
+// `node --import ./server/dist/telemetry/otel-preload.js` preload (wired in the Dockerfile CMD and
+// the web bicep `command`). This retained call covers the loader-less `tsx` dev path (`npm run
+// dev`); under `--import` it is an idempotent no-op (otel.ts's module-level `started` flag is
+// already set by the preload).
 await startTelemetry();
 
 import { loadEnv } from './config/env.js';

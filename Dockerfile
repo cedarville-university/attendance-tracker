@@ -3,9 +3,13 @@
 # signing keys / dev deps / tests.
 #
 # Same image serves all three process roles (override the command):
-#   web     (default): node server/dist/index.js
-#   worker           : node server/dist/worker.js
+#   web     (default): node --import ./server/dist/telemetry/otel-preload.js server/dist/index.js
+#   worker           : node --import ./server/dist/telemetry/otel-preload.js server/dist/worker.js
 #   migrate          : node server/dist/migrate.js
+#
+# web + worker run the OTel ESM preload (--import) so Azure Monitor auto-instrumentation hooks
+# module loading before fastify / pg / node:http are imported. migrate is a flag-less one-shot: no
+# long-lived traffic, nothing worth tracing.
 
 # ---- deps: install the full workspace graph from the lockfile ----
 FROM node:22-bookworm-slim AS deps
@@ -49,4 +53,4 @@ COPY --chown=node:node web ./web
 
 USER node
 EXPOSE 3000
-CMD ["node", "server/dist/index.js"]
+CMD ["node", "--import", "./server/dist/telemetry/otel-preload.js", "server/dist/index.js"]

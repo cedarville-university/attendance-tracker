@@ -1,4 +1,4 @@
-@description('attendance-grade-worker (spec §35.2) as a schedule-triggered Container Apps Job. Same image as web, command node server/dist/worker.js, every 5 minutes, one replica, scale-to-zero between runs.')
+@description('attendance-grade-worker (spec §35.2) as a schedule-triggered Container Apps Job. Same image as web, command node --import ./server/dist/telemetry/otel-preload.js server/dist/worker.js, every 5 minutes, one replica, scale-to-zero between runs.')
 param name string
 param location string
 param tags object = {}
@@ -54,7 +54,7 @@ resource job 'Microsoft.App/jobs@2024-03-01' = {
           name: 'grade-worker'
           image: image
           resources: { cpu: json(cpu), memory: memory }
-          command: ['node', 'server/dist/worker.js']
+          command: ['node', '--import', './server/dist/telemetry/otel-preload.js', 'server/dist/worker.js']
           env: [
             { name: 'NODE_ENV', value: 'production' }
             { name: 'RUN_MIGRATIONS_ON_BOOT', value: 'false' }

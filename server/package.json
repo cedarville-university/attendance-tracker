@@ -8,8 +8,8 @@
     "dev": "tsx watch src/index.ts",
     "dev:worker": "tsx watch src/worker.ts",
     "build": "tsc -p tsconfig.build.json",
-    "start": "node dist/index.js",
-    "start:worker": "node dist/worker.js",
+    "start": "node --import ./dist/telemetry/otel-preload.js dist/index.js",
+    "start:worker": "node --import ./dist/telemetry/otel-preload.js dist/worker.js",
     "migrate": "node dist/migrate.js"
   },
   "dependencies": {
