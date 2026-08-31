@@ -83,6 +83,7 @@ describe('Phase 4 integration: real launch through GET /api/course/roster', () =
         target_link_uri: TARGET,
         client_id: seeded.clientId,
         lti_deployment_id: seeded.deploymentId,
+        lti_message_hint: 'msg-hint-1',
       }).toString(),
     });
     expect(loginRes.statusCode).toBe(302);

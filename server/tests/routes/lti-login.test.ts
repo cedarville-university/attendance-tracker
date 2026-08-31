@@ -30,6 +30,7 @@ const QUERY = {
   target_link_uri: 'https://app.test/index.html',
   client_id: 'client-1',
   lti_deployment_id: 'deploy-1',
+  lti_message_hint: 'msg-hint-abc',
 };
 
 describe('GET/POST /lti/login', () => {
@@ -97,7 +98,9 @@ describe('/lti/login — real Canvas login-initiation payload', () => {
     client_id: '126240000000000360',
     lti_deployment_id: '4695:REDACTED',
     target_link_uri: 'https://app.test/index.html',
-    lti_message_hint: 'REDACTED-JWT',
+    // JWT-shaped (dots, `_`, `-`) so the assertion also proves URLSearchParams round-trips it
+    // unmangled; real value redacted.
+    lti_message_hint: 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ2ZXJpZmllciI6InJlZGFjdGVkIn0.AbC_-dEf123',
     canvas_environment: 'test',
     canvas_region: 'us-east-1',
     lti_storage_target: 'post_message_forwarding',
@@ -120,6 +123,27 @@ describe('/lti/login — real Canvas login-initiation payload', () => {
       '126240000000000360',
       '4695:REDACTED',
     );
+    // Canvas rejects the authorization redirect ("lti_message_hint is missing") unless the tool
+    // echoes the hint it received on the login initiation, verbatim.
+    const location = new URL(response.headers.location as string);
+    expect(location.searchParams.get('lti_message_hint')).toBe(CANVAS_LOGIN_POST.lti_message_hint);
+    expect(location.searchParams.get('prompt')).toBe('none');
+  });
+
+  it('rejects (400) a payload missing `lti_message_hint`', async () => {
+    const deps = makeDeps();
+    const app = buildTestApp(deps);
+    const { lti_message_hint, ...rest } = CANVAS_LOGIN_POST;
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/lti/login',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: new URLSearchParams(rest).toString(),
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(deps.findEnabledDeployment).not.toHaveBeenCalled();
   });
 
   it('rejects (400) a payload carrying the bare `deployment_id` claim name instead of `lti_deployment_id`', async () => {

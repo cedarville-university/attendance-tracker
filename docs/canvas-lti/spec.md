@@ -450,11 +450,16 @@ login_hint
 target_link_uri
 client_id
 lti_deployment_id
+lti_message_hint
 ```
 
 `lti_deployment_id` is the LTI 1.3 OIDC login-initiation parameter name (this is what Canvas
 sends). The bare `deployment_id` spelling is the `id_token` *claim* name used at launch
 (`https://purl.imsglobal.org/spec/lti/claim/deployment_id`), not the login parameter.
+
+`lti_message_hint` is an opaque value Canvas mints per launch; the tool MUST echo it unchanged on
+the authorization request (step 6). Canvas rejects the redirect (`lti_message_hint is missing`)
+otherwise.
 
 On receipt:
 
@@ -478,6 +483,8 @@ nonce
 response_type = id_token
 response_mode = form_post
 scope = openid
+prompt = none
+lti_message_hint      # echoed unchanged from the login initiation
 ```
 
 `redirect_uri` MUST exactly match an authorized Canvas Developer Key redirect URI. Canvas validates this before posting the launch token.

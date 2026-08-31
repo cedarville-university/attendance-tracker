@@ -20,6 +20,7 @@ const BASE_PARAMS = {
   targetLinkUri: 'https://app.test/index.html',
   clientId: 'client-1',
   deploymentId: 'deploy-1',
+  ltiMessageHint: 'msg-hint-abc',
 };
 
 describe('buildLoginRedirect', () => {
@@ -39,6 +40,8 @@ describe('buildLoginRedirect', () => {
       expect(url.searchParams.get('response_type')).toBe('id_token');
       expect(url.searchParams.get('response_mode')).toBe('form_post');
       expect(url.searchParams.get('scope')).toBe('openid');
+      expect(url.searchParams.get('prompt')).toBe('none');
+      expect(url.searchParams.get('lti_message_hint')).toBe('msg-hint-abc');
     }
   });
 

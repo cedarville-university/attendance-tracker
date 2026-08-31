@@ -13,6 +13,10 @@ export interface LoginParams {
   targetLinkUri: string;
   clientId: string;
   deploymentId: string;
+  // Opaque platform value from the login initiation. The tool MUST echo it unchanged on the
+  // authorization request (LTI 1.3 §5.1.1.2); Canvas rejects the redirect ("lti_message_hint is
+  // missing") without it.
+  ltiMessageHint: string;
 }
 
 export interface LoginDeps {
@@ -64,6 +68,8 @@ export async function buildLoginRedirect(params: LoginParams, deps: LoginDeps): 
   redirectUrl.searchParams.set('response_type', 'id_token');
   redirectUrl.searchParams.set('response_mode', 'form_post');
   redirectUrl.searchParams.set('scope', 'openid');
+  redirectUrl.searchParams.set('prompt', 'none');
+  redirectUrl.searchParams.set('lti_message_hint', params.ltiMessageHint);
 
   return { ok: true, redirectUrl: redirectUrl.toString(), state };
 }

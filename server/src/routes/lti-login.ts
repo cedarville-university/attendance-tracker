@@ -13,6 +13,9 @@ const loginParamsSchema = z.object({
   // OPTIONAL, but this is a Canvas-only integration, Canvas always sends it, and
   // findEnabledDeployment() needs it to key the lookup -- so require it deliberately.
   lti_deployment_id: z.string().min(1),
+  // Opaque; the tool must echo it unchanged on the authorization request (LTI 1.3 §5.1.1.2).
+  // Spec-optional, but Canvas always sends it and rejects the redirect without it -- require it.
+  lti_message_hint: z.string().min(1),
 });
 
 export function registerLtiLoginRoute(app: FastifyInstance, deps: LoginDeps): void {
@@ -30,6 +33,7 @@ export function registerLtiLoginRoute(app: FastifyInstance, deps: LoginDeps): vo
         targetLinkUri: parsed.data.target_link_uri,
         clientId: parsed.data.client_id,
         deploymentId: parsed.data.lti_deployment_id,
+        ltiMessageHint: parsed.data.lti_message_hint,
       },
       deps,
     );
