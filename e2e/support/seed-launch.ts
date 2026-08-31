@@ -32,6 +32,7 @@ const CARD_FINGERPRINT_SECRET = process.env.E2E_CARD_FINGERPRINT_SECRET ?? 'e2e-
 
 const INSTRUCTOR_ROLE = 'http://purl.imsglobal.org/vocab/lis/v2/membership#Instructor';
 const LEARNER_ROLE = 'http://purl.imsglobal.org/vocab/lis/v2/membership#Learner';
+const CONTEXT_CLAIM = 'https://purl.imsglobal.org/spec/lti/claim/context';
 const NRPS_CLAIM = 'https://purl.imsglobal.org/spec/lti-nrps/claim/namesroleservice';
 const AGS_CLAIM = 'https://purl.imsglobal.org/spec/lti-ags/claim/endpoint';
 const AGS_SCOPES = [
@@ -166,10 +167,13 @@ export async function seedInstructorLaunch(): Promise<SeededInstructorLaunch> {
     nonce,
     sub: 'e2e-instructor-1',
     deploymentId: seeded.deploymentId,
-    contextId,
+    // `contextId: null` suppresses mock-canvas's generic { title: 'Mock Course' } context claim so
+    // we can supply our own below with a stable, distinctive title/label the roster UI asserts on.
+    contextId: null,
     roles: [INSTRUCTOR_ROLE],
     extraClaims: {
       name: 'E2E Instructor',
+      [CONTEXT_CLAIM]: { id: contextId, title: 'E2E Course', label: 'E2E-101' },
       [NRPS_CLAIM]: { context_memberships_url: canvas.nrpsUrlFor(contextId) },
       [AGS_CLAIM]: { lineitems: canvas.lineItemsUrlFor(contextId), scope: AGS_SCOPES },
     },

@@ -49,6 +49,14 @@ test('instructor: login -> launch -> start -> scan -> close -> reopen -> grade s
   const startButton = page.getByRole('button', { name: 'Start Attendance' });
   await expect(startButton).toBeEnabled({ timeout: 20_000 });
 
+  // Task 22B: the Canvas course context + roster render from /api/me and
+  // /api/course/roster without any CSV upload.
+  await expect(page.locator('#course-context')).toBeVisible();
+  await expect(page.locator('#course-context-name')).toHaveText('E2E Course'); // context.title from seed-launch.ts
+  await expect(page.locator('#course-context-roster-count')).toHaveText('1 student');
+  await expect(page.locator('#canvas-roster-table-body tr')).toHaveCount(1);
+  await expect(page.locator('#canvas-roster-table-body tr').first()).toContainText('E2E Test Learner');
+
   // The shimmed reader auto-reconnects on load (web/hid-reader.js reconnectKnownDevices()).
   await expect(page.locator('#reader-status-text')).toHaveText('Connected');
 

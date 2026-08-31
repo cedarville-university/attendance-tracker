@@ -522,6 +522,19 @@ listed below for continuity but have not been planned in detail yet.
   `npm run lint` clean. No real-Canvas step here — that stays a Phase 7 post-deploy
   item, as for Phase 3.
 
+## Phase 7 — what actually happened
+
+- **Task 22B — Canvas roster wired into the scanner UI.** Phase 4's exit criterion
+  ("instructor launches from a course and sees the active Canvas learner roster
+  without uploading a file") and spec §50 step 4 ("App displays course name and
+  current roster count") were met at the API level only — `web/` never called
+  `GET /api/course/roster` or rendered `/api/me`'s course context. Task 22B adds
+  `web/course-roster.js` (fetch/refresh/index helpers, unit-tested), a course-context
+  strip and a Canvas Roster panel in `web/index.html`/`web/ui.js`, and `init()`
+  wiring in `web/app.js` that loads the roster right after `bootstrapSession()`.
+  The CSV panel remains as "Manual Roster (CSV fallback)". Covered by an
+  `e2e/instructor-flow.spec.ts` assertion against the mock-Canvas NRPS roster.
+
 ## Deferred decisions
 
 - **Real ProxID credentials.** `HttpIdentityResolver` is implemented (ported
