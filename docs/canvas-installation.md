@@ -142,9 +142,42 @@ URL `https://canvas.instructure.com/login/oauth2/token` even from beta/test — 
 
 ## 4. Seed the registration
 
-Run `server/src/database/seed-registration.ts` (see its usage comment) with the issuer, client ID,
-endpoints, and deployment ID gathered above, against the `DATABASE_URL` of the deployed app
-instance.
+The **admin setup page (section 4a) is now the primary path** for standing up a Canvas connection.
+The `server/src/database/seed-registration.ts` CLI is kept as a fallback for scripted/headless
+setup: run it (see its usage comment) with the issuer, client ID, endpoints, and deployment ID
+gathered above, against the `DATABASE_URL` of the deployed app instance. Unlike the admin page, the
+CLI does **not** update an existing registration's endpoints — delete the `lti_registrations` row
+first to re-seed it.
+
+## 4a. Admin setup page
+
+`https://<APP_BASE_URL>/admin.html` configures the full Canvas connection (institution +
+registration + deployment) and the tool's own LTI signing key from a browser. It is **not linked**
+from the scanner UI — reach it by typing the URL.
+
+**Access** — either of:
+
+- an **LTI Administrator-role** launch session (launch the tool as a Canvas admin, then open
+  `/admin.html` in the same browser), or
+- the **`SETUP_TOKEN`** environment value: set `SETUP_TOKEN` (≥ 16 characters) on the deployed app,
+  open `/admin.html`, and paste it into the "Setup token" field. This bootstraps the first
+  connection before any Administrator launch exists. Leave `SETUP_TOKEN` unset once an admin launch
+  works, to disable the token path.
+
+**Adding a connection** — fill the form with the section 3 endpoint values. Upserts are keyed on
+`issuer + client_id` (endpoints are updated) and `registration + deployment_id`.
+
+> **CSP restart caveat.** The Content-Security-Policy `form-action` allowlist is computed once at
+> boot from the enabled registrations. After adding a connection for a **new Canvas origin**, the
+> app must be **restarted** before a launch from that origin will pass CSP. Adding another
+> deployment to an origin that is already configured needs no restart.
+
+**Tool signing key** — the page shows the active `kid`, its creation time, and the **JWKS URL to
+paste into the Canvas Developer Key**. "Rotate key" generates a new keypair, marks the old one
+`previous` (still published at `/lti/jwks` so in-flight assertions verify), and takes effect
+immediately with no restart. After rotating, have Canvas re-fetch the JWKS URL. When
+`LTI_TOOL_SIGNING_KEYS_JSON` is set it takes precedence and the page's key is read-only in effect;
+otherwise the key is stored in the `tool_signing_keys` table and is stable across restarts.
 
 ## 5. Verify the launch
 
@@ -153,7 +186,13 @@ instance.
    redirects to on success. (The list may hold several entries, e.g. `/index.html,/scanner.html`; a
    launch is redirected to whichever one Canvas sent, not to the first.) Also set
    `LTI_TOOL_SIGNING_KEYS_JSON` for any non-throwaway instance (otherwise a restart rotates the
-   signing key and Canvas's cached JWKS fetch may briefly go stale).
+   signing key and Canvas's cached JWKS fetch may briefly go stale). When it is unset, the signing
+   key is instead persisted to the `tool_signing_keys` table on first boot, so a restart keeps the
+   same `kid`; use the admin setup page (section 4a) to rotate it deliberately.
+
+   Environment variables referenced by this setup: `APP_BASE_URL`, `ALLOWED_TARGET_LINK_URIS`,
+   `LTI_TOOL_SIGNING_KEYS_JSON` (optional), `SETUP_TOKEN` (optional, ≥ 16 chars — enables the admin
+   page's token bootstrap).
 2. From the test course, launch **Attendance** as an instructor.
 3. Confirm: a new browser tab opens (per spec §8's window-target requirement), the launch completes
    without error, the browser lands on the scanner UI, and a session cookie (`attendance_session`)
