@@ -17,7 +17,7 @@ test('admin: token bootstrap -> add a Canvas connection -> rotate the signing ke
   const tokenForm = page.locator('#setup-token-form');
   await expect(tokenForm).toBeVisible();
   await page.locator('#setup-token-input').fill(E2E_SETUP_TOKEN);
-  await page.getByRole('button', { name: 'Use token' }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
 
   // Authorized: the connections + signing-key panels appear.
   await expect(page.locator('#connections-panel')).toBeVisible();
@@ -40,8 +40,11 @@ test('admin: token bootstrap -> add a Canvas connection -> rotate the signing ke
   await expect(row).toContainText('e2e-deploy-1');
 
   // Rotate the signing key; the displayed kid changes and /lti/jwks then serves it.
+  // Rotate is a two-click inline confirm (bindInlineConfirm), not a window.confirm dialog.
   const kidBefore = await page.locator('#signing-key-kid').textContent();
-  await page.getByRole('button', { name: 'Rotate key' }).click();
+  const rotateBtn = page.getByRole('button', { name: /^(Rotate key|Click again to rotate)$/ });
+  await rotateBtn.click();
+  await rotateBtn.click();
   await expect(page.locator('#signing-key-kid')).not.toHaveText(kidBefore ?? '');
   const kidAfter = (await page.locator('#signing-key-kid').textContent())!.trim();
 

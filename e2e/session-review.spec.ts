@@ -62,9 +62,9 @@ test('instructor: review, reopen-from-panel, delete and restore a past session',
   await delBtn.click();
   await expect(page.locator('#session-history-table-body tr')).toHaveCount(0);
 
-  // That was the course's last closed session — interim IMP-3 warns the instructor that
-  // scores already sent to Canvas are left behind (the recompute has a zero denominator).
-  await expect(page.getByText(/not removed automatically/i)).toBeVisible();
+  // That was the course's last closed session — the durable line-item removal warns the
+  // instructor that the Canvas attendance column will be removed automatically (§10 reword).
+  await expect(page.getByText(/removed automatically/i)).toBeVisible();
 
   // The deleted session was the one on screen -> the main view recovers to a
   // fresh no-session state instead of being stranded on "Session closed".
