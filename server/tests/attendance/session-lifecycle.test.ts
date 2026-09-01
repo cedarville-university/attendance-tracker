@@ -3,7 +3,15 @@ import { eq } from 'drizzle-orm';
 import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { seedInstitutionAndCourse } from '../support/seed.js';
 import { MockCanvasPlatform } from '../support/mock-canvas.js';
-import { createAttendanceSession, closeAttendanceSession, reopenAttendanceSession } from '../../src/attendance/session-lifecycle.js';
+import {
+  createAttendanceSession,
+  closeAttendanceSession,
+  reopenAttendanceSession,
+  softDeleteAttendanceSession,
+  restoreAttendanceSession,
+  SessionAlreadyDeletedError,
+  SessionNotDeletedError,
+} from '../../src/attendance/session-lifecycle.js';
 import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents, gradeSyncJobs, courseMembers } from '../../src/database/schema.js';
 import type { ToolSigningKey } from '../../src/lti/signing-keys.js';
 
@@ -348,5 +356,80 @@ describe('reopenAttendanceSession', () => {
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();
 
     await expect(reopenAttendanceSession(db, session.id, 'instructor-1')).rejects.toMatchObject({ code: 'session_not_closed' });
+  });
+});
+
+describe('softDeleteAttendanceSession / restoreAttendanceSession', () => {
+  it('soft-deletes an OPEN session: sets deleted_at/by, no grade recompute, audits attendance_session_deleted', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    const s = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+
+    const result = await softDeleteAttendanceSession(db, s.id, 'instructor-7', 'req-del');
+
+    expect(result).toEqual({ gradeRecompute: false, jobCount: 0 });
+    const [row] = await db.select().from(attendanceSessions).where(eq(attendanceSessions.id, s.id));
+    expect(row.deletedAt).not.toBeNull();
+    expect(row.deletedByLtiUserId).toBe('instructor-7');
+    const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'attendance_session_deleted'));
+    expect(audit).toMatchObject({ actorLtiUserId: 'instructor-7', targetType: 'attendance_session', targetId: s.id, requestId: 'req-del' });
+    expect(audit.newValue).toMatchObject({ gradeRecompute: false, jobCount: 0 });
+    // no grade_sync_requested audit row for an open-session delete
+    expect(await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_sync_requested'))).toHaveLength(0);
+  });
+
+  it('soft-deleting a CLOSED session recomputes the course grades without it', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    const members = [member({ ltiUserId: 'u1', institutionalId: '111' })];
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members, fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    await seedCourseMembers(courseId, members);
+
+    // A: present -> 100.  B: absent -> cumulative 50.
+    const a = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await db.insert(attendanceRecords).values({ attendanceSessionId: a.id, ltiUserId: 'u1', institutionalId: '111', clientScanId: 'a1', status: 'present', source: 'card', scannedAt: new Date() });
+    await closeAttendanceSession(db, a.id, 'i1', 'ra');
+    const b = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await closeAttendanceSession(db, b.id, 'i1', 'rb');
+    expect((await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, courseId)))[0].score).toBeCloseTo(50);
+
+    // Delete B -> only A counts -> 100.
+    const result = await softDeleteAttendanceSession(db, b.id, 'i1', 'req-del');
+    expect(result.gradeRecompute).toBe(true);
+    const [job] = await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, courseId));
+    expect(job.score).toBeCloseTo(100);
+  });
+
+  it('rejects a double delete with SessionAlreadyDeletedError', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    const s = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await softDeleteAttendanceSession(db, s.id, 'i1');
+    await expect(softDeleteAttendanceSession(db, s.id, 'i1')).rejects.toBeInstanceOf(SessionAlreadyDeletedError);
+  });
+
+  it('restore clears the columns, audits attendance_session_restored, and recomputes for a closed session', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    const members = [member({ ltiUserId: 'u1', institutionalId: '111' })];
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members, fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    await seedCourseMembers(courseId, members);
+
+    const a = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await closeAttendanceSession(db, a.id, 'i1', 'ra'); // absent -> job score 0
+    await softDeleteAttendanceSession(db, a.id, 'i1');   // no live closed sessions now
+
+    const result = await restoreAttendanceSession(db, a.id, 'instructor-3', 'req-res');
+    expect(result.gradeRecompute).toBe(true);
+    const [row] = await db.select().from(attendanceSessions).where(eq(attendanceSessions.id, a.id));
+    expect(row.deletedAt).toBeNull();
+    expect(row.deletedByLtiUserId).toBeNull();
+    const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'attendance_session_restored'));
+    expect(audit).toMatchObject({ actorLtiUserId: 'instructor-3', targetId: a.id, requestId: 'req-res' });
+  });
+
+  it('rejects restoring a session that is not deleted with SessionNotDeletedError', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    const s = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await expect(restoreAttendanceSession(db, s.id, 'i1')).rejects.toBeInstanceOf(SessionNotDeletedError);
   });
 });

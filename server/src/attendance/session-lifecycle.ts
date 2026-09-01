@@ -57,6 +57,18 @@ export class SessionRosterUnavailableError extends Error {
     this.cause = cause;
   }
 }
+export class SessionAlreadyDeletedError extends Error {
+  code = 'session_already_deleted' as const;
+  constructor() {
+    super('Attendance session is already deleted.');
+  }
+}
+export class SessionNotDeletedError extends Error {
+  code = 'session_not_deleted' as const;
+  constructor() {
+    super('Only a deleted attendance session can be restored.');
+  }
+}
 
 export async function createAttendanceSession(
   db: Database,
@@ -221,5 +233,89 @@ export async function reopenAttendanceSession(
       newValue: { reason: reason ?? null },
       requestId: requestId ?? null,
     });
+  });
+}
+
+export async function softDeleteAttendanceSession(
+  db: Database,
+  sessionId: string,
+  actorLtiUserId: string,
+  requestId?: string,
+): Promise<{ gradeRecompute: boolean; jobCount: number }> {
+  return db.transaction(async (tx) => {
+    const [session] = await tx.select().from(attendanceSessions).where(eq(attendanceSessions.id, sessionId)).for('update');
+    if (!session) throw new Error(`Attendance session ${sessionId} not found.`);
+    if (session.deletedAt) throw new SessionAlreadyDeletedError();
+
+    const [course] = await tx.select().from(courses).where(eq(courses.id, session.courseId));
+    const now = new Date();
+    await tx
+      .update(attendanceSessions)
+      .set({ deletedAt: now, deletedByLtiUserId: actorLtiUserId, updatedAt: now })
+      .where(eq(attendanceSessions.id, sessionId));
+
+    let gradeRecompute = false;
+    let jobCount = 0;
+    if (session.state === 'closed') {
+      gradeRecompute = true;
+      ({ jobCount } = await recomputeCourseGrades(tx, db, session.courseId, sessionId, actorLtiUserId, requestId));
+    }
+
+    await tx.insert(auditEvents).values({
+      institutionId: course.institutionId,
+      courseId: session.courseId,
+      attendanceSessionId: sessionId,
+      actorLtiUserId,
+      eventType: 'attendance_session_deleted',
+      targetType: 'attendance_session',
+      targetId: sessionId,
+      oldValue: { deletedAt: null, state: session.state },
+      newValue: { deletedAt: now.toISOString(), deletedByLtiUserId: actorLtiUserId, gradeRecompute, jobCount },
+      requestId: requestId ?? null,
+    });
+
+    return { gradeRecompute, jobCount };
+  });
+}
+
+export async function restoreAttendanceSession(
+  db: Database,
+  sessionId: string,
+  actorLtiUserId: string,
+  requestId?: string,
+): Promise<{ gradeRecompute: boolean; jobCount: number }> {
+  return db.transaction(async (tx) => {
+    const [session] = await tx.select().from(attendanceSessions).where(eq(attendanceSessions.id, sessionId)).for('update');
+    if (!session) throw new Error(`Attendance session ${sessionId} not found.`);
+    if (!session.deletedAt) throw new SessionNotDeletedError();
+
+    const [course] = await tx.select().from(courses).where(eq(courses.id, session.courseId));
+    const now = new Date();
+    await tx
+      .update(attendanceSessions)
+      .set({ deletedAt: null, deletedByLtiUserId: null, updatedAt: now })
+      .where(eq(attendanceSessions.id, sessionId));
+
+    let gradeRecompute = false;
+    let jobCount = 0;
+    if (session.state === 'closed') {
+      gradeRecompute = true;
+      ({ jobCount } = await recomputeCourseGrades(tx, db, session.courseId, sessionId, actorLtiUserId, requestId));
+    }
+
+    await tx.insert(auditEvents).values({
+      institutionId: course.institutionId,
+      courseId: session.courseId,
+      attendanceSessionId: sessionId,
+      actorLtiUserId,
+      eventType: 'attendance_session_restored',
+      targetType: 'attendance_session',
+      targetId: sessionId,
+      oldValue: { deletedAt: session.deletedAt.toISOString() },
+      newValue: { deletedAt: null, gradeRecompute, jobCount },
+      requestId: requestId ?? null,
+    });
+
+    return { gradeRecompute, jobCount };
   });
 }
