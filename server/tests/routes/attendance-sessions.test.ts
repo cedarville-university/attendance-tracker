@@ -5,7 +5,7 @@ import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { seedInstitutionAndCourse } from '../support/seed.js';
 import { MockCanvasPlatform } from '../support/mock-canvas.js';
 import { registerAttendanceSessionsRoute } from '../../src/routes/attendance-sessions.js';
-import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents, gradeSyncJobs } from '../../src/database/schema.js';
+import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents, gradeSyncJobs, gradeLineItems } from '../../src/database/schema.js';
 import type { IdentityResolver } from '../../src/identity/types.js';
 import { stubSigningKeyProvider } from '../support/signing-keys.js';
 
@@ -425,13 +425,39 @@ describe('grade-sync', () => {
 
     const res = await app.inject({ method: 'POST', url: `/api/attendance-sessions/${session.id}/grade-sync`, headers: CSRF });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true, retried: 1 });
+    expect(res.json()).toEqual({ ok: true, retried: 1, deletionRearmed: false });
 
     const [u1] = await db.select().from(gradeSyncJobs).where(and(eq(gradeSyncJobs.courseId, courseId), eq(gradeSyncJobs.ltiUserId, 'u1')));
     expect(u1).toMatchObject({ state: 'pending', attemptCount: 0, lastError: null });
     const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_sync_requested'));
     expect(audit).toMatchObject({ targetType: 'attendance_session', targetId: session.id, actorLtiUserId: 'instructor-1' });
-    expect(audit.newValue).toMatchObject({ retriedJobCount: 1, trigger: 'manual' });
+    expect(audit.newValue).toMatchObject({ retriedJobCount: 1, trigger: 'manual', deletionRearmed: false });
+  });
+
+  it('POST :id/grade-sync re-arms a terminally-failed line-item deletion for the course', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'i1', state: 'closed' }).returning();
+    await db.insert(gradeLineItems).values({
+      courseId,
+      canvasLineItemId: 'li-1',
+      canvasLineItemUrl: 'https://canvas.example.edu/api/lti/courses/1/line_items/li-1',
+      resourceId: 'attendance-cumulative-v1',
+      tag: 'attendance',
+      scoreMaximum: 100,
+      deleteRequestedAt: new Date(),
+      deleteNextAttemptAt: null, // terminal failure
+      deleteAttemptCount: 6,
+      deleteLastError: 'ags:server-error',
+    });
+
+    const res = await app.inject({ method: 'POST', url: `/api/attendance-sessions/${session.id}/grade-sync`, headers: CSRF });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, retried: 0, deletionRearmed: true });
+    const [li] = await db.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId));
+    expect(li.deleteNextAttemptAt).not.toBeNull();
+    expect(li.deleteAttemptCount).toBe(0);
   });
 
   it('POST :id/grade-sync without a CSRF token is 403', async () => {
