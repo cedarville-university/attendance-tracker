@@ -111,6 +111,12 @@ export async function markJobFailed(db: Database, jobId: string, lastError: stri
 export interface GradeSyncSummary {
   state: 'none' | 'synced' | 'pending' | 'failed';
   counts: { pending: number; synced: number; failed: number };
+  /** Rows on the outbox for this course (students with a score on the line item). */
+  total: number;
+  /** Min next_attempt_at (ISO) across rows still pending; null when nothing is pending. */
+  nextAttemptAt: string | null;
+  /** Max updated_at (ISO) across synced rows — no dedicated synced-at column exists; null when none synced. */
+  lastSyncedAt: string | null;
   lastError: string | null;
 }
 
@@ -119,6 +125,8 @@ export async function getGradeSyncSummary(db: Database, courseId: string): Promi
   const counts = { pending: 0, synced: 0, failed: 0 };
   let lastError: string | null = null;
   let lastErrorAt = 0;
+  let nextAttemptMs = Infinity;
+  let lastSyncedMs = 0;
   for (const row of rows) {
     counts[row.state] += 1;
     if (row.state === 'failed') {
@@ -128,10 +136,23 @@ export async function getGradeSyncSummary(db: Database, courseId: string): Promi
         lastError = row.lastError ?? null;
       }
     }
+    if (row.state === 'pending') {
+      nextAttemptMs = Math.min(nextAttemptMs, new Date(row.nextAttemptAt).getTime());
+    }
+    if (row.state === 'synced') {
+      lastSyncedMs = Math.max(lastSyncedMs, new Date(row.updatedAt).getTime());
+    }
   }
   const state: GradeSyncSummary['state'] =
     rows.length === 0 ? 'none' : counts.failed > 0 ? 'failed' : counts.pending > 0 ? 'pending' : 'synced';
-  return { state, counts, lastError };
+  return {
+    state,
+    counts,
+    total: rows.length,
+    nextAttemptAt: Number.isFinite(nextAttemptMs) ? new Date(nextAttemptMs).toISOString() : null,
+    lastSyncedAt: lastSyncedMs > 0 ? new Date(lastSyncedMs).toISOString() : null,
+    lastError,
+  };
 }
 
 /**

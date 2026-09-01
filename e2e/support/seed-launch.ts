@@ -65,6 +65,8 @@ export interface SeededInstructorLaunch {
   cardReportBytes: number[];
   /** The roster learner the scan resolves to. */
   learner: { ltiUserId: string; universityId: string; name: string };
+  /** A second rostered learner who is never scanned — used to exercise the manual "mark present" control. */
+  cardlessLearner: { ltiUserId: string; universityId: string; name: string };
 }
 
 let platform: MockCanvasPlatform | undefined;
@@ -127,6 +129,11 @@ export async function seedInstructorLaunch(): Promise<SeededInstructorLaunch> {
     universityId: mockResolverUniversityId(E2E_CARD_CODE),
     name: 'E2E Test Learner',
   };
+  const cardlessLearner = {
+    ltiUserId: `e2e-cardless-${randomUUID()}`,
+    universityId: '2000001',
+    name: 'E2E Cardless Learner',
+  };
   canvas.setCourseMembers(contextId, [
     {
       user_id: learner.ltiUserId,
@@ -134,6 +141,13 @@ export async function seedInstructorLaunch(): Promise<SeededInstructorLaunch> {
       roles: [LEARNER_ROLE],
       name: learner.name,
       lis_person_sourcedid: learner.universityId,
+    },
+    {
+      user_id: cardlessLearner.ltiUserId,
+      status: 'Active',
+      roles: [LEARNER_ROLE],
+      name: cardlessLearner.name,
+      lis_person_sourcedid: cardlessLearner.universityId,
     },
   ]);
 
@@ -186,6 +200,7 @@ export async function seedInstructorLaunch(): Promise<SeededInstructorLaunch> {
     cardCode: E2E_CARD_CODE,
     cardReportBytes: buildOmnikeyReportBytes(E2E_CARD_CODE),
     learner,
+    cardlessLearner,
   };
 }
 
@@ -222,6 +237,9 @@ export function runWorkerOnce(): Promise<WorkerRunResult> {
 export interface GradeSyncSummary {
   state: 'none' | 'synced' | 'pending' | 'failed';
   counts: { pending: number; synced: number; failed: number };
+  total: number;
+  nextAttemptAt: string | null;
+  lastSyncedAt: string | null;
   lastError: string | null;
 }
 

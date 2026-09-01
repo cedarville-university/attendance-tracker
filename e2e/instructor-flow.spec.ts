@@ -53,8 +53,8 @@ test('instructor: login -> launch -> start -> scan -> close -> reopen -> grade s
   // /api/course/roster without any CSV upload.
   await expect(page.locator('#course-context')).toBeVisible();
   await expect(page.locator('#course-context-name')).toHaveText('E2E Course'); // context.title from seed-launch.ts
-  await expect(page.locator('#course-context-roster-count')).toHaveText('1 student');
-  await expect(page.locator('#canvas-roster-table-body tr')).toHaveCount(1);
+  await expect(page.locator('#course-context-roster-count')).toHaveText('2 students');
+  await expect(page.locator('#canvas-roster-table-body tr')).toHaveCount(2);
   await expect(page.locator('#canvas-roster-table-body tr').first()).toContainText('E2E Test Learner');
 
   // The shimmed reader auto-reconnects on load (web/hid-reader.js reconnectKnownDevices()).
@@ -85,11 +85,26 @@ test('instructor: login -> launch -> start -> scan -> close -> reopen -> grade s
     seeded.learner.universityId,
   );
 
+  // Manual "mark present": the second rostered learner never scanned a card. Pick them from the
+  // dropdown and confirm a new Present row appears and they drop out of the picker.
+  const manualGroup = page.locator('#manual-present-group');
+  await expect(manualGroup).toBeVisible();
+  await page.locator('#manual-present-select').selectOption(seeded.cardlessLearner.ltiUserId);
+  await page.getByRole('button', { name: 'Mark present' }).click();
+  await expect(
+    page.locator(`#attendance-table-body tr:has(.col-university-id:text-is("${seeded.cardlessLearner.universityId}")) .status-badge`),
+  ).toHaveText('Present');
+  await expect(page.locator('#btn-manual-present')).toBeDisabled(); // nobody left to mark
+  await expect(page.locator('#manual-present-select')).not.toContainText(seeded.cardlessLearner.name);
+
   // Close — unscanned eligible members become absent; grade-sync jobs are enqueued (pending).
   await page.getByRole('button', { name: 'Close Attendance' }).click();
   await expect(page.locator('#session-status-text')).toHaveText(/Session closed/i);
   await expect(page.locator('#grade-sync-panel')).toBeVisible();
-  await expect(page.locator('#grade-sync-status-text')).toHaveText(/pending/i);
+  await expect(page.locator('#manual-present-group')).toBeHidden();
+  // Richer summary line: a "N of M students" count plus a scheduling phrase.
+  await expect(page.locator('#grade-sync-status-text')).toHaveText(/of \d+ students/i);
+  await expect(page.locator('#grade-sync-status-text')).toHaveText(/next sync attempt|last synced/i);
 
   // Reopen — scans accepted again; grade-sync jobs are deliberately left untouched.
   await page.getByRole('button', { name: 'Reopen Attendance' }).click();

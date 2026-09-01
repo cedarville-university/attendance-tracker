@@ -64,6 +64,25 @@ describe('attendance-session.js', () => {
     expect(result.body.session.id).toBe('session-1');
   });
 
+  it('getAttendanceSession passes the whole JSON body through untouched, including a grown gradeSync shape', async () => {
+    const gradeSync = {
+      state: 'pending',
+      counts: { pending: 3, synced: 5, failed: 0 },
+      total: 8,
+      nextAttemptAt: '2026-08-31T18:05:00.000Z',
+      lastSyncedAt: '2026-08-31T17:00:00.000Z',
+      lastError: null,
+    };
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ session: { id: 'session-1', state: 'closed' }, members: [], gradeSync }),
+    });
+    const result = await getAttendanceSession('session-1');
+    expect(result.ok).toBe(true);
+    expect(result.body.gradeSync).toEqual(gradeSync);
+  });
+
   it('listOpenAttendanceSessions GETs the list endpoint and returns the sessions array', async () => {
     vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ sessions: [{ id: 's1', state: 'open' }] }) });
     const result = await listOpenAttendanceSessions();

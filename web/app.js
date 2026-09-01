@@ -15,6 +15,7 @@ import { fetchCourseRoster, refreshCourseRoster, buildMemberIndex, countEligible
 import { ScanPipeline } from './scan-pipeline.js';
 import { downloadAttendanceCsv, downloadCsvText } from './csv.js';
 import { computeAbsentRows, computeAbsentRowsFromMembers } from './absentees.js';
+import { eligibleUnrecordedMembers } from './manual-present.js';
 import * as storage from './storage.js';
 import * as ui from './ui.js';
 import { bootstrapSession } from './api-client.js';
@@ -35,6 +36,29 @@ const { elements } = ui;
 // ---- Attendance session state (owned here) --------------------------------
 
 let currentAttendanceSessionId = null;
+
+// The open session's roster snapshot (GET /api/attendance-sessions/:id members[]),
+// used to drive the manual "mark present" picker. Empty until a session is
+// started or resumed.
+let sessionMembers = [];
+
+/** Re-renders the manual-present dropdown from the current sessionMembers snapshot. */
+function refreshManualPresentOptions() {
+  ui.renderManualPresentOptions(eligibleUnrecordedMembers(sessionMembers));
+}
+
+/**
+ * Reflects a member reaching `present` (via a scan or a manual mark) into the
+ * local sessionMembers snapshot so they drop out of the picker.
+ */
+function noteMemberPresent(ltiUserId, record) {
+  if (!ltiUserId) return;
+  const member = sessionMembers.find((m) => m.ltiUserId === ltiUserId);
+  if (member) {
+    member.currentRecord = record || member.currentRecord || { status: 'present' };
+    refreshManualPresentOptions();
+  }
+}
 
 // ---- Roster state (owned here; roster.js only provides pure helpers) ------
 
@@ -111,10 +135,12 @@ const scanPipeline = new ScanPipeline({
     onRecordCreated: (record) => {
       ui.addAttendanceRow(record, handleRemoveRecord);
       ui.renderLatestScanPending(record);
+      if (record.status === 'present') noteMemberPresent(record.ltiUserId, record);
       schedulePersist();
     },
     onRecordUpdated: (record) => {
       ui.updateAttendanceRow(record);
+      if (record.status === 'present') noteMemberPresent(record.ltiUserId, record);
       schedulePersist();
     },
     onLatestScanUpdate: (record) => {
@@ -259,6 +285,13 @@ async function startSession() {
   scanPipeline.sessionId = result.session.id;
   ui.renderSessionState({ state: result.session.state, label: result.session.label });
   ui.showAppMessage('info', 'Attendance session started.');
+
+  // The POST returns only the bare session row; fetch the detail once so the
+  // manual "mark present" picker has the roster snapshot to work from.
+  const detail = await getAttendanceSession(currentAttendanceSessionId);
+  sessionMembers = detail.ok ? detail.body.members || [] : [];
+  ui.setManualPresentGroupVisible(true);
+  refreshManualPresentOptions();
 }
 
 async function closeSession() {
@@ -271,6 +304,7 @@ async function closeSession() {
     return;
   }
   ui.renderSessionState({ state: 'closed' });
+  ui.setManualPresentGroupVisible(false);
   ui.showAppMessage('info', 'Attendance session closed. Unscanned students were marked absent.');
   await refreshGradeSync(currentAttendanceSessionId);
 }
@@ -295,12 +329,37 @@ async function reopenSession() {
   ui.renderSessionState({ state: 'reopened' });
   // Reopening doesn't touch grade-sync jobs; hide the panel until the next close.
   ui.renderGradeSyncState(undefined);
+  ui.setManualPresentGroupVisible(true);
+  refreshManualPresentOptions();
   ui.showAppMessage('info', 'Attendance session reopened. Scans are accepted again.');
 }
 
 elements.startSessionBtn.addEventListener('click', startSession);
 elements.closeSessionBtn.addEventListener('click', closeSession);
 elements.reopenSessionBtn.addEventListener('click', reopenSession);
+
+// Manual "mark present" -- records a rostered student who has no scan (forgot
+// their card). Reuses the same PATCH member endpoint as the per-row correction.
+elements.manualPresentBtn.addEventListener('click', async () => {
+  const ltiUserId = elements.manualPresentSelect.value;
+  if (!currentAttendanceSessionId || !ltiUserId) return;
+  const member = sessionMembers.find((m) => m.ltiUserId === ltiUserId);
+  elements.manualPresentBtn.disabled = true;
+  const result = await correctMemberStatus(currentAttendanceSessionId, ltiUserId, 'present');
+  if (!result.ok) {
+    ui.showAppMessage('error', `Could not mark present: ${result.error.message}`);
+    refreshManualPresentOptions(); // restores the button's enabled state
+    return;
+  }
+  const row = serverRecordToRow(result.record, member);
+  resumedRowsById.set(row.id, row);
+  ui.addAttendanceRow(row, handleRemoveRecord);
+  // noteMemberPresent -> refreshManualPresentOptions owns the button state from here (it stays
+  // disabled when nobody eligible is left).
+  noteMemberPresent(ltiUserId, result.record);
+  refreshManualPresentOptions();
+  ui.showAppMessage('info', `Marked ${(member && member.displayName) || ltiUserId} present.`);
+});
 
 elements.retryGradeSyncBtn.addEventListener('click', async () => {
   const sessionId = currentAttendanceSessionId;
@@ -680,6 +739,7 @@ async function resumeOpenSessionIfAny() {
 
   const detail = await getAttendanceSession(chosen.id);
   if (detail.ok) {
+    sessionMembers = detail.body.members || [];
     resumedRowsById.clear();
     ui.clearAttendanceTable();
     const rows = [];
@@ -702,6 +762,8 @@ async function resumeOpenSessionIfAny() {
 
   ui.renderSessionState({ state: chosen.state, label: chosen.label });
   ui.renderGradeSyncState(detail.body?.gradeSync);
+  ui.setManualPresentGroupVisible(true);
+  refreshManualPresentOptions();
   ui.showAppMessage('info', 'Reconnected to the attendance session already in progress.');
 }
 

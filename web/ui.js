@@ -19,6 +19,9 @@ export const elements = {
   startSessionBtn: document.getElementById('btn-start-session'),
   closeSessionBtn: document.getElementById('btn-close-session'),
   reopenSessionBtn: document.getElementById('btn-reopen-session'),
+  manualPresentGroup: document.getElementById('manual-present-group'),
+  manualPresentSelect: document.getElementById('manual-present-select'),
+  manualPresentBtn: document.getElementById('btn-manual-present'),
   gradeSyncPanel: document.getElementById('grade-sync-panel'),
   gradeSyncStatusText: document.getElementById('grade-sync-status-text'),
   retryGradeSyncBtn: document.getElementById('btn-retry-grade-sync'),
@@ -253,19 +256,65 @@ export function renderSessionState(sessionInfo) {
   }
 }
 
+// ---- Manual "mark present" control -------------------------------------
+
+/**
+ * Populates the card-less-student picker with the members app.js computed via
+ * eligibleUnrecordedMembers(). Disables the button when nobody is left to mark.
+ * @param {{ltiUserId: string, displayName: string|null, institutionalId: string|null}[]} members
+ */
+export function renderManualPresentOptions(members) {
+  const select = elements.manualPresentSelect;
+  while (select.firstChild) select.removeChild(select.firstChild);
+
+  if (!members.length) {
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Everyone eligible is marked present';
+    select.appendChild(placeholder);
+    select.disabled = true;
+    elements.manualPresentBtn.disabled = true;
+    return;
+  }
+
+  for (const member of members) {
+    const option = document.createElement('option');
+    option.value = member.ltiUserId;
+    const idPart = member.institutionalId ? ` — ${member.institutionalId}` : '';
+    option.textContent = `${member.displayName || member.ltiUserId}${idPart}`;
+    select.appendChild(option);
+  }
+  select.disabled = false;
+  elements.manualPresentBtn.disabled = false;
+}
+
+/** @param {boolean} visible */
+export function setManualPresentGroupVisible(visible) {
+  elements.manualPresentGroup.hidden = !visible;
+}
+
 // ---- Grade-sync status --------------------------------------------------
 
-const GRADE_SYNC_TEXT = {
-  synced: 'Grades synchronized',
-  pending: 'Grades pending',
-  failed: 'Grade synchronization failed',
-};
+/** True when `iso` is missing or no more than ~60s ahead of now. */
+function isImminent(iso) {
+  if (!iso) return true;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return true;
+  return t - Date.now() <= 60_000;
+}
+
+/** Human phrase for the next scheduled sync attempt. */
+function nextAttemptPhrase(iso) {
+  return isImminent(iso) ? 'in a few minutes' : `around ${shortTime(iso)}`;
+}
 
 /**
  * Renders the grade-sync summary carried by GET /api/attendance-sessions/:id
  * (spec §28). `state === 'none'` (or no summary) hides the panel; the retry
  * button shows only when a sync has actually failed.
- * @param {{state?: string, counts?: {pending:number,synced:number,failed:number}, lastError?: string|null}} [summary]
+ * @param {{state?: string, counts?: {pending:number,synced:number,failed:number},
+ *          total?: number, nextAttemptAt?: string|null, lastSyncedAt?: string|null,
+ *          lastError?: string|null}} [summary]
  */
 export function renderGradeSyncState(summary) {
   const state = summary?.state ?? 'none';
@@ -275,9 +324,22 @@ export function renderGradeSyncState(summary) {
     return;
   }
   elements.gradeSyncPanel.hidden = false;
-  const base = GRADE_SYNC_TEXT[state] ?? state;
-  elements.gradeSyncStatusText.textContent =
-    state === 'failed' && summary?.lastError ? `${base} (${summary.lastError})` : base;
+
+  const counts = summary?.counts ?? { pending: 0, synced: 0, failed: 0 };
+  const total = summary?.total ?? counts.pending + counts.synced + counts.failed;
+  let text;
+  if (state === 'pending') {
+    text = `Grades pending — ${counts.pending} of ${total} students. Next sync attempt ${nextAttemptPhrase(summary?.nextAttemptAt)}.`;
+  } else if (state === 'synced') {
+    const last = summary?.lastSyncedAt ? ` Last synced ${shortTime(summary.lastSyncedAt)}.` : '';
+    text = `Grades synced — ${total} students.${last}`;
+  } else if (state === 'failed') {
+    const retry = counts.pending > 0 ? ` Retrying — next attempt ${nextAttemptPhrase(summary?.nextAttemptAt)}.` : '';
+    text = `Grade sync failed for ${counts.failed} of ${total} students (${summary?.lastError ?? 'unknown error'}).${retry}`;
+  } else {
+    text = state;
+  }
+  elements.gradeSyncStatusText.textContent = text;
   elements.retryGradeSyncBtn.hidden = state !== 'failed';
 }
 

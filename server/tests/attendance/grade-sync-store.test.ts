@@ -119,6 +119,47 @@ describe('getGradeSyncSummary', () => {
     expect(summary.counts).toEqual({ pending: 0, synced: 1, failed: 1 });
     expect(summary.lastError).toBe('ags:client-error');
   });
+
+  it('reports total, the earliest pending next_attempt_at, and the latest synced updated_at', async () => {
+    const { courseId, sessionId } = await seedSessionAndCourse();
+    await upsertGradeSyncJobs(
+      db,
+      courseId,
+      sessionId,
+      new Map([['u1', { scoreGiven: 10 }], ['u2', { scoreGiven: 20 }], ['u3', { scoreGiven: 30 }]]),
+    );
+    const rows = await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, courseId));
+    const u = (id: string) => rows.find((r) => r.ltiUserId === id)!;
+
+    // u1 synced earlier, u2 synced later; u3 pending with a far-future next attempt.
+    const early = new Date('2026-08-28T10:00:00.000Z');
+    const late = new Date('2026-08-28T11:30:00.000Z');
+    const future = new Date('2026-08-28T12:00:00.000Z');
+    await markJobSynced(db, u('u1').id, early);
+    await markJobSynced(db, u('u2').id, late);
+    await markJobRetry(db, u('u3').id, 1, future, 'ags:rate-limited', late);
+
+    const summary = await getGradeSyncSummary(db, courseId);
+    expect(summary.total).toBe(3);
+    expect(summary.nextAttemptAt).toBe(future.toISOString());
+    expect(summary.lastSyncedAt).toBe(late.toISOString());
+  });
+
+  it('nulls nextAttemptAt when nothing is pending and lastSyncedAt when nothing is synced', async () => {
+    const { courseId, sessionId } = await seedSessionAndCourse();
+    await upsertGradeSyncJobs(db, courseId, sessionId, new Map([['u1', { scoreGiven: 10 }]]));
+    const [row] = await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, courseId));
+
+    // All pending, none synced.
+    let summary = await getGradeSyncSummary(db, courseId);
+    expect(summary.nextAttemptAt).not.toBeNull();
+    expect(summary.lastSyncedAt).toBeNull();
+
+    await markJobFailed(db, row.id, 'ags:client-error', new Date());
+    summary = await getGradeSyncSummary(db, courseId);
+    expect(summary.nextAttemptAt).toBeNull();
+    expect(summary.lastSyncedAt).toBeNull();
+  });
 });
 
 describe('resetFailedJobs', () => {
