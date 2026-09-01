@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { MockCanvasPlatform } from '../support/mock-canvas.js';
-import { ensureLineItem, postScore, ATTENDANCE_RESOURCE_ID, ATTENDANCE_TAG } from '../../src/lti/ags.js';
+import { ensureLineItem, postScore, deleteLineItem, ATTENDANCE_RESOURCE_ID, ATTENDANCE_TAG } from '../../src/lti/ags.js';
 
 async function mintToken(platform: MockCanvasPlatform): Promise<string> {
   const res = await fetch(platform.tokenUrl, {
@@ -130,5 +130,90 @@ describe('postScore', () => {
     const result = await postScore(lineItemUrl, token, { userId: 'u1', scoreGiven: 10, scoreMaximum: 100, timestamp: new Date().toISOString() });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.kind).toBe('rate-limited');
+  });
+});
+
+describe('deleteLineItem', () => {
+  let platform: MockCanvasPlatform;
+  beforeAll(async () => {
+    platform = new MockCanvasPlatform();
+    await platform.start();
+  });
+  afterAll(async () => {
+    await platform.stop();
+  });
+
+  it('DELETEs the line item and removes it from Canvas (value=false, not a 404)', async () => {
+    const token = await mintToken(platform);
+    const lineItemUrl = platform.seedExistingLineItem('c-del');
+    expect(platform.getLineItems('c-del')).toHaveLength(1);
+
+    const result = await deleteLineItem(lineItemUrl, token);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toBe(false);
+    expect(platform.getLineItems('c-del')).toHaveLength(0);
+  });
+
+  it('treats a Canvas 404 as already-gone success (value=true)', async () => {
+    const token = await mintToken(platform);
+    // A well-formed line-item URL that was never created.
+    const missingUrl = platform.seedExistingLineItem('c-del-404');
+    await deleteLineItem(missingUrl, token); // first delete really removes it
+    const result = await deleteLineItem(missingUrl, token); // second hits 404
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toBe(true);
+  });
+
+  it('classifies a 401 as retryable auth', async () => {
+    const token = await mintToken(platform);
+    const lineItemUrl = platform.seedExistingLineItem('c-del-401');
+    platform.failNextAgsRequest('auth');
+    const result = await deleteLineItem(lineItemUrl, token);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatchObject({ kind: 'auth', retryable: true });
+  });
+
+  it('classifies a 429 as retryable rate-limited', async () => {
+    const token = await mintToken(platform);
+    const lineItemUrl = platform.seedExistingLineItem('c-del-429');
+    platform.failNextAgsRequest('rate-limited');
+    const result = await deleteLineItem(lineItemUrl, token);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatchObject({ kind: 'rate-limited', retryable: true });
+  });
+
+  it('classifies a 500 as retryable server-error', async () => {
+    const token = await mintToken(platform);
+    const lineItemUrl = platform.seedExistingLineItem('c-del-500');
+    platform.failNextAgsRequest('server-error');
+    const result = await deleteLineItem(lineItemUrl, token);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatchObject({ kind: 'server-error', retryable: true });
+  });
+
+  it('classifies a 422 as PERMANENT client-error', async () => {
+    const token = await mintToken(platform);
+    const lineItemUrl = platform.seedExistingLineItem('c-del-422');
+    platform.failNextAgsRequest('client-error');
+    const result = await deleteLineItem(lineItemUrl, token);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatchObject({ kind: 'client-error', retryable: false });
+  });
+
+  it('classifies a thrown fetch as retryable network', async () => {
+    const dead: typeof fetch = async () => {
+      throw new Error('ECONNREFUSED');
+    };
+    const result = await deleteLineItem('https://canvas.example.edu/api/lti/courses/1/line_items/9', 'tok', { fetchImpl: dead });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatchObject({ kind: 'network', retryable: true });
+  });
+
+  it('rejects a malformed URL without a fetch', async () => {
+    const result = await deleteLineItem('not a url', 'tok');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe('invalid-service-url');
   });
 });

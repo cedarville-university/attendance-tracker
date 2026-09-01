@@ -244,3 +244,35 @@ export async function postScore(
   if (error) return error;
   return { ok: true, value: undefined };
 }
+
+// DELETE the whole cumulative line item (spec §25.11, §27.1). Same auth-retry contract as
+// postScore (the caller — line-item-deletion.ts — owns the single 401 re-mint). A Canvas 404
+// means the line item is already gone, which is exactly the desired end state, so it is a
+// success, not an error. The boolean value is `true` when Canvas reported it already absent
+// (404) and `false` for a normal 2xx delete — used only for the audit's `canvas404` field.
+export async function deleteLineItem(
+  lineItemUrl: string,
+  accessToken: string,
+  deps: { fetchImpl?: typeof fetch } = {},
+): Promise<AgsResult<boolean>> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const urlCheck = validateCanvasServiceUrl(lineItemUrl);
+  if (!urlCheck.ok) {
+    return { ok: false, error: { kind: 'invalid-service-url', message: 'ags:invalid-service-url', retryable: false } };
+  }
+
+  let response: Response;
+  try {
+    response = await fetchImpl(lineItemUrl, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${accessToken}` },
+      redirect: 'manual',
+    });
+  } catch (err) {
+    return networkError(err);
+  }
+  if (response.status === 404) return { ok: true, value: true };
+  const error = classifyResponse(response);
+  if (error) return error;
+  return { ok: true, value: false };
+}

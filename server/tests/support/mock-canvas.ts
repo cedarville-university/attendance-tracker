@@ -138,6 +138,23 @@ export class MockCanvasPlatform {
       return reply.code(200).send({ resultUrl: `${this.baseUrl}/ags/lineitems/${lineItemId}/results/mock` });
     });
 
+    this.app.delete('/ags/lineitems/:lineItemId', async (request, reply) => {
+      if (!agsAuthOk(request)) return reply.code(401).send({ error: 'invalid_token' });
+      const failure = consumeAgsFailure(reply);
+      if (failure) return failure;
+      const { lineItemId } = request.params as { lineItemId: string };
+      for (const [courseId, items] of this.lineItems) {
+        const idx = items.findIndex((li) => li.id.endsWith(`/${lineItemId}`));
+        if (idx !== -1) {
+          items.splice(idx, 1);
+          this.lineItems.set(courseId, items);
+          this.lineItemScores.delete(lineItemId);
+          return reply.code(204).send();
+        }
+      }
+      return reply.code(404).send({ error: 'unknown_line_item' }); // already gone
+    });
+
     this.app.get('/jwks', async () => ({ keys: [...this.keys.values()].map((k) => k.publicJwk) }));
 
     this.app.post('/login/oauth2/token', async (request, reply) => {
