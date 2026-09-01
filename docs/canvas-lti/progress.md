@@ -539,6 +539,30 @@ listed below for continuity but have not been planned in detail yet.
   (`DELETE /api/attendance-sessions/:id`) + `POST .../restore` with grade
   recompute, and the "Past sessions" web panel (reopen / delete / restore).
 
+- **Durable Canvas AGS line-item removal** (spec §25.11, §27.1, §28), following
+  up on the interim warning-only behavior. When a soft delete removes a
+  course's last closed session, the cumulative line item is no longer just
+  left stale: 5 new `grade_line_items` columns (`delete_requested_at`,
+  `delete_requested_by_lti_user_id`, `delete_attempt_count`,
+  `delete_next_attempt_at`, `delete_last_error`) flag it for removal inside
+  the same soft-delete transaction, and the course's `grade_sync_jobs` are
+  purged so nothing posts to a column about to disappear. A new worker pass,
+  `processLineItemDeletions` (`server/src/attendance/line-item-deletion.ts`),
+  runs before `processGradeSyncJobs` on every tick: it mints one AGS token per
+  due course, issues the Canvas `DELETE` (a `404` counts as already-removed
+  success), and finalizes under the existing per-course advisory lock with a
+  re-check that aborts if a concurrent close/restore cancelled the request or
+  repointed the row at a different line item in the meantime. Retryable
+  failures back off with the shared `computeBackoff`/`MAX_GRADE_SYNC_ATTEMPTS`
+  and terminally fail pending a manual re-arm; `POST
+  /api/attendance-sessions/:id/grade-sync` now re-arms a stuck removal
+  alongside its existing failed-job retry. 4 new audit events
+  (`grade_line_item_delete_requested`, `grade_line_item_deleted`,
+  `grade_line_item_delete_failed`, `grade_line_item_delete_canceled`) cover
+  the lifecycle, and a `grade_line_item_deletions.stuck` gauge surfaces
+  terminally-failed removals to operators now that the purged
+  `grade_sync_jobs` mean `getGradeSyncSummary` can't.
+
 ## Deferred decisions
 
 - **Real ProxID credentials.** `HttpIdentityResolver` is implemented (ported

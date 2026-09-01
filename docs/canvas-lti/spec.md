@@ -1295,14 +1295,14 @@ grades from the remaining non-deleted closed sessions. It responds `200 { ok: tr
 was the course's **last** closed session there is nothing left to recompute from:
 the course's `grade_sync_jobs` are purged and the cumulative Canvas line item is
 flagged for durable removal on `grade_line_items` (`delete_requested_at` +
-`delete_next_attempt_at`). The grade-sync worker's line-item-deletion pass then
+`delete_next_attempt_at`, audited `grade_line_item_delete_requested`). The grade-sync worker's line-item-deletion pass then
 issues the AGS `DELETE` (a Canvas `404` counts as already removed), drops the
 `grade_line_items` row, and audits `grade_line_item_deleted`. `lastClosedSessionRemoved`
 is `true` so the client can tell the instructor the column is being removed. A later
 close or restore in the course cancels a still-pending removal
 (`grade_line_item_delete_canceled`); the next recompute recreates the line item
 idempotently via `ensureLineItem` (spec §27.1). `POST /grade-sync` re-arms a removal
-that hit its retry ceiling. `restore` is the inverse. Both audit actor + time and,
+that hit its retry ceiling (`grade_line_item_delete_failed`). `restore` is the inverse. Both audit actor + time and,
 when a recompute ran, emit `grade_sync_requested`. Editing a past session is
 unchanged: reopen it, correct records, close it.
 
