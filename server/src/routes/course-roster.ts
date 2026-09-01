@@ -7,7 +7,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Database } from '../database/client.js';
 import type { AppSession } from '../auth/session.js';
-import type { ToolSigningKey } from '../lti/signing-keys.js';
+import type { SigningKeyProvider } from '../lti/signing-key-store.js';
 import { auditEvents } from '../database/schema.js';
 import {
   getCachedRosterAsMembers,
@@ -21,7 +21,8 @@ export interface CourseRosterRouteDeps {
   db: Database;
   requireSession: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
   requireCsrf: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
-  signingKey: ToolSigningKey;
+  // Read at request time so an admin signing-key rotation takes effect without a restart.
+  signingKeyProvider: SigningKeyProvider;
 }
 
 function serializeMember(m: CourseRosterMember) {
@@ -73,7 +74,7 @@ export function registerCourseRosterRoutes(app: FastifyInstance, deps: CourseRos
     }
 
     try {
-      const roster = await getRosterWithFallback(deps.db, session.courseId, { signingKey: deps.signingKey });
+      const roster = await getRosterWithFallback(deps.db, session.courseId, { signingKey: deps.signingKeyProvider.getActive() });
       if (roster.refreshed) {
         await writeRosterRefreshedAuditEvent(deps.db, session, roster.members.length, request.id);
       }
@@ -97,7 +98,7 @@ export function registerCourseRosterRoutes(app: FastifyInstance, deps: CourseRos
       }
 
       try {
-        const roster = await getRosterWithFallback(deps.db, session.courseId, { signingKey: deps.signingKey });
+        const roster = await getRosterWithFallback(deps.db, session.courseId, { signingKey: deps.signingKeyProvider.getActive() });
         if (roster.refreshed) {
           await writeRosterRefreshedAuditEvent(deps.db, session, roster.members.length, request.id);
         }

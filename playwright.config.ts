@@ -11,6 +11,9 @@ const DATABASE_URL =
   process.env.E2E_DATABASE_URL ??
   'postgres://attendance_tracker:attendance_tracker@localhost:5432/attendance_tracker_e2e';
 const CARD_FINGERPRINT_SECRET = process.env.E2E_CARD_FINGERPRINT_SECRET ?? 'e2e-secret-not-for-prod';
+// Enables the admin/setup page's token bootstrap path (e2e/admin-setup.spec.ts). Must be >= 16
+// chars. Kept in sync with the literal fallback in e2e/admin-setup.spec.ts.
+const SETUP_TOKEN = process.env.E2E_SETUP_TOKEN ?? 'e2e-setup-token-0123456789';
 
 export default defineConfig({
   testDir: 'e2e',
@@ -40,6 +43,7 @@ export default defineConfig({
       ALLOWED_TARGET_LINK_URIS: `${BASE_URL}/index.html`,
       RUN_MIGRATIONS_ON_BOOT: 'true',
       CARD_FINGERPRINT_SECRET,
+      SETUP_TOKEN,
     },
   },
 });

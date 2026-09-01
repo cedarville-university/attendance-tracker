@@ -12,7 +12,8 @@ import { findEnabledDeployment } from '../../src/lti/registrations.js';
 import { createOidcTransaction } from '../../src/lti/oidc-transactions.js';
 import { createRequireSession, createRequireCsrf } from '../../src/auth/middleware.js';
 import { JwksCache } from '../../src/lti/jwks-cache.js';
-import { loadSigningKeysFromEnv, getActiveSigningKey, type ToolSigningKey } from '../../src/lti/signing-keys.js';
+import { loadSigningKeysFromEnv } from '../../src/lti/signing-keys.js';
+import { SigningKeyProvider } from '../../src/lti/signing-key-store.js';
 import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { seedInstitutionAndRegistration } from '../support/seed.js';
 import { MockCanvasPlatform } from '../support/mock-canvas.js';
@@ -23,7 +24,7 @@ const NRPS_CLAIM = 'https://purl.imsglobal.org/spec/lti-nrps/claim/namesroleserv
 const APP_BASE_URL = 'https://app.test';
 const TARGET = `${APP_BASE_URL}/index.html`;
 
-function buildTestApp(db: Database, jwksCache: JwksCache, signingKey: ToolSigningKey) {
+function buildTestApp(db: Database, jwksCache: JwksCache, signingKeyProvider: SigningKeyProvider) {
   const app = Fastify({ logger: false });
   app.register(fastifyCookie);
   app.register(fastifyFormbody);
@@ -38,7 +39,7 @@ function buildTestApp(db: Database, jwksCache: JwksCache, signingKey: ToolSignin
     db,
     requireSession: createRequireSession(db),
     requireCsrf: createRequireCsrf(APP_BASE_URL),
-    signingKey,
+    signingKeyProvider,
   });
   return app;
 }
@@ -46,12 +47,12 @@ function buildTestApp(db: Database, jwksCache: JwksCache, signingKey: ToolSignin
 describe('Phase 4 integration: real launch through GET /api/course/roster', () => {
   let platform: MockCanvasPlatform;
   let jwksCache: JwksCache;
-  let signingKey: ToolSigningKey;
+  let signingKeyProvider: SigningKeyProvider;
 
   beforeAll(async () => {
     platform = new MockCanvasPlatform();
     await platform.start();
-    signingKey = getActiveSigningKey(await loadSigningKeysFromEnv(undefined));
+    signingKeyProvider = new SigningKeyProvider(await loadSigningKeysFromEnv(undefined));
   });
   afterAll(async () => {
     await platform.stop();
@@ -71,7 +72,7 @@ describe('Phase 4 integration: real launch through GET /api/course/roster', () =
     ]);
     platform.setPageSize(1);
 
-    const app = buildTestApp(db, jwksCache, signingKey);
+    const app = buildTestApp(db, jwksCache, signingKeyProvider);
 
     const loginRes = await app.inject({
       method: 'POST',

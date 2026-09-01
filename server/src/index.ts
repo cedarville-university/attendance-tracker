@@ -14,7 +14,7 @@ await startTelemetry();
 
 import { loadEnv } from './config/env.js';
 import { createDbClient, applyMigrations } from './database/client.js';
-import { loadSigningKeysFromEnv } from './lti/signing-keys.js';
+import { loadSigningKeys, SigningKeyProvider } from './lti/signing-key-store.js';
 import { createDefaultJwksCache } from './lti/jwks-cache.js';
 import { MockIdentityResolver } from './identity/mock-resolver.js';
 import { createHttpIdentityResolverFromEnv } from './identity/http-resolver.js';
@@ -27,14 +27,16 @@ if (env.RUN_MIGRATIONS_ON_BOOT) {
   await applyMigrations(dbClient);
 }
 
-const signingKeys = await loadSigningKeysFromEnv(env.LTI_TOOL_SIGNING_KEYS_JSON);
+const signingKeyProvider = new SigningKeyProvider(
+  await loadSigningKeys(dbClient.db, env.LTI_TOOL_SIGNING_KEYS_JSON),
+);
 // Falls back to the Mock resolver whenever the real HTTP resolver's required env vars aren't set
 // -- see docs/canvas-lti/progress.md's "Deferred decisions" section for why that's the case.
 const identityResolver = createHttpIdentityResolverFromEnv() ?? new MockIdentityResolver();
 
 const app = await buildApp(env, {
   db: dbClient.db,
-  signingKeys,
+  signingKeyProvider,
   jwksCache: createDefaultJwksCache(),
   identityResolver,
 });

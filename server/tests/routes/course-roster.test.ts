@@ -5,7 +5,7 @@ import { registerCourseRosterRoutes } from '../../src/routes/course-roster.js';
 import { createRequireCsrf } from '../../src/auth/middleware.js';
 import { RosterUnavailableError } from '../../src/attendance/roster-store.js';
 import type { Database } from '../../src/database/client.js';
-import type { ToolSigningKey } from '../../src/lti/signing-keys.js';
+import { stubSigningKeyProvider } from '../support/signing-keys.js';
 
 const mockGetCachedRosterAsMembers = vi.fn();
 const mockGetRosterWithFallback = vi.fn();
@@ -53,7 +53,7 @@ function buildTestApp(opts: { authenticated?: boolean } = { authenticated: true 
     }
   };
   const requireCsrf = async () => {};
-  registerCourseRosterRoutes(app, { db, requireSession, requireCsrf, signingKey: {} as ToolSigningKey });
+  registerCourseRosterRoutes(app, { db, requireSession, requireCsrf, signingKeyProvider: stubSigningKeyProvider() });
   return { app, auditInsert };
 }
 
@@ -219,7 +219,7 @@ describe('POST /api/course/roster/refresh', () => {
       db,
       requireSession,
       requireCsrf: createRequireCsrf('https://app.test'),
-      signingKey: {} as ToolSigningKey,
+      signingKeyProvider: stubSigningKeyProvider(),
     });
 
     const res = await app.inject({

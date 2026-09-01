@@ -1,13 +1,13 @@
 import Fastify from 'fastify';
 import { describe, it, expect } from 'vitest';
 import { registerLtiJwksRoute } from '../../src/routes/lti-jwks.js';
-import { loadSigningKeysFromEnv } from '../../src/lti/signing-keys.js';
+import { testSigningKeyProvider } from '../support/signing-keys.js';
 
 describe('GET /lti/jwks', () => {
   it('returns the public JWKS with no private material', async () => {
-    const keys = await loadSigningKeysFromEnv(undefined);
     const app = Fastify({ logger: false });
-    registerLtiJwksRoute(app, keys);
+    const provider = await testSigningKeyProvider();
+    registerLtiJwksRoute(app, provider);
 
     const response = await app.inject({ method: 'GET', url: '/lti/jwks' });
 
@@ -15,6 +15,6 @@ describe('GET /lti/jwks', () => {
     const body = response.json();
     expect(body.keys).toHaveLength(1);
     expect(body.keys[0]).not.toHaveProperty('d');
-    expect(body.keys[0].kid).toBe(keys[0].kid);
+    expect(body.keys[0].kid).toBe(provider.list()[0].kid);
   });
 });

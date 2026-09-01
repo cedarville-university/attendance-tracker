@@ -13,6 +13,9 @@ const envSchema = z.object({
     .transform((v) => new URL(v).origin),
   ALLOWED_TARGET_LINK_URIS: z.string().min(1),
   LTI_TOOL_SIGNING_KEYS_JSON: z.string().optional(),
+  // Bootstrap credential for the admin/setup page (Feature 3). When unset, the token path is
+  // disabled and only an LTI Administrator-role session can reach the admin routes.
+  SETUP_TOKEN: z.string().min(16).optional(),
   PORT: z.coerce.number().int().positive().default(3000),
   CLOCK_SKEW_SECONDS: z.coerce.number().int().positive().default(120),
   LOGIN_TRANSACTION_TTL_SECONDS: z.coerce.number().int().positive().default(300),

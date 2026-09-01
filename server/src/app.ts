@@ -19,8 +19,7 @@ import type { Env } from './config/env.js';
 import { parseAllowedTargetLinkUris } from './config/env.js';
 import type { Database } from './database/client.js';
 import { ltiRegistrations } from './database/schema.js';
-import type { ToolSigningKey } from './lti/signing-keys.js';
-import { getActiveSigningKey } from './lti/signing-keys.js';
+import type { SigningKeyProvider } from './lti/signing-key-store.js';
 import type { JwksCache } from './lti/jwks-cache.js';
 import type { IdentityResolver } from './identity/types.js';
 import { createAllowlist } from './lti/login.js';
@@ -32,7 +31,9 @@ import { registerLtiLaunchRoute } from './routes/lti-launch.js';
 import { registerMeRoute } from './routes/me.js';
 import { registerCourseRosterRoutes } from './routes/course-roster.js';
 import { registerAttendanceSessionsRoute } from './routes/attendance-sessions.js';
+import { registerAdminRoutes } from './routes/admin.js';
 import { createRequireSession, createRequireCsrf } from './auth/middleware.js';
+import { createRequireAdmin, createAdminMutationPreHandlers } from './auth/admin-middleware.js';
 import { buildCspDirectives } from './security/csp.js';
 import { loggerOptions } from './telemetry/logger.js';
 import { genReqId, registerRequestTelemetry } from './telemetry/request-id.js';
@@ -42,7 +43,7 @@ const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.
 
 export interface AppDeps {
   db: Database;
-  signingKeys: ToolSigningKey[];
+  signingKeyProvider: SigningKeyProvider;
   jwksCache: JwksCache;
   identityResolver: IdentityResolver;
 }
@@ -72,7 +73,7 @@ async function resolveCanvasOidcOrigins(db: Database): Promise<string[]> {
 }
 
 export async function buildApp(env: Env, deps: AppDeps): Promise<FastifyInstance> {
-  const { db, signingKeys, jwksCache, identityResolver } = deps;
+  const { db, signingKeyProvider, jwksCache, identityResolver } = deps;
   const canvasOidcOrigins = await resolveCanvasOidcOrigins(db);
   const allowedTargetLinkUris = createAllowlist(parseAllowedTargetLinkUris(env));
 
@@ -119,7 +120,7 @@ export async function buildApp(env: Env, deps: AppDeps): Promise<FastifyInstance
     });
   });
 
-  registerLtiJwksRoute(app, signingKeys);
+  registerLtiJwksRoute(app, signingKeyProvider);
 
   const requireSession = createRequireSession(db);
   const requireCsrf = createRequireCsrf(env.APP_BASE_URL);
@@ -128,14 +129,24 @@ export async function buildApp(env: Env, deps: AppDeps): Promise<FastifyInstance
     db,
     requireSession,
     requireCsrf,
-    signingKey: getActiveSigningKey(signingKeys),
+    signingKeyProvider,
   });
   registerAttendanceSessionsRoute(app, {
     db,
     resolver: identityResolver,
     requireSession,
     requireCsrf,
-    signingKey: getActiveSigningKey(signingKeys),
+    signingKeyProvider,
+  });
+
+  const requireAdmin = createRequireAdmin({ db, setupToken: env.SETUP_TOKEN });
+  registerAdminRoutes(app, {
+    db,
+    requireAdmin,
+    adminMutation: createAdminMutationPreHandlers(requireAdmin, requireCsrf),
+    signingKeyProvider,
+    appBaseUrl: env.APP_BASE_URL,
+    reloadSigningKeys: () => signingKeyProvider.reload(db, env.LTI_TOOL_SIGNING_KEYS_JSON),
   });
 
   return app;

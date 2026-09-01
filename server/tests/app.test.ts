@@ -15,7 +15,7 @@ import { beforeEach, afterAll, describe, it, expect } from 'vitest';
 import { getTestDb, resetDb, closeTestDb } from './support/db.js';
 import { seedInstitutionAndRegistration } from './support/seed.js';
 import { MockCanvasPlatform } from './support/mock-canvas.js';
-import { loadSigningKeysFromEnv } from '../src/lti/signing-keys.js';
+import { testSigningKeyProvider } from './support/signing-keys.js';
 import { createDefaultJwksCache } from '../src/lti/jwks-cache.js';
 import { MockIdentityResolver } from '../src/identity/mock-resolver.js';
 import { loadEnv } from '../src/config/env.js';
@@ -32,7 +32,7 @@ async function makeApp(overrides: Record<string, string> = {}) {
   const env = loadEnv({ ...baseEnv, ...overrides });
   const app = await buildApp(env, {
     db,
-    signingKeys: await loadSigningKeysFromEnv(undefined),
+    signingKeyProvider: await testSigningKeyProvider(),
     jwksCache: createDefaultJwksCache(),
     identityResolver: new MockIdentityResolver(),
   });

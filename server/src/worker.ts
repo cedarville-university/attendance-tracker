@@ -22,7 +22,8 @@ await startTelemetry();
 
 import { loadEnv } from './config/env.js';
 import { createDbClient, applyMigrations } from './database/client.js';
-import { loadSigningKeysFromEnv, getActiveSigningKey } from './lti/signing-keys.js';
+import { getActiveSigningKey } from './lti/signing-keys.js';
+import { loadSigningKeys } from './lti/signing-key-store.js';
 import { processGradeSyncJobs } from './attendance/grade-worker.js';
 import { runMaintenancePass } from './maintenance/purge.js';
 import { setGradeJobGauges } from './telemetry/metrics.js';
@@ -43,7 +44,7 @@ const shouldStop = () => stopRequested;
 
 try {
   const maintenance = await runMaintenancePass(db, { retentionDays: env.RETENTION_DAYS, shouldStop });
-  const signingKey = getActiveSigningKey(await loadSigningKeysFromEnv(env.LTI_TOOL_SIGNING_KEYS_JSON));
+  const signingKey = getActiveSigningKey(await loadSigningKeys(db, env.LTI_TOOL_SIGNING_KEYS_JSON));
   const grade = await processGradeSyncJobs(db, { signingKey, shouldStop });
   const gauges = await countGradeJobsByState(db);
   setGradeJobGauges(gauges.pending, gauges.failed);

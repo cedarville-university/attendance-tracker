@@ -19,7 +19,7 @@ import { buildAttendanceSessionCsv } from '../attendance/csv-export.js';
 import { resolveCurrentRecord } from '../attendance/member-status.js';
 import { getGradeSyncSummary, resetFailedJobs } from '../attendance/grade-sync-store.js';
 import type { IdentityResolver } from '../identity/types.js';
-import type { ToolSigningKey } from '../lti/signing-keys.js';
+import type { SigningKeyProvider } from '../lti/signing-key-store.js';
 
 type PreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
 
@@ -28,10 +28,10 @@ export interface AttendanceSessionsRouteDeps {
   resolver: IdentityResolver;
   requireSession: PreHandler;
   requireCsrf: PreHandler;
-  // C1: the active ToolSigningKey, injected from index.ts (getActiveSigningKey(signingKeys)).
-  // Threaded into createAttendanceSession -> getRosterWithFallback for the Start-Attendance
-  // roster fetch (Phase 4 D5 — no module-level key accessor).
-  signingKey: ToolSigningKey;
+  // The signing-key provider; `.getActive()` is read at request time (so an admin key rotation
+  // is picked up without a restart) and threaded into createAttendanceSession ->
+  // getRosterWithFallback for the Start-Attendance roster fetch.
+  signingKeyProvider: SigningKeyProvider;
 }
 
 const createSessionSchema = z.object({ label: z.string().optional(), meetingAt: z.string().datetime().optional() });
@@ -112,7 +112,7 @@ export function registerAttendanceSessionsRoute(app: FastifyInstance, deps: Atte
     const parsed = createSessionSchema.safeParse(request.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: 'invalid_body', requestId: request.id });
     try {
-      const created = await createAttendanceSession(db, session.courseId, session.ltiSubject, parsed.data, request.id, { signingKey: deps.signingKey });
+      const created = await createAttendanceSession(db, session.courseId, session.ltiSubject, parsed.data, request.id, { signingKey: deps.signingKeyProvider.getActive() });
       return reply.code(201).send(serializeSession(created));
     } catch (err) {
       return replyForError(request, reply, err);

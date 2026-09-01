@@ -7,7 +7,7 @@ import { MockCanvasPlatform } from '../support/mock-canvas.js';
 import { registerAttendanceSessionsRoute } from '../../src/routes/attendance-sessions.js';
 import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents, gradeSyncJobs } from '../../src/database/schema.js';
 import type { IdentityResolver } from '../../src/identity/types.js';
-import type { ToolSigningKey } from '../../src/lti/signing-keys.js';
+import { stubSigningKeyProvider } from '../support/signing-keys.js';
 
 // createAttendanceSession degrades through the shared helper -> mock it (Q3). Only
 // getRosterWithFallback is stubbed; the real getCachedRosterAsMembers still runs so
@@ -23,7 +23,7 @@ const { db } = getTestDb();
 // helper is mocked). signingKey is a typed stub: it reaches createAttendanceSession's deps
 // but getRosterWithFallback is mocked so it is never dereferenced (C1).
 const platform = new MockCanvasPlatform();
-const signingKey = {} as ToolSigningKey;
+const signingKeyProvider = stubSigningKeyProvider();
 afterAll(() => closeTestDb());
 
 beforeEach(async () => {
@@ -58,7 +58,7 @@ function buildTestApp({ resolver, session }: { resolver: IdentityResolver; sessi
     resolver,
     requireSession: fakeRequireSession(session),
     requireCsrf: fakeRequireCsrf(),
-    signingKey,
+    signingKeyProvider,
   });
   return app;
 }

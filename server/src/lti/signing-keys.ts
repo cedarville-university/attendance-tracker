@@ -1,4 +1,4 @@
-import { generateKeyPair, exportJWK, importPKCS8 } from 'jose';
+import { generateKeyPair, exportJWK, exportPKCS8, importPKCS8 } from 'jose';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
@@ -40,10 +40,35 @@ async function toPublicJwk(privateKey: CryptoKey, kid: string): Promise<Record<s
   return { kty: full.kty, n: full.n, e: full.e, kid, use: 'sig', alg: 'RS256' };
 }
 
-async function generateEphemeralSigningKey(): Promise<ToolSigningKey> {
+/**
+ * Generates a fresh RS256 keypair as an `active` ToolSigningKey. Exported for the DB-backed
+ * signing-key store (signing-key-store.ts): the ephemeral/bootstrap and rotation paths both
+ * mint a key here and then persist its PKCS#8 PEM (see `exportSigningKeyPkcs8Pem`).
+ * `extractable: true` is required so `exportJWK` / `exportPKCS8` can run on the private key.
+ */
+export async function generateEphemeralSigningKey(): Promise<ToolSigningKey> {
   const { privateKey } = await generateKeyPair('RS256', { modulusLength: 2048, extractable: true });
   const kid = randomUUID();
   return { kid, status: 'active', privateKey, publicJwk: await toPublicJwk(privateKey, kid) };
+}
+
+/** PKCS#8 PEM for a signing key's private half, for persisting it to `tool_signing_keys`. */
+export function exportSigningKeyPkcs8Pem(key: ToolSigningKey): Promise<string> {
+  return exportPKCS8(key.privateKey);
+}
+
+/**
+ * Rebuilds a ToolSigningKey from a stored PKCS#8 PEM. Mirrors the per-entry import in
+ * `loadSigningKeysFromEnv` (same `extractable: true` requirement, so `/lti/jwks` can export the
+ * public JWK).
+ */
+export async function importSigningKeyFromPkcs8(
+  kid: string,
+  privateKeyPkcs8Pem: string,
+  status: 'active' | 'previous',
+): Promise<ToolSigningKey> {
+  const privateKey = await importPKCS8(privateKeyPkcs8Pem, 'RS256', { extractable: true });
+  return { kid, status, privateKey, publicJwk: await toPublicJwk(privateKey, kid) };
 }
 
 export async function loadSigningKeysFromEnv(json: string | undefined): Promise<ToolSigningKey[]> {

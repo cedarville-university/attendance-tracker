@@ -275,3 +275,28 @@ export const gradeSyncJobs = pgTable(
 
 export type GradeLineItemRow = typeof gradeLineItems.$inferSelect;
 export type GradeSyncJobRow = typeof gradeSyncJobs.$inferSelect;
+
+// The tool's own LTI signing keypairs (Feature 3 / admin setup). DB-backed so `/lti/jwks` and the
+// `client_assertion` `kid` stay stable across restarts in dev, and so an admin can rotate the key
+// from the setup page. Precedence: `LTI_TOOL_SIGNING_KEYS_JSON` (prod) wins over this table; an
+// empty table is populated with one generated `active` row on first boot.
+//
+// DEV ONLY as written: `private_key_pkcs8_pem` is stored in plaintext. Production MUST instead
+// supply `LTI_TOOL_SIGNING_KEYS_JSON` (env / secret store) or encrypt this column at rest.
+// (`enum` on `status` narrows the TS type only — Postgres stores plain text, like grade_sync_jobs.state.)
+export const toolSigningKeys = pgTable(
+  'tool_signing_keys',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    kid: text('kid').notNull().unique(),
+    status: text('status', { enum: ['active', 'previous'] }).notNull(),
+    privateKeyPkcs8Pem: text('private_key_pkcs8_pem').notNull(),
+    publicJwk: jsonb('public_jwk').$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // Partial unique index: at most one row may be `active` at a time.
+  (t) => [uniqueIndex('tool_signing_keys_one_active').on(t.status).where(sql`${t.status} = 'active'`)],
+);
+
+export type ToolSigningKeyRow = typeof toolSigningKeys.$inferSelect;

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Attendance Tracker — Admin Setup</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛠️</text></svg>" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>Admin Setup</h1>
+    <p class="app-subtitle">Configure the Canvas connection and the tool's LTI signing key. Reached by URL; not linked from the scanner.</p>
+  </header>
+
+  <div id="admin-messages" class="app-messages" role="status" aria-live="polite"></div>
+
+  <main class="app-grid">
+    <section class="panel panel--wide" aria-labelledby="access-heading">
+      <h2 id="access-heading">Access</h2>
+      <p id="access-status" class="muted">Checking your access&hellip;</p>
+      <form id="setup-token-form" hidden>
+        <label for="setup-token-input">Setup token</label>
+        <input type="password" id="setup-token-input" autocomplete="off" />
+        <div class="button-row">
+          <button type="submit" class="primary">Use token</button>
+        </div>
+        <p class="muted">
+          The <code>SETUP_TOKEN</code> value from the server environment. Used to bootstrap the first
+          Canvas connection before an Administrator-role launch is available.
+        </p>
+      </form>
+    </section>
+
+    <section id="connections-panel" class="panel panel--wide" aria-labelledby="connections-heading" hidden>
+      <h2 id="connections-heading">Canvas connections</h2>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>Institution</th><th>Issuer</th><th>Client ID</th><th>Deployments</th><th>Enabled</th><th></th></tr>
+          </thead>
+          <tbody id="registrations-table-body"></tbody>
+        </table>
+      </div>
+      <p id="registrations-empty" class="muted" hidden>No Canvas connections yet. Add one below.</p>
+
+      <h3>Add / update a connection</h3>
+      <p class="muted">
+        Use the per-environment endpoint values from
+        <a href="https://github.com/" id="docs-link">docs/canvas-installation.md §3</a>
+        &mdash; not the account subdomain.
+      </p>
+      <form id="registration-form">
+        <label>Institution slug <input type="text" name="institutionSlug" required /></label>
+        <label>Institution name <input type="text" name="institutionName" required /></label>
+        <label>Issuer <input type="url" name="issuer" required placeholder="https://canvas.test.instructure.com" /></label>
+        <label>Client ID <input type="text" name="clientId" required /></label>
+        <label>OIDC auth endpoint <input type="url" name="oidcAuthEndpoint" required /></label>
+        <label>Token endpoint <input type="url" name="tokenEndpoint" required /></label>
+        <label>Token audience <input type="url" name="tokenAudience" placeholder="defaults to the token endpoint" /></label>
+        <label>Platform JWKS URI <input type="url" name="platformJwksUri" required /></label>
+        <label>Deployment ID <input type="text" name="deploymentId" required /></label>
+        <div class="button-row">
+          <button type="submit" class="primary">Save connection</button>
+        </div>
+      </form>
+      <p class="muted">
+        Adding a connection for a <em>new</em> Canvas origin needs a server restart before a launch
+        from that origin passes the Content-Security-Policy. A new deployment on an origin that is
+        already configured takes effect immediately.
+      </p>
+    </section>
+
+    <section id="signing-key-panel" class="panel panel--wide" aria-labelledby="signing-key-heading" hidden>
+      <h2 id="signing-key-heading">Tool signing key</h2>
+      <dl class="fact-list">
+        <dt>Active key ID (kid)</dt><dd id="signing-key-kid">&mdash;</dd>
+        <dt>Created</dt><dd id="signing-key-created">&mdash;</dd>
+        <dt>Previous key IDs</dt><dd id="signing-key-previous">&mdash;</dd>
+        <dt>JWKS URL (paste into the Canvas Developer Key)</dt><dd id="signing-key-jwks-url">&mdash;</dd>
+      </dl>
+      <div class="button-row">
+        <button type="button" id="btn-rotate-key" class="danger">Rotate key</button>
+      </div>
+      <p class="muted">
+        Rotating generates a new keypair and marks the old one <code>previous</code>. Canvas must
+        re-fetch the JWKS URL for launches to keep working; the previous key stays published so
+        in-flight assertions still verify.
+      </p>
+    </section>
+  </main>
+
+  <script type="module" src="admin.js"></script>
+</body>
+</html>

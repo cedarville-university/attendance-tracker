@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { buildJwksResponse } from '../lti/jwks-route.js';
-import type { ToolSigningKey } from '../lti/signing-keys.js';
+import type { SigningKeyProvider } from '../lti/signing-key-store.js';
 
-export function registerLtiJwksRoute(app: FastifyInstance, signingKeys: ToolSigningKey[]): void {
-  app.get('/lti/jwks', async () => buildJwksResponse(signingKeys));
+export function registerLtiJwksRoute(app: FastifyInstance, signingKeyProvider: SigningKeyProvider): void {
+  // Read the provider at request time so an admin key rotation is served without a restart.
+  app.get('/lti/jwks', async () => buildJwksResponse(signingKeyProvider.list()));
 }

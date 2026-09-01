@@ -7,6 +7,7 @@ import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { seedInstitutionAndRegistration } from '../support/seed.js';
 import { MockCanvasPlatform } from '../support/mock-canvas.js';
 import { getActiveSigningKey, loadSigningKeysFromEnv, type ToolSigningKey } from '../../src/lti/signing-keys.js';
+import { SigningKeyProvider } from '../../src/lti/signing-key-store.js';
 import { createDefaultJwksCache } from '../../src/lti/jwks-cache.js';
 import { findEnabledDeployment } from '../../src/lti/registrations.js';
 import { createOidcTransaction } from '../../src/lti/oidc-transactions.js';
@@ -63,7 +64,7 @@ async function buildApp(): Promise<FastifyInstance> {
     appBaseUrl: APP_BASE_URL,
   });
   registerMeRoute(app, { requireSession, db }); // the ONLY source of csrfToken (me.ts)
-  registerAttendanceSessionsRoute(app, { db, resolver: new MockIdentityResolver(), requireSession, requireCsrf, signingKey });
+  registerAttendanceSessionsRoute(app, { db, resolver: new MockIdentityResolver(), requireSession, requireCsrf, signingKeyProvider: new SigningKeyProvider([signingKey]) });
   return app;
 }
 

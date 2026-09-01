@@ -16,3 +16,15 @@ export const AUTHORIZED_INSTRUCTOR_ROLE_URIS = new Set<string>([
 export function authorizeInstructorRole(roles: string[]): boolean {
   return roles.some((role) => AUTHORIZED_INSTRUCTOR_ROLE_URIS.has(role));
 }
+
+// The Administrator subset, for the admin/setup page (Feature 3). An Instructor who is not also
+// an Administrator cannot manage the Canvas connection or rotate the tool signing key.
+export const AUTHORIZED_ADMIN_ROLE_URIS = new Set<string>([
+  'http://purl.imsglobal.org/vocab/lis/v2/membership#Administrator',
+  'http://purl.imsglobal.org/vocab/lis/v2/institution/role#Administrator',
+  'http://purl.imsglobal.org/vocab/lis/v2/system/role#Administrator',
+]);
+
+export function authorizeAdminRole(roles: string[]): boolean {
+  return roles.some((role) => AUTHORIZED_ADMIN_ROLE_URIS.has(role));
+}
