@@ -25,10 +25,14 @@ import { createDbClient, applyMigrations } from './database/client.js';
 import { getActiveSigningKey } from './lti/signing-keys.js';
 import { loadSigningKeys } from './lti/signing-key-store.js';
 import { processGradeSyncJobs } from './attendance/grade-worker.js';
-import { processLineItemDeletions } from './attendance/line-item-deletion.js';
+import {
+  processLineItemDeletions,
+  type ProcessLineItemDeletionsResult,
+} from './attendance/line-item-deletion.js';
 import { runMaintenancePass } from './maintenance/purge.js';
-import { setGradeJobGauges } from './telemetry/metrics.js';
+import { setGradeJobGauges, setStuckLineItemDeletionsGauge } from './telemetry/metrics.js';
 import { countGradeJobsByState } from './attendance/grade-sync-store.js';
+import { countStuckLineItemDeletions } from './attendance/line-item-deletion-store.js';
 
 const env = loadEnv();
 const dbClient = createDbClient(env.DATABASE_URL);
@@ -48,10 +52,25 @@ try {
   const signingKey = getActiveSigningKey(await loadSigningKeys(db, env.LTI_TOOL_SIGNING_KEYS_JSON));
   // Runs BEFORE processGradeSyncJobs so a course marked for removal loses its line item before any
   // stray score post targets it (spec §25.11, §27.1).
-  const lineItemDeletions = await processLineItemDeletions(db, { signingKey, shouldStop });
+  //
+  // Isolated in its own try/catch: this pass adds Canvas HTTP (claimDueLineItemDeletions,
+  // loadCourseAgsContext, and the finalize `db.transaction` can all throw) where previously the only
+  // thing ahead of grade sync was runMaintenancePass (local DB only). An uncaught throw here must not
+  // propagate to the top-level handler below -- that would exit before processGradeSyncJobs runs,
+  // and one poisoned course would stall every course's grade sync for the tick.
+  let lineItemDeletions: ProcessLineItemDeletionsResult;
+  try {
+    lineItemDeletions = await processLineItemDeletions(db, { signingKey, shouldStop });
+  } catch (err) {
+    // Coded message only -- never the error object -- to stay clear of spec §31.8 (no Canvas body,
+    // URL, or token). A zeroed tally keeps the final log line's shape consistent with a normal pass.
+    console.error('[worker] line-item-deletion pass failed', err instanceof Error ? err.message : 'unknown error');
+    lineItemDeletions = { processed: 0, deleted: 0, retried: 0, failed: 0 };
+  }
   const grade = await processGradeSyncJobs(db, { signingKey, shouldStop });
   const gauges = await countGradeJobsByState(db);
   setGradeJobGauges(gauges.pending, gauges.failed);
+  setStuckLineItemDeletionsGauge(await countStuckLineItemDeletions(db));
   // Tally only — no member ids, scores, tokens, or URLs (spec §31.8).
   console.log(`[worker] ${JSON.stringify({ maintenance, lineItemDeletions, grade })}`);
 } catch (err) {

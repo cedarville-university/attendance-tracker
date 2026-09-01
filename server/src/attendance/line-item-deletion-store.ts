@@ -118,3 +118,18 @@ export async function rearmLineItemDeletion(db: Database, courseId: string, now:
 export async function deleteGradeLineItemRow(executor: DeletionExecutor, courseId: string): Promise<void> {
   await executor.delete(gradeLineItems).where(eq(gradeLineItems.courseId, courseId));
 }
+
+/**
+ * Count of line items terminally failed at removal -- `delete_requested_at` set but
+ * `delete_next_attempt_at` NULL (spec §27.1's "terminally fail ... pending a manual re-arm") -- for
+ * the worker's observability gauge (spec §44). Purging a course's `grade_sync_jobs` on soft delete
+ * means `getGradeSyncSummary` reports nothing for it, so this is the only signal an operator has
+ * that `POST /grade-sync` needs pressing. Mirrors `countGradeJobsByState`'s cheap-aggregate shape.
+ */
+export async function countStuckLineItemDeletions(db: Database): Promise<number> {
+  const [row] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(gradeLineItems)
+    .where(and(isNotNull(gradeLineItems.deleteRequestedAt), isNull(gradeLineItems.deleteNextAttemptAt)));
+  return row?.count ?? 0;
+}

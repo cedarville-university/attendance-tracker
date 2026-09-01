@@ -335,7 +335,8 @@ export function registerAttendanceSessionsRoute(app: FastifyInstance, deps: Atte
     }
   });
 
-  // Phase 6 (spec §25.9): manual retry of this course's failed grade-sync jobs.
+  // Phase 6 (spec §25.9): manual retry of this course's failed grade-sync jobs. Phase 7 (spec
+  // §25.11) also re-arms a terminally-failed Canvas line-item removal for this course.
   // CSRF-gated mutation; cross-tenant lookups 404 (never 403) like the siblings.
   app.post('/api/attendance-sessions/:id/grade-sync', mutation, async (request, reply) => {
     const session = sessionOf(request, reply);

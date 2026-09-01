@@ -14,6 +14,7 @@ import {
   markLineItemDeletionFailed,
   rearmLineItemDeletion,
   deleteGradeLineItemRow,
+  countStuckLineItemDeletions,
 } from '../../src/attendance/line-item-deletion-store.js';
 import { deleteCourseGradeSyncJobs } from '../../src/attendance/grade-sync-store.js';
 import { processLineItemDeletions } from '../../src/attendance/line-item-deletion.js';
@@ -159,6 +160,17 @@ describe('line-item-deletion-store', () => {
     await seedLineItem(courseId);
     await deleteGradeLineItemRow(db, courseId);
     expect(await db.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId))).toHaveLength(0);
+  });
+
+  it('countStuckLineItemDeletions counts only requested rows with a null delete_next_attempt_at', async () => {
+    const stuck = await seedCourse();
+    const backingOff = await seedCourse();
+    const noRequest = await seedCourse();
+    await seedLineItem(stuck.courseId, { deleteRequestedAt: new Date(), deleteNextAttemptAt: null, deleteLastError: 'ags:server-error' });
+    await seedLineItem(backingOff.courseId, { deleteRequestedAt: new Date(), deleteNextAttemptAt: new Date(Date.now() + 60_000) });
+    await seedLineItem(noRequest.courseId, { deleteRequestedAt: null, deleteNextAttemptAt: null });
+
+    expect(await countStuckLineItemDeletions(db)).toBe(1);
   });
 
   it('deleteCourseGradeSyncJobs removes every job for the course and returns the count', async () => {
@@ -312,6 +324,35 @@ describe('processLineItemDeletions', () => {
     // Canvas line item was deleted, but the local row survives because the request was cleared.
     expect(platform.getLineItems(key)).toHaveLength(0);
     expect(await db.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId))).toHaveLength(1);
+    expect(await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_line_item_deleted'))).toHaveLength(0);
+  });
+
+  it('if the row is repointed at a different line item between the AGS call and the finalize, the row survives with its new identity and is not counted', async () => {
+    const { courseId, key } = await seedDueDeletion();
+    // fetchImpl repoints the row at a different Canvas line item right after the DELETE resolves --
+    // e.g. a cancel + recompute (recreating the line item) + a fresh removal request, all racing the
+    // in-flight DELETE -- while leaving deleteRequestedAt set, simulating the identity-mismatch race.
+    const realFetch = fetch;
+    const raceFetch: typeof fetch = async (input, init) => {
+      const res = await realFetch(input as string, init);
+      if ((init?.method ?? 'GET') === 'DELETE') {
+        await db.update(gradeLineItems)
+          .set({ canvasLineItemId: 'li-B', canvasLineItemUrl: 'https://canvas.example.edu/api/lti/courses/1/line_items/li-B' })
+          .where(eq(gradeLineItems.courseId, courseId));
+      }
+      return res;
+    };
+
+    const result = await processLineItemDeletions(db, { signingKey, fetchImpl: raceFetch });
+
+    expect(result).toMatchObject({ processed: 1, deleted: 0, retried: 0, failed: 0 });
+    // Canvas line item A was deleted, but the local row survives -- now naming line item B, untouched.
+    expect(platform.getLineItems(key)).toHaveLength(0);
+    const rows = await db.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].canvasLineItemId).toBe('li-B');
+    expect(rows[0].canvasLineItemUrl).toBe('https://canvas.example.edu/api/lti/courses/1/line_items/li-B');
+    expect(rows[0].deleteRequestedAt).not.toBeNull();
     expect(await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_line_item_deleted'))).toHaveLength(0);
   });
 

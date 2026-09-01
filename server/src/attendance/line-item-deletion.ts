@@ -9,6 +9,23 @@
 //
 // Invoked by server/src/worker.ts BEFORE processGradeSyncJobs so a course marked for removal loses
 // its column before any stray score post. NOT wired into the Fastify web process.
+//
+// Like claimDueJobs (grade-sync-store.ts), this pass assumes a single worker process:
+// claimDueLineItemDeletions is a plain SELECT -- no `FOR UPDATE SKIP LOCKED`, no status flip -- so
+// two overlapping passes would claim the same due rows. That's benign here: a second Canvas DELETE
+// against an already-removed line item 404s (success), and a second finalize's re-check (request
+// still pending + still the same line item, spec fix above) just no-ops. The residual risk under
+// multi-replica overlap -- a DELETE issued from a row read outside the per-course advisory lock
+// removing a column whose fresh scores already reached `synced` between the read and the DELETE --
+// is out of scope here, same as grade-sync-store.ts already declares for AGS score posts.
+//
+// One non-obvious fact the whole design leans on: when the finalize aborts (cancelled, or an
+// identity mismatch), the local grade_line_items row can be left pointing at a Canvas line item that
+// this pass just deleted -- e.g. a concurrent cancel clears only the delete_* columns, not
+// canvasLineItemId/Url. That's not a stuck state: the next close/restore's recompute goes through
+// ensureLineItem, which always re-checks against Canvas by tag/resourceId and upserts whatever it
+// finds (or creates), so a stale/deleted line item id there heals itself on the next grade-relevant
+// event. That fact currently lives only in a test (line-item-deletion.test.ts).
 
 import { eq, sql } from 'drizzle-orm';
 import type { Database } from '../database/client.js';
@@ -101,13 +118,20 @@ export async function processLineItemDeletions(
 
     if (del.ok) {
       // Finalize under a per-course advisory lock and re-check the request: a concurrent
-      // close/restore may have cancelled it (and enqueued fresh work) while the DELETE was
-      // in flight. If so, leave the row — do not undo the cancel.
+      // close/restore may have cancelled it (and enqueued fresh work) while the DELETE was in
+      // flight -- if so, leave the row, don't undo the cancel. It's not enough to check that a
+      // request is still pending, though: a cancel followed by a recompute that recreates the line
+      // item (line item B), followed by a fresh removal request, would leave `current` pointing at B
+      // with deleteRequestedAt set again -- deleting that row would audit `grade_line_item_deleted`
+      // against the OLD (row.canvasLineItemId) id while Canvas still holds column B with no local
+      // row and no pending request. So also require the row still names the line item this DELETE
+      // just removed; if it doesn't, abort exactly like the cancelled case.
       const canvas404 = del.value;
       const finalized = await db.transaction(async (tx) => {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${courseId})::bigint)`);
         const [current] = await tx.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId));
         if (!current || current.deleteRequestedAt === null) return false;
+        if (current.canvasLineItemId !== row.canvasLineItemId) return false;
         await tx.delete(gradeLineItems).where(eq(gradeLineItems.courseId, courseId));
         await tx.insert(auditEvents).values({
           institutionId: ctx.institutionId,

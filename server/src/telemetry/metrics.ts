@@ -10,6 +10,7 @@ const meter = otelMetrics.getMeter('attendance-tracker');
 
 let pendingGradeJobs = 0;
 let failedGradeJobs = 0;
+let stuckLineItemDeletions = 0;
 
 const pendingGauge = meter.createObservableGauge('grade_jobs.pending', {
   description: 'Grade-sync jobs awaiting a successful Canvas post',
@@ -17,12 +18,20 @@ const pendingGauge = meter.createObservableGauge('grade_jobs.pending', {
 const failedGauge = meter.createObservableGauge('grade_jobs.failed', {
   description: 'Grade-sync jobs that have exhausted retries',
 });
+const stuckLineItemDeletionsGauge = meter.createObservableGauge('grade_line_item_deletions.stuck', {
+  description: 'Line-item removals that hit the retry ceiling and are awaiting a manual grade-sync re-arm',
+});
 pendingGauge.addCallback((r: ObservableResult) => r.observe(pendingGradeJobs));
 failedGauge.addCallback((r: ObservableResult) => r.observe(failedGradeJobs));
+stuckLineItemDeletionsGauge.addCallback((r: ObservableResult) => r.observe(stuckLineItemDeletions));
 
 export function setGradeJobGauges(pending: number, failed: number): void {
   pendingGradeJobs = pending;
   failedGradeJobs = failed;
+}
+
+export function setStuckLineItemDeletionsGauge(stuck: number): void {
+  stuckLineItemDeletions = stuck;
 }
 
 export const metrics = {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { metrics, setGradeJobGauges } from '../../src/telemetry/metrics.js';
+import { metrics, setGradeJobGauges, setStuckLineItemDeletionsGauge } from '../../src/telemetry/metrics.js';
 
 describe('metrics instruments', () => {
   it('exposes every spec §44 instrument and they are callable without a configured exporter', () => {
@@ -10,6 +10,7 @@ describe('metrics instruments', () => {
       metrics.scans.add(1);
       metrics.http5xx.add(1, { route: '/api/x' });
       setGradeJobGauges(3, 1);
+      setStuckLineItemDeletionsGauge(2);
     }).not.toThrow();
   });
 });

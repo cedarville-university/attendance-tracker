@@ -157,7 +157,7 @@ describe('deleteLineItem', () => {
 
   it('treats a Canvas 404 as already-gone success (value=true)', async () => {
     const token = await mintToken(platform);
-    // A well-formed line-item URL that was never created.
+    // Create the line item, then delete it twice: the second DELETE hits Canvas 404.
     const missingUrl = platform.seedExistingLineItem('c-del-404');
     await deleteLineItem(missingUrl, token); // first delete really removes it
     const result = await deleteLineItem(missingUrl, token); // second hits 404
