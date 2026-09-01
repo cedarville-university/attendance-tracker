@@ -183,3 +183,16 @@ export async function resetFailedJobs(db: Database, courseId: string, now: Date)
     .returning({ id: gradeSyncJobs.id });
   return reset.length;
 }
+
+/**
+ * Hard-delete every grade-sync job for a course. Called inside the soft-delete transaction when a
+ * course loses its last closed session (spec §25.11): the cumulative line item is going away, so
+ * no score may post to it. Returns the number of rows removed.
+ */
+export async function deleteCourseGradeSyncJobs(executor: Database | Tx, courseId: string): Promise<number> {
+  const removed = await executor
+    .delete(gradeSyncJobs)
+    .where(eq(gradeSyncJobs.courseId, courseId))
+    .returning({ id: gradeSyncJobs.id });
+  return removed.length;
+}
