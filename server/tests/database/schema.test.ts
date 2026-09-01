@@ -1,4 +1,5 @@
 import { beforeEach, afterAll, describe, it, expect } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import {
@@ -268,6 +269,28 @@ describe('Phase 6 schema', () => {
     await expect(
       db.insert(gradeSyncJobs).values({ courseId, ltiUserId: 'user-1', score: 10 }),
     ).rejects.toThrow();
+  });
+});
+
+describe('Session review schema (soft delete)', () => {
+  it('attendance_sessions has nullable deleted_at / deleted_by_lti_user_id, defaulting to null', async () => {
+    const { db } = getTestDb();
+    await resetDb();
+    const { sessionId } = await seedCourseAndSession();
+
+    const [fresh] = await db.select().from(attendanceSessions).where(eq(attendanceSessions.id, sessionId));
+    expect(fresh.deletedAt).toBeNull();
+    expect(fresh.deletedByLtiUserId).toBeNull();
+
+    const when = new Date('2026-09-01T15:00:00.000Z');
+    await db
+      .update(attendanceSessions)
+      .set({ deletedAt: when, deletedByLtiUserId: 'instructor-9' })
+      .where(eq(attendanceSessions.id, sessionId));
+
+    const [updated] = await db.select().from(attendanceSessions).where(eq(attendanceSessions.id, sessionId));
+    expect(updated.deletedAt?.toISOString()).toBe(when.toISOString());
+    expect(updated.deletedByLtiUserId).toBe('instructor-9');
   });
 });
 

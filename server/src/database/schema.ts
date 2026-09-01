@@ -157,6 +157,9 @@ export const attendanceSessions = pgTable('attendance_sessions', {
   rosterSnapshotVersion: integer('roster_snapshot_version').notNull().default(1),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  // Session review: soft delete for an accidentally-created session. Null = live. Restore nulls both.
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  deletedByLtiUserId: text('deleted_by_lti_user_id'),
 });
 
 // attendanceSessionMembers -- the roster snapshot; status here is the ROSTER status at
