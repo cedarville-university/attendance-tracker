@@ -36,12 +36,21 @@ import {
   correctMemberStatus,
   fetchAttendanceCsv,
 } from './attendance-session.js';
+import { mountSessionHistory } from './session-history.js';
 
 const { elements } = ui;
 
 // ---- Attendance session state (owned here) --------------------------------
 
 let currentAttendanceSessionId = null;
+
+// Mirrors the state last passed to ui.renderSessionState(): 'none' | 'open' |
+// 'closed' | 'reopened'. Read by the "Past sessions" panel to know whether a
+// session is live (so its row actions can be disabled while one is in progress).
+let currentSessionState = 'none';
+
+// The mounted "Past sessions" panel handle ({ refresh }); assigned in init().
+let sessionHistory = null;
 
 // The open session's roster snapshot (GET /api/attendance-sessions/:id members[]),
 // used to drive the manual "mark present" picker. Empty until a session is
@@ -334,6 +343,7 @@ async function startSession() {
   }
   currentAttendanceSessionId = result.session.id;
   scanPipeline.sessionId = result.session.id;
+  currentSessionState = result.session.state;
   ui.renderSessionState({ state: result.session.state, label: result.session.label });
   ui.showAppMessage('info', 'Attendance session started.');
 
@@ -343,6 +353,7 @@ async function startSession() {
   sessionMembers = detail.ok ? detail.body.members || [] : [];
   ui.setManualPresentGroupVisible(true);
   refreshManualPresentOptions();
+  if (sessionHistory) sessionHistory.refresh();
 }
 
 async function closeSession() {
@@ -354,10 +365,12 @@ async function closeSession() {
     ui.showAppMessage('error', `Could not close attendance: ${result.error.message}`);
     return;
   }
+  currentSessionState = 'closed';
   ui.renderSessionState({ state: 'closed' });
   ui.setManualPresentGroupVisible(false);
   ui.showAppMessage('info', 'Attendance session closed. Unscanned students were marked absent.');
   await refreshGradeSync(currentAttendanceSessionId);
+  if (sessionHistory) sessionHistory.refresh();
 }
 
 /** Re-fetches the session so the grade-sync panel reflects the latest job state. */
@@ -377,12 +390,14 @@ async function reopenSession() {
     ui.showAppMessage('error', `Could not reopen attendance: ${result.error.message}`);
     return;
   }
+  currentSessionState = 'reopened';
   ui.renderSessionState({ state: 'reopened' });
   // Reopening doesn't touch grade-sync jobs; hide the panel until the next close.
   ui.renderGradeSyncState(undefined);
   ui.setManualPresentGroupVisible(true);
   refreshManualPresentOptions();
   ui.showAppMessage('info', 'Attendance session reopened. Scans are accepted again.');
+  if (sessionHistory) sessionHistory.refresh();
 }
 
 elements.startSessionBtn.addEventListener('click', startSession);
@@ -814,21 +829,17 @@ function serverRecordToRow(serverRecord, member) {
   };
 }
 
-async function resumeOpenSessionIfAny() {
-  const list = await listOpenAttendanceSessions();
-  if (!list.ok) {
-    diagnostics.logEvent('error', { kind: 'resume-list-failed', message: list.error.message });
-    return;
-  }
-  if (list.sessions.length === 0) return; // no open session; normal first-run path
+/**
+ * Loads an existing server session (open, reopened, or just-reopened) into the
+ * screen: fetches detail, repopulates the attendance table, and syncs the
+ * session-state / grade-sync / manual-present UI. Shared by page-reload resume
+ * and the "Past sessions" panel's Resume / Reopen actions.
+ */
+async function attachToServerSession(sessionId, { announce = false } = {}) {
+  currentAttendanceSessionId = sessionId;
+  scanPipeline.sessionId = sessionId;
 
-  const hintId = storage.loadSession()?.currentAttendanceSessionId || null;
-  const chosen = list.sessions.find((s) => s.id === hintId) || list.sessions[0];
-
-  currentAttendanceSessionId = chosen.id;
-  scanPipeline.sessionId = chosen.id;
-
-  const detail = await getAttendanceSession(chosen.id);
+  const detail = await getAttendanceSession(sessionId);
   if (detail.ok) {
     sessionMembers = detail.body.members || [];
     resumedRowsById.clear();
@@ -848,16 +859,32 @@ async function resumeOpenSessionIfAny() {
       ui.addAttendanceRow(row, handleRemoveRecord);
     }
   } else {
-    ui.showAppMessage(
-      'warning',
-      'Reconnected to the open attendance session, but its current roster could not be loaded.',
-    );
+    ui.showAppMessage('warning', 'Loaded the attendance session, but its roster could not be fetched.');
   }
 
-  ui.renderSessionState({ state: chosen.state, label: chosen.label });
+  const state = detail.ok ? detail.body.session?.state ?? 'reopened' : 'reopened';
+  currentSessionState = state;
+  ui.renderSessionState({ state, label: detail.ok ? detail.body.session?.label : undefined });
   ui.renderGradeSyncState(detail.body?.gradeSync);
-  ui.setManualPresentGroupVisible(true);
+  ui.setManualPresentGroupVisible(state === 'open' || state === 'reopened');
   refreshManualPresentOptions();
+  if (announce) ui.showAppMessage('info', 'Attendance session loaded.');
+}
+
+async function resumeOpenSessionIfAny() {
+  const list = await listOpenAttendanceSessions();
+  if (!list.ok) {
+    diagnostics.logEvent('error', { kind: 'resume-list-failed', message: list.error.message });
+    return;
+  }
+  if (list.sessions.length === 0) return; // no open session; normal first-run path
+
+  const hintId = storage.loadSession()?.currentAttendanceSessionId || null;
+  const chosen = list.sessions.find((s) => s.id === hintId) || list.sessions[0];
+
+  currentAttendanceSessionId = chosen.id;
+  scanPipeline.sessionId = chosen.id;
+  await attachToServerSession(chosen.id, { announce: false });
   ui.showAppMessage('info', 'Reconnected to the attendance session already in progress.');
 }
 
@@ -872,6 +899,7 @@ async function init() {
   // On failure, leave Start Attendance disabled so no request goes out
   // without the x-csrf-token header the server's requireCsrf demands.
   const boot = await bootstrapSession();
+  currentSessionState = 'none';
   ui.renderSessionState({ state: 'none' });
   if (!boot.ok) {
     ui.showAppMessage('error', 'Could not load your session. Reload the page from Canvas.');
@@ -888,6 +916,15 @@ async function init() {
     await resumeOpenSessionIfAny();
     await loadCanvasRoster();
   }
+
+  // "Past sessions" review panel — mount after the resume path so its first
+  // refresh sees the correct currentSessionState.
+  sessionHistory = mountSessionHistory({
+    isSessionActive: () => currentSessionState === 'open' || currentSessionState === 'reopened',
+    attachToServerSession,
+    showMessage: ui.showAppMessage,
+  });
+  await sessionHistory.refresh();
 
   if (storage.hasSavedSession()) {
     ui.showRestoreBanner(true);

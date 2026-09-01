@@ -806,3 +806,20 @@ details.panel > summary {
     white-space: normal;
   }
 }
+
+/* Past sessions panel */
+#session-history-panel .is-deleted .col-opened,
+#session-history-panel .is-deleted .col-label,
+#session-history-panel .is-deleted .col-started-by {
+  opacity: 0.55;
+}
+#session-history-panel .status-badge[data-state='deleted'] {
+  background: var(--color-idle-bg);
+  color: var(--color-muted);
+}
+#session-history-panel .col-actions {
+  white-space: nowrap;
+}
+#session-history-panel .col-actions .link-button + .link-button {
+  margin-left: 0.5rem;
+}

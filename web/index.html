@@ -210,6 +210,36 @@
         </div>
       </details>
 
+      <!-- Past sessions: review / reopen / soft-delete closed & accidental sessions -->
+      <details id="session-history-panel" class="panel">
+        <summary>Past sessions</summary>
+        <div class="details-body">
+          <div class="button-row">
+            <label class="toggle-row">
+              <input type="checkbox" id="history-show-deleted" />
+              Show deleted
+            </label>
+            <button id="btn-refresh-history" type="button" class="secondary">Refresh</button>
+          </div>
+          <p id="session-history-status" class="muted" role="status" aria-live="polite" hidden></p>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Opened</th>
+                  <th>Label</th>
+                  <th>Status</th>
+                  <th>Started by</th>
+                  <th><span class="sr-only">Row actions</span></th>
+                </tr>
+              </thead>
+              <tbody id="session-history-table-body"></tbody>
+            </table>
+          </div>
+          <p id="session-history-empty" class="muted" hidden>No attendance sessions yet.</p>
+        </div>
+      </details>
+
       <div class="tools">
         <p class="tools-divider">Setup &amp; tools</p>
 
@@ -333,6 +363,21 @@
         <td class="col-status"><span class="status-badge"></span></td>
         <td class="col-actions">
           <button type="button" class="link-button remove-row-button">Remove</button>
+        </td>
+      </tr>
+    </template>
+
+    <template id="session-history-row-template">
+      <tr>
+        <td class="col-opened"></td>
+        <td class="col-label"></td>
+        <td class="col-status"><span class="status-badge"></span></td>
+        <td class="col-started-by"></td>
+        <td class="col-actions">
+          <button type="button" class="link-button js-resume" hidden>Resume</button>
+          <button type="button" class="link-button js-reopen" hidden>Reopen</button>
+          <button type="button" class="link-button danger js-delete" hidden>Delete</button>
+          <button type="button" class="link-button js-restore" hidden>Restore</button>
         </td>
       </tr>
     </template>
