@@ -13,7 +13,7 @@ import {
   SessionNotDeletedError,
   SessionDeletedError,
 } from '../../src/attendance/session-lifecycle.js';
-import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents, gradeSyncJobs, courseMembers } from '../../src/database/schema.js';
+import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents, gradeSyncJobs, gradeLineItems, courseMembers } from '../../src/database/schema.js';
 import type { ToolSigningKey } from '../../src/lti/signing-keys.js';
 
 // D9: Start Attendance goes through the shared fallback helper, so that is what we mock.
@@ -361,6 +361,107 @@ describe('reopenAttendanceSession', () => {
 });
 
 describe('softDeleteAttendanceSession / restoreAttendanceSession', () => {
+  // Helper: give the course a persisted cumulative line item, as the grade worker would have.
+  async function seedCourseLineItem(courseId: string) {
+    await db.insert(gradeLineItems).values({
+      courseId,
+      canvasLineItemId: 'li-1',
+      canvasLineItemUrl: 'https://canvas.example.edu/api/lti/courses/1/line_items/li-1',
+      resourceId: 'attendance-cumulative-v1',
+      tag: 'attendance',
+      scoreMaximum: 100,
+    });
+  }
+
+  it('last-closed soft-delete: purges grade_sync_jobs, flags the line item for deletion, audits grade_line_item_delete_requested', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    const members = [member({ ltiUserId: 'u1', institutionalId: '111' })];
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members, fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    await seedCourseMembers(courseId, members);
+    await seedCourseLineItem(courseId);
+
+    const s = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await db.insert(attendanceRecords).values({ attendanceSessionId: s.id, ltiUserId: 'u1', institutionalId: '111', clientScanId: 'a1', status: 'present', source: 'card', scannedAt: new Date() });
+    await closeAttendanceSession(db, s.id, 'i1', 'rc');
+    expect(await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, courseId))).toHaveLength(1);
+
+    const result = await softDeleteAttendanceSession(db, s.id, 'instructor-7', 'req-del');
+
+    expect(result).toEqual({ gradeRecompute: true, jobCount: 0, lastClosedSessionRemoved: true });
+    expect(await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, courseId))).toHaveLength(0);
+    const [li] = await db.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId));
+    expect(li.deleteRequestedAt).not.toBeNull();
+    expect(li.deleteRequestedByLtiUserId).toBe('instructor-7');
+    expect(li.deleteNextAttemptAt).not.toBeNull();
+    const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_line_item_delete_requested'));
+    expect(audit).toMatchObject({ actorLtiUserId: 'instructor-7', targetType: 'grade_line_item', targetId: courseId, requestId: 'req-del' });
+    expect(audit.newValue).toMatchObject({ canvasLineItemId: 'li-1' });
+  });
+
+  it('last-closed soft-delete with NO grade_line_items row: purges jobs, writes no deletion request or audit', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    const s = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await closeAttendanceSession(db, s.id, 'i1', 'rc');
+
+    const result = await softDeleteAttendanceSession(db, s.id, 'i1', 'req-del');
+
+    expect(result.lastClosedSessionRemoved).toBe(true);
+    expect(await db.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId))).toHaveLength(0);
+    expect(await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_line_item_delete_requested'))).toHaveLength(0);
+  });
+
+  it('restoring the last closed session cancels a pending deletion and audits grade_line_item_delete_canceled', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    await seedCourseLineItem(courseId);
+    const s = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await closeAttendanceSession(db, s.id, 'i1', 'rc');
+    await softDeleteAttendanceSession(db, s.id, 'i1', 'req-del');
+
+    await restoreAttendanceSession(db, s.id, 'instructor-8', 'req-restore');
+
+    const [li] = await db.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId));
+    expect(li.deleteRequestedAt).toBeNull();
+    expect(li.deleteNextAttemptAt).toBeNull();
+    const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_line_item_delete_canceled'));
+    expect(audit).toMatchObject({ actorLtiUserId: 'instructor-8', targetType: 'grade_line_item', targetId: courseId });
+  });
+
+  it('closing a fresh session in the course cancels a pending deletion', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    await seedCourseLineItem(courseId);
+    const s1 = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await closeAttendanceSession(db, s1.id, 'i1', 'rc1');
+    await softDeleteAttendanceSession(db, s1.id, 'i1', 'req-del');
+
+    const s2 = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await closeAttendanceSession(db, s2.id, 'i1', 'rc2');
+
+    const [li] = await db.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId));
+    expect(li.deleteRequestedAt).toBeNull();
+    expect(await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_line_item_delete_canceled'))).toHaveLength(1);
+  });
+
+  it('two concurrent soft-deletes of two closed sessions in one course serialize without deadlock', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    await seedCourseLineItem(courseId);
+    const a = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await closeAttendanceSession(db, a.id, 'i1', 'rca');
+    const b = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await closeAttendanceSession(db, b.id, 'i1', 'rcb');
+
+    const [ra, rb] = await Promise.all([
+      softDeleteAttendanceSession(db, a.id, 'i1', 'req-a'),
+      softDeleteAttendanceSession(db, b.id, 'i1', 'req-b'),
+    ]);
+
+    // Exactly one of the two sees the course drop to zero closed sessions.
+    expect([ra.lastClosedSessionRemoved, rb.lastClosedSessionRemoved].filter(Boolean)).toHaveLength(1);
+  });
+
   it('soft-deletes an OPEN session: sets deleted_at/by, no grade recompute, audits attendance_session_deleted', async () => {
     const { courseId } = await seedInstitutionAndCourse(db, platform);
     vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
@@ -434,12 +535,11 @@ describe('softDeleteAttendanceSession / restoreAttendanceSession', () => {
     await closeAttendanceSession(db, a.id, 'i1', 'ra'); // absent -> job score 0
     await softDeleteAttendanceSession(db, a.id, 'i1');   // no live closed sessions now
 
-    // INTERIM (IMP-3): deleting the course's last closed session leaves the pre-delete
-    // grade_sync_jobs row untouched — the recompute has a zero denominator (spec §27.2) so
-    // there is nothing to write. Full IMP-3 will retract the Canvas line item here instead.
+    // IMP-3 (spec §25.11): deleting the course's last closed session purges its grade_sync_jobs
+    // (nothing may post to a line item that is going away) — the recompute has a zero denominator
+    // (spec §27.2) so there is nothing to re-enqueue. Restore below re-runs the recompute.
     const jobsAfterDelete = await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, courseId));
-    expect(jobsAfterDelete).toHaveLength(1);
-    expect(jobsAfterDelete[0].score).toBeCloseTo(0);
+    expect(jobsAfterDelete).toHaveLength(0);
 
     const result = await restoreAttendanceSession(db, a.id, 'instructor-3', 'req-res');
     expect(result.gradeRecompute).toBe(true);

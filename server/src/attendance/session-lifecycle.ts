@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { Database } from '../database/client.js';
 import {
   attendanceSessions,
@@ -13,6 +13,8 @@ import type { CourseRosterMember } from '../lti/nrps.js';
 import { getRosterWithFallback } from './roster-store.js';
 import { resolveCurrentRecord } from './member-status.js';
 import { recomputeCourseGrades } from './grade-recompute.js';
+import { deleteCourseGradeSyncJobs } from './grade-sync-store.js';
+import { requestLineItemDeletion, cancelLineItemDeletion } from './line-item-deletion-store.js';
 
 // The optional test-injection fields mirror Phase 4's getRosterWithFallback deps so a
 // caller can stub the Canvas fetch; signingKey is REQUIRED (Phase 4 D5 — no module-level
@@ -159,6 +161,11 @@ export async function closeAttendanceSession(
     if (session.deletedAt) throw new SessionDeletedError(); // a soft-deleted session is not writable until restored
     if (session.state === 'closed') throw new SessionAlreadyClosedError(); // Q7 state guard
 
+    // Serialize every per-course grade mutation (close / soft-delete / restore) so the
+    // course-wide grade_sync_jobs writes below cannot interleave and deadlock (reviewer
+    // finding). Auto-released at transaction end.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${session.courseId})::bigint)`);
+
     // B5: load the course once and use course.institutionId unconditionally
     // (audit_events.institutionId is NOT NULL).
     const [course] = await tx.select().from(courses).where(eq(courses.id, session.courseId));
@@ -207,7 +214,23 @@ export async function closeAttendanceSession(
 
     // Phase 6 cumulative recompute + durable enqueue (spec §25.7 steps 3-4, §28 steps 2-3),
     // shared with soft delete / restore. `state='closed'` is already applied above in this txn.
-    await recomputeCourseGrades(tx, db, session.courseId, sessionId, actorLtiUserId, requestId);
+    const recompute = await recomputeCourseGrades(tx, db, session.courseId, sessionId, actorLtiUserId, requestId);
+    // The course now has at least one live closed session, so any pending durable removal of its
+    // cumulative line item is stale — cancel it. The recompute's fresh grade_sync_jobs + the
+    // worker's idempotent ensureLineItem rebuild the column on the normal path (spec §27.1).
+    if (recompute.closedSessionCount > 0 && (await cancelLineItemDeletion(tx, session.courseId))) {
+      await tx.insert(auditEvents).values({
+        institutionId: course.institutionId,
+        courseId: session.courseId,
+        attendanceSessionId: sessionId,
+        actorLtiUserId,
+        eventType: 'grade_line_item_delete_canceled',
+        targetType: 'grade_line_item',
+        targetId: session.courseId,
+        newValue: { trigger: 'close' },
+        requestId: requestId ?? null,
+      });
+    }
   });
 }
 
@@ -255,6 +278,11 @@ export async function softDeleteAttendanceSession(
     if (!session) throw new Error(`Attendance session ${sessionId} not found.`);
     if (session.deletedAt) throw new SessionAlreadyDeletedError();
 
+    // Serialize every per-course grade mutation (close / soft-delete / restore) so the
+    // course-wide grade_sync_jobs writes below cannot interleave and deadlock (reviewer
+    // finding). Auto-released at transaction end.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${session.courseId})::bigint)`);
+
     const [course] = await tx.select().from(courses).where(eq(courses.id, session.courseId));
     const now = new Date();
     await tx
@@ -271,10 +299,30 @@ export async function softDeleteAttendanceSession(
       jobCount = recompute.jobCount;
       closedSessionCount = recompute.closedSessionCount;
     }
-    // IMP-3 (interim): a closed-session delete that leaves the course with zero live closed
-    // sessions has a zero-denominator recompute (spec §27.2) — grade_sync_jobs rows and any
-    // scores already written to Canvas are left in place. Surface it so the client can warn.
+    // IMP-3 (spec §25.11): a closed-session delete that leaves the course with zero live closed
+    // sessions has a zero-denominator recompute (spec §27.2). Purge the course's grade_sync_jobs
+    // (nothing may post to a line item that is going away) and flag the cumulative line item for
+    // durable removal by the worker. Both are local writes — no Canvas call here (spec §28).
     const lastClosedSessionRemoved = gradeRecompute && closedSessionCount === 0;
+    let lineItemDeleteRequested = false;
+    if (lastClosedSessionRemoved) {
+      await deleteCourseGradeSyncJobs(tx, session.courseId);
+      const { requested, canvasLineItemId } = await requestLineItemDeletion(tx, session.courseId, actorLtiUserId, now);
+      lineItemDeleteRequested = requested;
+      if (requested) {
+        await tx.insert(auditEvents).values({
+          institutionId: course.institutionId,
+          courseId: session.courseId,
+          attendanceSessionId: sessionId,
+          actorLtiUserId,
+          eventType: 'grade_line_item_delete_requested',
+          targetType: 'grade_line_item',
+          targetId: session.courseId,
+          newValue: { canvasLineItemId },
+          requestId: requestId ?? null,
+        });
+      }
+    }
 
     await tx.insert(auditEvents).values({
       institutionId: course.institutionId,
@@ -292,6 +340,7 @@ export async function softDeleteAttendanceSession(
         jobCount,
         closedSessionCount,
         lastClosedSessionRemoved,
+        lineItemDeleteRequested,
       },
       requestId: requestId ?? null,
     });
@@ -311,6 +360,11 @@ export async function restoreAttendanceSession(
     if (!session) throw new Error(`Attendance session ${sessionId} not found.`);
     if (!session.deletedAt) throw new SessionNotDeletedError();
 
+    // Serialize every per-course grade mutation (close / soft-delete / restore) so the
+    // course-wide grade_sync_jobs writes below cannot interleave and deadlock (reviewer
+    // finding). Auto-released at transaction end.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${session.courseId})::bigint)`);
+
     const [course] = await tx.select().from(courses).where(eq(courses.id, session.courseId));
     const now = new Date();
     await tx
@@ -322,7 +376,24 @@ export async function restoreAttendanceSession(
     let jobCount = 0;
     if (session.state === 'closed') {
       gradeRecompute = true;
-      ({ jobCount } = await recomputeCourseGrades(tx, db, session.courseId, sessionId, actorLtiUserId, requestId));
+      const recompute = await recomputeCourseGrades(tx, db, session.courseId, sessionId, actorLtiUserId, requestId);
+      jobCount = recompute.jobCount;
+      // A restored closed session means the course has closed sessions again — cancel any pending
+      // durable removal of its cumulative line item (spec §25.11). No eager AGS call: the recompute
+      // above enqueued fresh grade_sync_jobs and the worker's ensureLineItem is idempotent.
+      if (recompute.closedSessionCount > 0 && (await cancelLineItemDeletion(tx, session.courseId))) {
+        await tx.insert(auditEvents).values({
+          institutionId: course.institutionId,
+          courseId: session.courseId,
+          attendanceSessionId: sessionId,
+          actorLtiUserId,
+          eventType: 'grade_line_item_delete_canceled',
+          targetType: 'grade_line_item',
+          targetId: session.courseId,
+          newValue: { trigger: 'restore' },
+          requestId: requestId ?? null,
+        });
+      }
     }
 
     await tx.insert(auditEvents).values({
