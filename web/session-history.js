@@ -153,6 +153,12 @@ export function mountSessionHistory(deps) {
             // Only a genuine successful delete unsticks the main screen; { ok: false }
             // leaves it untouched (runAction still surfaces the error + refreshes).
             if (result.ok) deps.onSessionDeleted?.(rowData.id);
+            if (result.ok && result.lastClosedSessionRemoved) {
+              deps.showMessage(
+                'warning',
+                'That was the last closed session in this course. Attendance scores already sent to Canvas are not removed automatically.',
+              );
+            }
             return result;
           }, 'Session deleted. You can restore it from “Show deleted”.'),
       });

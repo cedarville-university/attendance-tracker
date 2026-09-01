@@ -179,9 +179,10 @@ export async function listSessionHistory({ includeDeleted = false } = {}) {
 
 /**
  * Soft-deletes an attendance session created by accident (restorable). Never throws.
- * A successful DELETE is 204 with no body.
+ * A successful DELETE is `200 { ok: true, lastClosedSessionRemoved }`; an unparseable
+ * body degrades to `lastClosedSessionRemoved: false`.
  * @param {string} sessionId
- * @returns {Promise<{ok: true}|{ok: false, error: {kind: string, message: string}}>}
+ * @returns {Promise<{ok: true, lastClosedSessionRemoved: boolean}|{ok: false, error: {kind: string, message: string}}>}
  */
 export async function deleteSession(sessionId) {
   const url = `/api/attendance-sessions/${sessionId}`;
@@ -194,7 +195,13 @@ export async function deleteSession(sessionId) {
   if (!response.ok) {
     return { ok: false, error: { kind: 'http-status', message: `${url} returned HTTP ${response.status}` } };
   }
-  return { ok: true };
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    body = null; // a 2xx with no / unparseable body still counts as success
+  }
+  return { ok: true, lastClosedSessionRemoved: Boolean(body?.lastClosedSessionRemoved) };
 }
 
 /**

@@ -321,13 +321,14 @@ describe('attendance-sessions routes', () => {
     expect(deletedRow.deletedByLtiUserId).toBe('i1');
   });
 
-  it('DELETE /api/attendance-sessions/:id soft-deletes and returns 204; a second delete is 404', async () => {
+  it('DELETE /api/attendance-sessions/:id soft-deletes an OPEN session and returns 200 { ok, lastClosedSessionRemoved:false }; a second delete is 404', async () => {
     const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'i1', state: 'open' }).returning();
     const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
 
     const first = await app.inject({ method: 'DELETE', url: `/api/attendance-sessions/${session.id}`, headers: CSRF });
-    expect(first.statusCode).toBe(204);
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toEqual({ ok: true, lastClosedSessionRemoved: false });
     const [row] = await db.select().from(attendanceSessions).where(eq(attendanceSessions.id, session.id));
     expect(row.deletedAt).not.toBeNull();
     const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'attendance_session_deleted'));
@@ -336,6 +337,16 @@ describe('attendance-sessions routes', () => {
     const second = await app.inject({ method: 'DELETE', url: `/api/attendance-sessions/${session.id}`, headers: CSRF });
     expect(second.statusCode).toBe(404);
     expect(second.json()).toMatchObject({ error: 'session_already_deleted', requestId: expect.any(String) });
+  });
+
+  it('DELETE /api/attendance-sessions/:id of the course\'s last closed session returns 200 { ok, lastClosedSessionRemoved:true }', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'i1', state: 'closed' }).returning();
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+
+    const res = await app.inject({ method: 'DELETE', url: `/api/attendance-sessions/${session.id}`, headers: CSRF });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, lastClosedSessionRemoved: true });
   });
 
   it('DELETE without a CSRF token is 403; DELETE of another course\'s session is 404 (not 403)', async () => {

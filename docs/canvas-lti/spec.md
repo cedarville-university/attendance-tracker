@@ -1291,9 +1291,15 @@ POST /api/attendance-sessions/{id}/restore
 excluded unless `includeDeleted=1`). `DELETE` is a soft delete: it sets
 `attendance_sessions.deleted_at` / `deleted_by_lti_user_id`, is restorable, and —
 when the session was `closed` — recomputes the course's cumulative attendance
-grades without it. `restore` is the inverse. Both audit actor + time and, when a
-recompute ran, emit `grade_sync_requested`. Editing a past session is unchanged:
-reopen it, correct records, close it.
+grades from the remaining non-deleted closed sessions. It responds
+`200 { ok: true, lastClosedSessionRemoved }`. When the deleted session was the
+course's **last** closed session there is nothing left to recompute from:
+`grade_sync_jobs` rows and any scores already written to Canvas are left in
+place, and `lastClosedSessionRemoved` is `true` so the client can warn the
+instructor. Automatically clearing the Canvas attendance line item in that case
+is a tracked follow-up. `restore` is the inverse. Both audit actor + time and,
+when a recompute ran, emit `grade_sync_requested`. Editing a past session is
+unchanged: reopen it, correct records, close it.
 
 ---
 

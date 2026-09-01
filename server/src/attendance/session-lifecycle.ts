@@ -249,7 +249,7 @@ export async function softDeleteAttendanceSession(
   sessionId: string,
   actorLtiUserId: string,
   requestId?: string,
-): Promise<{ gradeRecompute: boolean; jobCount: number }> {
+): Promise<{ gradeRecompute: boolean; jobCount: number; lastClosedSessionRemoved: boolean }> {
   return db.transaction(async (tx) => {
     const [session] = await tx.select().from(attendanceSessions).where(eq(attendanceSessions.id, sessionId)).for('update');
     if (!session) throw new Error(`Attendance session ${sessionId} not found.`);
@@ -264,10 +264,17 @@ export async function softDeleteAttendanceSession(
 
     let gradeRecompute = false;
     let jobCount = 0;
+    let closedSessionCount = 0;
     if (session.state === 'closed') {
       gradeRecompute = true;
-      ({ jobCount } = await recomputeCourseGrades(tx, db, session.courseId, sessionId, actorLtiUserId, requestId));
+      const recompute = await recomputeCourseGrades(tx, db, session.courseId, sessionId, actorLtiUserId, requestId);
+      jobCount = recompute.jobCount;
+      closedSessionCount = recompute.closedSessionCount;
     }
+    // IMP-3 (interim): a closed-session delete that leaves the course with zero live closed
+    // sessions has a zero-denominator recompute (spec §27.2) — grade_sync_jobs rows and any
+    // scores already written to Canvas are left in place. Surface it so the client can warn.
+    const lastClosedSessionRemoved = gradeRecompute && closedSessionCount === 0;
 
     await tx.insert(auditEvents).values({
       institutionId: course.institutionId,
@@ -278,11 +285,18 @@ export async function softDeleteAttendanceSession(
       targetType: 'attendance_session',
       targetId: sessionId,
       oldValue: { deletedAt: null, state: session.state },
-      newValue: { deletedAt: now.toISOString(), deletedByLtiUserId: actorLtiUserId, gradeRecompute, jobCount },
+      newValue: {
+        deletedAt: now.toISOString(),
+        deletedByLtiUserId: actorLtiUserId,
+        gradeRecompute,
+        jobCount,
+        closedSessionCount,
+        lastClosedSessionRemoved,
+      },
       requestId: requestId ?? null,
     });
 
-    return { gradeRecompute, jobCount };
+    return { gradeRecompute, jobCount, lastClosedSessionRemoved };
   });
 }
 

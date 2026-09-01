@@ -313,8 +313,8 @@ export function registerAttendanceSessionsRoute(app: FastifyInstance, deps: Atte
     const row = await loadSessionScopedToCourse(id, session.courseId);
     if (!row) return reply.code(404).send({ error: 'not_found', requestId: request.id });
     try {
-      await softDeleteAttendanceSession(db, id, session.ltiSubject, request.id);
-      return reply.code(204).send();
+      const outcome = await softDeleteAttendanceSession(db, id, session.ltiSubject, request.id);
+      return reply.code(200).send({ ok: true, lastClosedSessionRemoved: outcome.lastClosedSessionRemoved });
     } catch (err) {
       return replyForError(request, reply, err);
     }

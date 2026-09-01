@@ -368,13 +368,13 @@ describe('softDeleteAttendanceSession / restoreAttendanceSession', () => {
 
     const result = await softDeleteAttendanceSession(db, s.id, 'instructor-7', 'req-del');
 
-    expect(result).toEqual({ gradeRecompute: false, jobCount: 0 });
+    expect(result).toEqual({ gradeRecompute: false, jobCount: 0, lastClosedSessionRemoved: false });
     const [row] = await db.select().from(attendanceSessions).where(eq(attendanceSessions.id, s.id));
     expect(row.deletedAt).not.toBeNull();
     expect(row.deletedByLtiUserId).toBe('instructor-7');
     const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'attendance_session_deleted'));
     expect(audit).toMatchObject({ actorLtiUserId: 'instructor-7', targetType: 'attendance_session', targetId: s.id, requestId: 'req-del' });
-    expect(audit.newValue).toMatchObject({ gradeRecompute: false, jobCount: 0 });
+    expect(audit.newValue).toMatchObject({ gradeRecompute: false, jobCount: 0, closedSessionCount: 0, lastClosedSessionRemoved: false });
     // no grade_sync_requested audit row for an open-session delete
     expect(await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_sync_requested'))).toHaveLength(0);
   });
@@ -396,8 +396,24 @@ describe('softDeleteAttendanceSession / restoreAttendanceSession', () => {
     // Delete B -> only A counts -> 100.
     const result = await softDeleteAttendanceSession(db, b.id, 'i1', 'req-del');
     expect(result.gradeRecompute).toBe(true);
+    expect(result.lastClosedSessionRemoved).toBe(false); // session A is still a live closed session
     const [job] = await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, courseId));
     expect(job.score).toBeCloseTo(100);
+    const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'attendance_session_deleted'));
+    expect(audit.newValue).toMatchObject({ closedSessionCount: 1, lastClosedSessionRemoved: false });
+  });
+
+  it('soft-deleting the course\'s ONLY closed session flags lastClosedSessionRemoved (interim IMP-3)', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    const s = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await closeAttendanceSession(db, s.id, 'i1', 'rc');
+
+    const result = await softDeleteAttendanceSession(db, s.id, 'i1', 'req-del');
+
+    expect(result).toEqual({ gradeRecompute: true, jobCount: 0, lastClosedSessionRemoved: true });
+    const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'attendance_session_deleted'));
+    expect(audit.newValue).toMatchObject({ gradeRecompute: true, jobCount: 0, closedSessionCount: 0, lastClosedSessionRemoved: true });
   });
 
   it('rejects a double delete with SessionAlreadyDeletedError', async () => {
@@ -417,6 +433,13 @@ describe('softDeleteAttendanceSession / restoreAttendanceSession', () => {
     const a = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
     await closeAttendanceSession(db, a.id, 'i1', 'ra'); // absent -> job score 0
     await softDeleteAttendanceSession(db, a.id, 'i1');   // no live closed sessions now
+
+    // INTERIM (IMP-3): deleting the course's last closed session leaves the pre-delete
+    // grade_sync_jobs row untouched — the recompute has a zero denominator (spec §27.2) so
+    // there is nothing to write. Full IMP-3 will retract the Canvas line item here instead.
+    const jobsAfterDelete = await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, courseId));
+    expect(jobsAfterDelete).toHaveLength(1);
+    expect(jobsAfterDelete[0].score).toBeCloseTo(0);
 
     const result = await restoreAttendanceSession(db, a.id, 'instructor-3', 'req-res');
     expect(result.gradeRecompute).toBe(true);

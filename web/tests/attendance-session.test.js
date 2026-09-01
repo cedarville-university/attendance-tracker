@@ -167,11 +167,23 @@ describe('attendance-session.js', () => {
     expect(result.error.kind).toBe('network');
   });
 
-  it('deleteSession DELETEs the session path and treats 204 (no body) as success', async () => {
-    vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 204, json: () => Promise.reject(new Error('no body')) });
+  it('deleteSession DELETEs the session path and returns { ok, lastClosedSessionRemoved:false } for a 200 body', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, lastClosedSessionRemoved: false }) });
     const result = await deleteSession('s1');
     expect(apiFetch).toHaveBeenCalledWith('/api/attendance-sessions/s1', expect.objectContaining({ method: 'DELETE' }));
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, lastClosedSessionRemoved: false });
+  });
+
+  it('deleteSession propagates lastClosedSessionRemoved:true from the response body', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, lastClosedSessionRemoved: true }) });
+    const result = await deleteSession('s1');
+    expect(result).toEqual({ ok: true, lastClosedSessionRemoved: true });
+  });
+
+  it('deleteSession degrades an unparseable 2xx body to lastClosedSessionRemoved:false without throwing', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 200, json: () => Promise.reject(new Error('no body')) });
+    const result = await deleteSession('s1');
+    expect(result).toEqual({ ok: true, lastClosedSessionRemoved: false });
   });
 
   it('deleteSession surfaces a non-2xx as {ok:false}', async () => {
