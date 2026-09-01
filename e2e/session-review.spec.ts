@@ -64,7 +64,11 @@ test('instructor: review, reopen-from-panel, delete and restore a past session',
 
   // That was the course's last closed session — the durable line-item removal warns the
   // instructor that the Canvas attendance column will be removed automatically (§10 reword).
-  await expect(page.getByText(/removed automatically/i)).toBeVisible();
+  // Anchored on "column will be removed automatically" (not just "removed automatically"):
+  // the retired interim copy ("...are not removed automatically") is also a substring match
+  // for the looser pattern, so it would pass against either wording. This one only matches
+  // the current copy and fails if the old wording comes back.
+  await expect(page.getByText(/column will be removed automatically/i)).toBeVisible();
 
   // The deleted session was the one on screen -> the main view recovers to a
   // fresh no-session state instead of being stranded on "Session closed".

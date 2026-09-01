@@ -40,11 +40,17 @@ test('admin: token bootstrap -> add a Canvas connection -> rotate the signing ke
   await expect(row).toContainText('e2e-deploy-1');
 
   // Rotate the signing key; the displayed kid changes and /lti/jwks then serves it.
-  // Rotate is a two-click inline confirm (bindInlineConfirm), not a window.confirm dialog.
+  // Rotate is a two-click inline confirm (bindInlineConfirm), not a window.confirm dialog:
+  // the first click arms the button (label swaps to "Click again to rotate") and the
+  // second, on the same element, actually confirms. Asserting the armed label is visible
+  // in between (rather than one locator matching either label) means this test would fail
+  // if the confirm step were ever removed and the click rotated immediately.
   const kidBefore = await page.locator('#signing-key-kid').textContent();
-  const rotateBtn = page.getByRole('button', { name: /^(Rotate key|Click again to rotate)$/ });
+  const rotateBtn = page.getByRole('button', { name: 'Rotate key' });
   await rotateBtn.click();
-  await rotateBtn.click();
+  const armedRotateBtn = page.getByRole('button', { name: 'Click again to rotate' });
+  await expect(armedRotateBtn).toBeVisible();
+  await armedRotateBtn.click();
   await expect(page.locator('#signing-key-kid')).not.toHaveText(kidBefore ?? '');
   const kidAfter = (await page.locator('#signing-key-kid').textContent())!.trim();
 
