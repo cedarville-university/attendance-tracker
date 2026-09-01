@@ -426,6 +426,7 @@ describe('softDeleteAttendanceSession / restoreAttendanceSession', () => {
     expect(li.deleteNextAttemptAt).toBeNull();
     const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_line_item_delete_canceled'));
     expect(audit).toMatchObject({ actorLtiUserId: 'instructor-8', targetType: 'grade_line_item', targetId: courseId });
+    expect(audit.newValue).toMatchObject({ trigger: 'restore' });
   });
 
   it('closing a fresh session in the course cancels a pending deletion', async () => {
@@ -441,7 +442,9 @@ describe('softDeleteAttendanceSession / restoreAttendanceSession', () => {
 
     const [li] = await db.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId));
     expect(li.deleteRequestedAt).toBeNull();
-    expect(await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_line_item_delete_canceled'))).toHaveLength(1);
+    const canceledAudits = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_line_item_delete_canceled'));
+    expect(canceledAudits).toHaveLength(1);
+    expect(canceledAudits[0].newValue).toMatchObject({ trigger: 'close' });
   });
 
   it('two concurrent soft-deletes of two closed sessions in one course serialize without deadlock', async () => {

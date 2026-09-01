@@ -147,6 +147,35 @@ export async function createAttendanceSession(
   });
 }
 
+// closeAttendanceSession and restoreAttendanceSession both, on finding the course still has a
+// live closed session, cancel any pending durable line-item removal and then write this exact
+// audit row — only `trigger` differs ('close' vs 'restore'). Factored out so the two call
+// sites cannot drift. The surrounding guard (recompute.closedSessionCount > 0 &&
+// cancelLineItemDeletion(...)) stays at each call site; only this insert is shared.
+async function auditLineItemDeleteCanceled(
+  tx: Tx,
+  args: {
+    institutionId: string;
+    courseId: string;
+    sessionId: string;
+    actorLtiUserId: string;
+    trigger: 'close' | 'restore';
+    requestId: string | null;
+  },
+): Promise<void> {
+  await tx.insert(auditEvents).values({
+    institutionId: args.institutionId,
+    courseId: args.courseId,
+    attendanceSessionId: args.sessionId,
+    actorLtiUserId: args.actorLtiUserId,
+    eventType: 'grade_line_item_delete_canceled',
+    targetType: 'grade_line_item',
+    targetId: args.courseId,
+    newValue: { trigger: args.trigger },
+    requestId: args.requestId,
+  });
+}
+
 export async function closeAttendanceSession(
   db: Database,
   sessionId: string,
@@ -219,15 +248,12 @@ export async function closeAttendanceSession(
     // cumulative line item is stale — cancel it. The recompute's fresh grade_sync_jobs + the
     // worker's idempotent ensureLineItem rebuild the column on the normal path (spec §27.1).
     if (recompute.closedSessionCount > 0 && (await cancelLineItemDeletion(tx, session.courseId))) {
-      await tx.insert(auditEvents).values({
+      await auditLineItemDeleteCanceled(tx, {
         institutionId: course.institutionId,
         courseId: session.courseId,
-        attendanceSessionId: sessionId,
+        sessionId,
         actorLtiUserId,
-        eventType: 'grade_line_item_delete_canceled',
-        targetType: 'grade_line_item',
-        targetId: session.courseId,
-        newValue: { trigger: 'close' },
+        trigger: 'close',
         requestId: requestId ?? null,
       });
     }
@@ -382,15 +408,12 @@ export async function restoreAttendanceSession(
       // durable removal of its cumulative line item (spec §25.11). No eager AGS call: the recompute
       // above enqueued fresh grade_sync_jobs and the worker's ensureLineItem is idempotent.
       if (recompute.closedSessionCount > 0 && (await cancelLineItemDeletion(tx, session.courseId))) {
-        await tx.insert(auditEvents).values({
+        await auditLineItemDeleteCanceled(tx, {
           institutionId: course.institutionId,
           courseId: session.courseId,
-          attendanceSessionId: sessionId,
+          sessionId,
           actorLtiUserId,
-          eventType: 'grade_line_item_delete_canceled',
-          targetType: 'grade_line_item',
-          targetId: session.courseId,
-          newValue: { trigger: 'restore' },
+          trigger: 'restore',
           requestId: requestId ?? null,
         });
       }
