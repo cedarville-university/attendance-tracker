@@ -9,10 +9,10 @@
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import type { Database } from '../database/client.js';
 import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents, courses, type AttendanceRecordRow, type AttendanceSessionRow } from '../database/schema.js';
-import { createAttendanceSession, closeAttendanceSession, reopenAttendanceSession } from '../attendance/session-lifecycle.js';
+import { createAttendanceSession, closeAttendanceSession, reopenAttendanceSession, softDeleteAttendanceSession, restoreAttendanceSession } from '../attendance/session-lifecycle.js';
 import { submitScan } from '../attendance/scan-service.js';
 import { applyManualCorrection } from '../attendance/manual-correction.js';
 import { buildAttendanceSessionCsv } from '../attendance/csv-export.js';
@@ -44,6 +44,20 @@ const reopenSchema = z.object({ reason: z.string().optional() }).optional();
 function serializeSession(s: AttendanceSessionRow) {
   return { id: s.id, courseId: s.courseId, state: s.state, label: s.label, meetingAt: s.meetingAt, openedAt: s.openedAt, closedAt: s.closedAt, startedByLtiUserId: s.startedByLtiUserId };
 }
+function serializeSessionHistory(s: AttendanceSessionRow) {
+  return {
+    id: s.id,
+    courseId: s.courseId,
+    state: s.state,
+    label: s.label,
+    meetingAt: s.meetingAt,
+    openedAt: s.openedAt,
+    closedAt: s.closedAt,
+    startedByLtiUserId: s.startedByLtiUserId,
+    deletedAt: s.deletedAt,
+    deletedByLtiUserId: s.deletedByLtiUserId,
+  };
+}
 function serializeRecord(r: AttendanceRecordRow) {
   return { id: r.id, attendanceSessionId: r.attendanceSessionId, ltiUserId: r.ltiUserId, institutionalId: r.institutionalId, clientScanId: r.clientScanId, status: r.status, source: r.source, scannedAt: r.scannedAt, lookupErrorKind: r.lookupErrorKind };
 }
@@ -52,6 +66,8 @@ const HTTP_FOR_CODE: Record<string, number> = {
   session_closed: 409,
   session_already_closed: 409,
   session_not_closed: 409,
+  session_already_deleted: 404,
+  session_not_deleted: 409,
   roster_unavailable: 502,
   session_not_found: 404,
   member_not_in_snapshot: 404,
@@ -101,9 +117,34 @@ export function registerAttendanceSessionsRoute(app: FastifyInstance, deps: Atte
     const rows = await db
       .select()
       .from(attendanceSessions)
-      .where(and(eq(attendanceSessions.courseId, session.courseId), inArray(attendanceSessions.state, ['open', 'reopened'])));
+      .where(
+        and(
+          eq(attendanceSessions.courseId, session.courseId),
+          inArray(attendanceSessions.state, ['open', 'reopened']),
+          isNull(attendanceSessions.deletedAt),
+        ),
+      );
     rows.sort((a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime());
     return { sessions: rows.map(serializeSession) };
+  });
+
+  // Session review (spec §25.11): the course's full session history, newest-first.
+  // Static path — registered before '/:id'. Excludes soft-deleted rows unless ?includeDeleted=1.
+  app.get('/api/attendance-sessions/history', readOnly, async (request, reply) => {
+    const session = sessionOf(request, reply);
+    if (!session) return;
+    const q = request.query as { includeDeleted?: string };
+    const includeDeleted = q.includeDeleted === '1' || q.includeDeleted === 'true';
+    const rows = await db
+      .select()
+      .from(attendanceSessions)
+      .where(
+        includeDeleted
+          ? eq(attendanceSessions.courseId, session.courseId)
+          : and(eq(attendanceSessions.courseId, session.courseId), isNull(attendanceSessions.deletedAt)),
+      );
+    rows.sort((a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime());
+    return { sessions: rows.map(serializeSessionHistory) };
   });
 
   app.post('/api/attendance-sessions', mutation, async (request, reply) => {
@@ -258,6 +299,34 @@ export function registerAttendanceSessionsRoute(app: FastifyInstance, deps: Atte
     if (!parsed.success) return reply.code(400).send({ error: 'invalid_body', requestId: request.id });
     try {
       await reopenAttendanceSession(db, id, session.ltiSubject, parsed.data?.reason, request.id);
+      return { ok: true };
+    } catch (err) {
+      return replyForError(request, reply, err);
+    }
+  });
+
+  app.delete('/api/attendance-sessions/:id', mutation, async (request, reply) => {
+    const session = sessionOf(request, reply);
+    if (!session) return;
+    const { id } = request.params as { id: string };
+    const row = await loadSessionScopedToCourse(id, session.courseId);
+    if (!row) return reply.code(404).send({ error: 'not_found', requestId: request.id });
+    try {
+      await softDeleteAttendanceSession(db, id, session.ltiSubject, request.id);
+      return reply.code(204).send();
+    } catch (err) {
+      return replyForError(request, reply, err);
+    }
+  });
+
+  app.post('/api/attendance-sessions/:id/restore', mutation, async (request, reply) => {
+    const session = sessionOf(request, reply);
+    if (!session) return;
+    const { id } = request.params as { id: string };
+    const row = await loadSessionScopedToCourse(id, session.courseId);
+    if (!row) return reply.code(404).send({ error: 'not_found', requestId: request.id });
+    try {
+      await restoreAttendanceSession(db, id, session.ltiSubject, request.id);
       return { ok: true };
     } catch (err) {
       return replyForError(request, reply, err);

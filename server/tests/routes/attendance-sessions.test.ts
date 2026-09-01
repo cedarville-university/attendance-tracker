@@ -300,6 +300,80 @@ describe('attendance-sessions routes', () => {
     expect(response.headers['content-type']).toContain('text/csv');
     expect(response.body).toContain('1000000,Jane Smith,present,card');
   });
+
+  it('GET /api/attendance-sessions/history lists all the course\'s sessions newest-first; excludes deleted by default, includes them with ?includeDeleted=1', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const { courseId: otherCourseId } = await seedInstitutionAndCourse(db, platform, { clientId: 'other-client-id' });
+    const [older] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'i1', state: 'closed', openedAt: new Date('2026-08-01T10:00:00.000Z') }).returning();
+    const [newer] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'i1', state: 'open', openedAt: new Date('2026-08-20T10:00:00.000Z') }).returning();
+    const [deleted] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'i1', state: 'closed', openedAt: new Date('2026-08-10T10:00:00.000Z'), deletedAt: new Date(), deletedByLtiUserId: 'i1' }).returning();
+    await db.insert(attendanceSessions).values({ courseId: otherCourseId, startedByLtiUserId: 'x', state: 'open' });
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+
+    const def = await app.inject({ method: 'GET', url: '/api/attendance-sessions/history' });
+    expect(def.statusCode).toBe(200);
+    expect(def.json().sessions.map((s: { id: string }) => s.id)).toEqual([newer.id, older.id]);
+
+    const withDeleted = await app.inject({ method: 'GET', url: '/api/attendance-sessions/history?includeDeleted=1' });
+    expect(withDeleted.json().sessions.map((s: { id: string }) => s.id)).toEqual([newer.id, deleted.id, older.id]);
+    const deletedRow = withDeleted.json().sessions.find((s: { id: string }) => s.id === deleted.id);
+    expect(deletedRow.deletedAt).toBeTruthy();
+    expect(deletedRow.deletedByLtiUserId).toBe('i1');
+  });
+
+  it('DELETE /api/attendance-sessions/:id soft-deletes and returns 204; a second delete is 404', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'i1', state: 'open' }).returning();
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+
+    const first = await app.inject({ method: 'DELETE', url: `/api/attendance-sessions/${session.id}`, headers: CSRF });
+    expect(first.statusCode).toBe(204);
+    const [row] = await db.select().from(attendanceSessions).where(eq(attendanceSessions.id, session.id));
+    expect(row.deletedAt).not.toBeNull();
+    const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'attendance_session_deleted'));
+    expect(audit.requestId).toBeTruthy();
+
+    const second = await app.inject({ method: 'DELETE', url: `/api/attendance-sessions/${session.id}`, headers: CSRF });
+    expect(second.statusCode).toBe(404);
+    expect(second.json()).toMatchObject({ error: 'session_already_deleted', requestId: expect.any(String) });
+  });
+
+  it('DELETE without a CSRF token is 403; DELETE of another course\'s session is 404 (not 403)', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const other = await seedInstitutionAndCourse(db, platform, { clientId: 'other-client-id' });
+    const [foreign] = await db.insert(attendanceSessions).values({ courseId: other.courseId, startedByLtiUserId: 'x', state: 'open' }).returning();
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+
+    expect((await app.inject({ method: 'DELETE', url: `/api/attendance-sessions/${foreign.id}` })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'DELETE', url: `/api/attendance-sessions/${foreign.id}`, headers: CSRF })).statusCode).toBe(404);
+  });
+
+  it('POST /api/attendance-sessions/:id/restore restores a deleted session; restoring a live one is 409', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const [live] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'i1', state: 'open' }).returning();
+    const [deleted] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'i1', state: 'open', deletedAt: new Date(), deletedByLtiUserId: 'i1' }).returning();
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+
+    const ok = await app.inject({ method: 'POST', url: `/api/attendance-sessions/${deleted.id}/restore`, headers: CSRF });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toEqual({ ok: true });
+    const [row] = await db.select().from(attendanceSessions).where(eq(attendanceSessions.id, deleted.id));
+    expect(row.deletedAt).toBeNull();
+
+    const conflict = await app.inject({ method: 'POST', url: `/api/attendance-sessions/${live.id}/restore`, headers: CSRF });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json()).toMatchObject({ error: 'session_not_deleted' });
+  });
+
+  it('GET /api/attendance-sessions (resume list) excludes a soft-deleted open session', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const [visible] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'i1', state: 'open' }).returning();
+    await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'i1', state: 'reopened', deletedAt: new Date(), deletedByLtiUserId: 'i1' });
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+
+    const res = await app.inject({ method: 'GET', url: '/api/attendance-sessions?state=open' });
+    expect(res.json().sessions.map((s: { id: string }) => s.id)).toEqual([visible.id]);
+  });
 });
 
 describe('grade-sync', () => {
