@@ -1279,6 +1279,22 @@ GET /api/attendance-sessions/{id}/export.csv
 
 Preserve the useful CSV export capability from the existing application.
 
+## 25.11 History, soft delete, restore
+
+```text
+GET  /api/attendance-sessions/history[?includeDeleted=1]
+DELETE /api/attendance-sessions/{id}
+POST /api/attendance-sessions/{id}/restore
+```
+
+`history` lists the course's sessions newest-first by `opened_at` (soft-deleted
+excluded unless `includeDeleted=1`). `DELETE` is a soft delete: it sets
+`attendance_sessions.deleted_at` / `deleted_by_lti_user_id`, is restorable, and —
+when the session was `closed` — recomputes the course's cumulative attendance
+grades without it. `restore` is the inverse. Both audit actor + time and, when a
+recompute ran, emit `grade_sync_requested`. Editing a past session is unchanged:
+reopen it, correct records, close it.
+
 ---
 
 # 26. PostgreSQL data model
@@ -1921,6 +1937,8 @@ attendance_session_closed
 attendance_session_reopened
 attendance_manual_change
 attendance_record_removed
+attendance_session_deleted
+attendance_session_restored
 roster_refreshed
 grade_sync_requested
 grade_sync_failed

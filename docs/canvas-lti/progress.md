@@ -535,6 +535,10 @@ listed below for continuity but have not been planned in detail yet.
   The CSV panel remains as "Manual Roster (CSV fallback)". Covered by an
   `e2e/instructor-flow.spec.ts` assertion against the mock-Canvas NRPS roster.
 
+- Session review: `GET /api/attendance-sessions/history`, soft delete
+  (`DELETE /api/attendance-sessions/:id`) + `POST .../restore` with grade
+  recompute, and the "Past sessions" web panel (reopen / delete / restore).
+
 ## Deferred decisions
 
 - **Real ProxID credentials.** `HttpIdentityResolver` is implemented (ported
