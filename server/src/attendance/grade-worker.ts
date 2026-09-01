@@ -10,22 +10,14 @@
 // This module is invoked by server/src/worker.ts (a standalone entrypoint) — it is NOT wired into
 // the Fastify web process.
 
-import { eq } from 'drizzle-orm';
 import type { Database } from '../database/client.js';
-import {
-  auditEvents,
-  courses,
-  gradeLineItems,
-  institutions,
-  ltiDeployments,
-  ltiRegistrations,
-  type GradeSyncJobRow,
-} from '../database/schema.js';
+import { auditEvents, gradeLineItems, type GradeSyncJobRow } from '../database/schema.js';
 import type { ToolSigningKey } from '../lti/signing-keys.js';
 import { AGS_LINEITEM_SCOPE, AGS_SCORE_SCOPE } from '../lti/scopes.js';
 import { getAccessToken, clearAccessTokenCache } from '../lti/token-client.js';
 import { validateCanvasServiceUrl } from '../lti/service-url.js';
 import { ensureLineItem, postScore, ATTENDANCE_SCORE_MAXIMUM } from '../lti/ags.js';
+import { loadCourseAgsContext, type CourseAgsContext } from './ags-course-context.js';
 import {
   claimDueJobs,
   computeBackoff,
@@ -50,45 +42,6 @@ export interface ProcessGradeSyncJobsResult {
   synced: number;
   retried: number;
   failed: number;
-}
-
-interface CourseAgsContext {
-  courseId: string;
-  institutionId: string;
-  agsLineitemsUrl: string | null;
-  registration: { id: string; clientId: string; tokenEndpoint: string; tokenAudience: string };
-}
-
-async function loadCourseAgsContext(db: Database, courseId: string): Promise<CourseAgsContext | null> {
-  const rows = await db
-    .select({
-      courseId: courses.id,
-      institutionId: courses.institutionId,
-      agsLineitemsUrl: courses.agsLineitemsUrl,
-      registrationId: ltiRegistrations.id,
-      registrationClientId: ltiRegistrations.clientId,
-      registrationTokenEndpoint: ltiRegistrations.tokenEndpoint,
-      registrationTokenAudience: ltiRegistrations.tokenAudience,
-    })
-    .from(courses)
-    .innerJoin(institutions, eq(courses.institutionId, institutions.id))
-    .innerJoin(ltiDeployments, eq(courses.deploymentId, ltiDeployments.id))
-    .innerJoin(ltiRegistrations, eq(ltiDeployments.registrationId, ltiRegistrations.id))
-    .where(eq(courses.id, courseId));
-
-  const row = rows[0];
-  if (!row) return null;
-  return {
-    courseId: row.courseId,
-    institutionId: row.institutionId,
-    agsLineitemsUrl: row.agsLineitemsUrl,
-    registration: {
-      id: row.registrationId,
-      clientId: row.registrationClientId,
-      tokenEndpoint: row.registrationTokenEndpoint,
-      tokenAudience: row.registrationTokenAudience,
-    },
-  };
 }
 
 export async function processGradeSyncJobs(
