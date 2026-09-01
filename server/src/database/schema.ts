@@ -231,6 +231,12 @@ export type AttendanceRecordRow = typeof attendanceRecords.$inferSelect;
 
 // One cumulative Canvas Gradebook line item per course (spec §27). UNIQUE(course_id) makes
 // ensureLineItem's persist step idempotent regardless of how many times the worker runs.
+//
+// The delete_* columns carry a durable "remove this course's Canvas line item" request (spec
+// §25.11, §27.1). They are set by softDeleteAttendanceSession when a soft-delete removes the
+// course's last closed session, drained by processLineItemDeletions, and cleared by a later
+// close/restore. delete_next_attempt_at NULL while delete_requested_at is NOT NULL means the
+// request reached a terminal failure and is awaiting a manual re-arm.
 export const gradeLineItems = pgTable(
   'grade_line_items',
   {
@@ -241,6 +247,11 @@ export const gradeLineItems = pgTable(
     resourceId: text('resource_id').notNull(),
     tag: text('tag').notNull(),
     scoreMaximum: integer('score_maximum').notNull(),
+    deleteRequestedAt: timestamp('delete_requested_at', { withTimezone: true }),
+    deleteRequestedByLtiUserId: text('delete_requested_by_lti_user_id'),
+    deleteAttemptCount: integer('delete_attempt_count').notNull().default(0),
+    deleteNextAttemptAt: timestamp('delete_next_attempt_at', { withTimezone: true }),
+    deleteLastError: text('delete_last_error'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
