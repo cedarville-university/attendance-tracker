@@ -1,20 +1,61 @@
 :root {
   color-scheme: light;
-  --color-bg: #f4f5f7;
+
+  /* Neutrals carry a faint cool tint so the whole surface relates to CU Blue. */
+  --color-bg: #f1f4f8;
   --color-panel: #ffffff;
-  --color-border: #d7dbe0;
-  --color-text: #1c232b;
-  --color-muted: #64707c;
-  --color-primary: #1f5fbf;
-  --color-primary-dark: #164a97;
+  --color-border: #d3dae2;
+  --color-text: #16202b;
+  --color-muted: #526577;
+  --color-idle-bg: #eaeef4;
+
+  /* Cedarville brand: CU Blue is the primary; CU Gold is a decoration-only
+     accent (poor text contrast) reserved for the header rule. */
+  --color-primary: #003963;
+  --color-primary-dark: #002c4d;
+  --color-accent: #fbb93a;
+
+  /* Semantic — functional, kept distinct from the brand hues. */
   --color-danger: #b3261e;
   --color-danger-bg: #fdecea;
   --color-warning: #8a5a00;
   --color-warning-bg: #fff4de;
   --color-success: #146c2e;
   --color-success-bg: #e8f5ea;
-  --color-idle-bg: #eef1f5;
-  --radius: 8px;
+
+  --radius: 8px; /* panels, surfaces */
+  --radius-sm: 6px; /* buttons, inputs, small controls */
+
+  /* Spacing scale — every structural gap/padding pulls from here. */
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2.5rem;
+
+  /* Type. Deliberate native stacks — no web font (the app CSP is 'self'-only). */
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+
+  /* Fixed rem scale, ~1.2 ratio — dense app UI needs predictable sizes, not fluid. */
+  --text-2xs: 0.75rem; /* 12 — badges, table headers, micro eyebrows */
+  --text-xs: 0.8125rem; /* 13 — form hints, diagnostics */
+  --text-sm: 0.875rem; /* 14 — secondary text, table cells, form labels */
+  --text-md: 1rem; /* 16 — body */
+  --text-lg: 1.125rem; /* 18 — panel headings / summaries */
+  --text-xl: 1.375rem; /* 22 — page title */
+  --text-2xl: 1.75rem; /* 28 — Latest Scan headline */
+
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --leading-tight: 1.2;
+  --leading-normal: 1.55;
 }
 
 * {
@@ -23,62 +64,126 @@
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
   background: var(--color-bg);
   color: var(--color-text);
-  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3 {
+  line-height: var(--leading-tight);
+  font-weight: var(--weight-bold);
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 .app-header {
-  padding: 1.25rem 1.5rem 0.5rem;
+  padding: var(--space-md) var(--space-lg) var(--space-xs);
+  border-top: 3px solid var(--color-accent);
 }
 
 .app-header h1 {
-  margin: 0 0 0.25rem;
-  font-size: 1.5rem;
+  margin: 0 0 var(--space-2xs);
+  font-size: var(--text-xl);
+  letter-spacing: -0.01em;
+  color: var(--color-primary);
 }
 
 .app-subtitle {
   margin: 0;
   color: var(--color-muted);
+  font-size: var(--text-sm);
+  max-width: 68ch;
 }
 
-/* Canvas course-context strip in the header: lay the dt/dd pairs out
-   horizontally and compactly instead of the browser-default dl indentation. */
-.course-context {
+/* Horizontal dt/dd pairs: the header course-context strip and the
+   inline session tallies above the attendance table share this treatment. */
+.course-context,
+.stat-strip {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.25rem 1.5rem;
-  margin: 0.5rem 0 0;
+  gap: var(--space-2xs) var(--space-lg);
+  margin: var(--space-xs) 0 0;
+  font-variant-numeric: tabular-nums;
 }
 
-.course-context[hidden] {
+.course-context[hidden],
+.stat-strip[hidden] {
   display: none;
 }
 
-.course-context div {
+.course-context div,
+.stat-strip div {
   display: flex;
   gap: 0.35rem;
   align-items: baseline;
 }
 
-.course-context dt {
+.course-context dt,
+.stat-strip dt {
   color: var(--color-muted);
-  font-size: 0.8rem;
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-medium);
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.04em;
 }
 
-.course-context dd {
+.course-context dd,
+.stat-strip dd {
   margin: 0;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 
 .app-messages {
-  padding: 0 1.5rem;
+  padding: 0 var(--space-lg);
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: var(--space-xs);
+}
+
+.app-messages:not(:empty) {
+  margin-top: var(--space-sm);
 }
 
 .app-message {
@@ -86,7 +191,7 @@ body {
   border-radius: var(--radius);
   border: 1px solid var(--color-border);
   background: var(--color-idle-bg);
-  font-size: 0.9rem;
+  font-size: var(--text-sm);
 }
 
 .app-message--error {
@@ -102,15 +207,15 @@ body {
 }
 
 .restore-banner {
-  margin: 0.75rem 1.5rem 0;
-  padding: 0.75rem 1rem;
+  margin: var(--space-sm) var(--space-lg) 0;
+  padding: var(--space-sm) var(--space-md);
   background: var(--color-warning-bg);
   border: 1px solid var(--color-warning);
   border-radius: var(--radius);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: var(--space-md);
   flex-wrap: wrap;
 }
 
@@ -124,52 +229,128 @@ body {
 
 .restore-banner-actions {
   display: flex;
-  gap: 0.5rem;
+  gap: var(--space-xs);
 }
 
-.api-key-warning-banner {
-  margin: 0.75rem 1.5rem 0;
-  padding: 0.75rem 1rem;
-  background: var(--color-warning-bg);
-  border: 1px solid var(--color-warning);
-  border-radius: var(--radius);
-}
-
-.api-key-warning-banner[hidden] {
-  display: none;
-}
-
-.api-key-warning-banner p {
-  margin: 0;
-}
-
+/* Page column. Base rhythm is --space-md between rows; tier boundaries
+   (.live-view, .tools) add their own larger margin on top of it. */
 .app-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 1rem;
-  padding: 1rem 1.5rem 2rem;
-  align-items: start;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  max-width: 960px;
+  margin: 0 auto;
+  padding: var(--space-md) var(--space-lg) var(--space-xl);
 }
 
 .panel {
   background: var(--color-panel);
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
-  padding: 1rem 1.25rem;
+  padding: var(--space-md) var(--space-lg);
 }
 
-.panel--wide {
-  grid-column: 1 / -1;
+/* Reader + session controls: one bar, not two equal-weight cards. */
+.control-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm) var(--space-xl);
+  align-items: center;
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-sm) var(--space-md);
+}
+
+.control-bar-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+/* First-run nudge under the control bar; retires after the first connect. */
+.control-hint {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-muted);
+}
+
+.control-hint[hidden] {
+  display: none;
+}
+
+.grade-sync[hidden] {
+  display: none;
+}
+
+.grade-sync p {
+  margin: var(--space-2xs) 0;
+}
+
+/* Live-monitoring tier: Latest Scan beside the growing attendance log.
+   Extra top margin sets it apart from the control bar above. */
+.live-view {
+  display: grid;
+  gap: var(--space-md);
+  margin-top: var(--space-xs);
+}
+
+@media (min-width: 900px) {
+  .live-view {
+    grid-template-columns: minmax(300px, 340px) 1fr;
+    align-items: start;
+    gap: var(--space-lg);
+  }
+
+  .live-view .latest-scan {
+    position: sticky;
+    top: var(--space-md);
+  }
+
+  /* Reader and session clusters share one line here; a rule keeps them
+     visually distinct. Scoped to the wide layout so a wrapped, stacked
+     group never shows a stray vertical edge. */
+  .control-bar-group + .control-bar-group {
+    border-inline-start: 1px solid var(--color-border);
+    padding-inline-start: var(--space-md);
+  }
+}
+
+/* Setup tier: pushed down and away, spaced tighter within. */
+.tools {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin-top: var(--space-xl);
+}
+
+.tools-divider {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.panel--tool {
+  background: var(--color-bg);
+}
+
+.panel--tool > summary {
+  color: var(--color-muted);
 }
 
 .panel h2 {
-  margin: 0 0 0.75rem;
-  font-size: 1.05rem;
+  margin: 0 0 var(--space-sm);
+  font-size: var(--text-lg);
+  letter-spacing: -0.005em;
 }
 
 .panel h3 {
-  margin: 1rem 0 0.5rem;
-  font-size: 0.95rem;
+  margin: var(--space-md) 0 var(--space-xs);
+  font-size: var(--text-md);
 }
 
 .panel-header-row {
@@ -177,19 +358,20 @@ body {
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: var(--space-xs);
 }
 
 .muted {
   color: var(--color-muted);
-  font-size: 0.88rem;
+  font-size: var(--text-sm);
+  max-width: 68ch;
 }
 
 .button-row {
   display: flex;
-  gap: 0.5rem;
+  gap: var(--space-xs);
   flex-wrap: wrap;
-  margin: 0.5rem 0;
+  margin: var(--space-xs) 0;
   align-items: center;
 }
 
@@ -200,11 +382,20 @@ body {
 
 button {
   font: inherit;
-  padding: 0.5rem 0.9rem;
-  border-radius: 6px;
+  padding: 0.55rem 1rem;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
-  background: #fff;
+  background: var(--color-panel);
+  color: var(--color-text);
   cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--color-idle-bg);
 }
 
 button:disabled {
@@ -212,6 +403,7 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* Primary: filled CU Blue. Secondary: quiet tinted fill. Danger: outlined. */
 button.primary {
   background: var(--color-primary);
   border-color: var(--color-primary);
@@ -220,15 +412,20 @@ button.primary {
 
 button.primary:hover:not(:disabled) {
   background: var(--color-primary-dark);
+  border-color: var(--color-primary-dark);
 }
 
 button.secondary {
-  background: #fff;
-  color: var(--color-text);
+  background: var(--color-idle-bg);
+  border-color: var(--color-border);
+}
+
+button.secondary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-idle-bg) 90%, var(--color-text));
 }
 
 button.danger {
-  background: #fff;
+  background: var(--color-panel);
   color: var(--color-danger);
   border-color: var(--color-danger);
 }
@@ -237,57 +434,136 @@ button.danger:hover:not(:disabled) {
   background: var(--color-danger-bg);
 }
 
+/* Armed state for two-step inline confirmation (see confirm-inline.js). */
+button.is-confirming {
+  background: var(--color-danger);
+  border-color: var(--color-danger);
+  color: #fff;
+}
+
 .link-button {
   background: none;
   border: none;
   padding: 0;
   color: var(--color-primary);
   text-decoration: underline;
-  font-size: 0.85rem;
+  font-size: var(--text-sm);
+}
+
+.link-button:hover:not(:disabled) {
+  background: none;
+  color: var(--color-primary-dark);
 }
 
 .toggle-row {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  margin: 0.4rem 0;
+  gap: var(--space-xs);
+  margin: var(--space-2xs) 0;
 }
 
 .field-row {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
-  margin: 0.5rem 0;
+  gap: var(--space-2xs);
+  margin: var(--space-xs) 0;
+  min-width: 0;
 }
 
 .field-row label {
-  font-size: 0.85rem;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
   color: var(--color-muted);
 }
 
 .field-row input[type='text'],
-.field-row input[type='password'] {
+.field-row input[type='password'],
+.field-row input[type='url'] {
   font: inherit;
   padding: 0.45rem 0.6rem;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
+  background: var(--color-panel);
+  width: 100%;
+  max-width: 34rem;
+  min-width: 0;
+}
+
+.field-row input:focus {
+  border-color: var(--color-primary);
+}
+
+/* Grouped fieldsets on the admin registration form. */
+.field-group {
+  min-width: 0;
+  margin: var(--space-md) 0 0;
+  padding: var(--space-sm) var(--space-md) var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.field-group legend {
+  padding: 0 var(--space-2xs);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-muted);
+}
+
+.field-hint {
+  font-size: var(--text-xs);
+  color: var(--color-muted);
+}
+
+.field-hint code {
+  font-size: 1em;
+  overflow-wrap: anywhere;
+}
+
+.field-optional {
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-normal);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-muted);
+}
+
+/* On-blur validation feedback for the admin registration form. */
+.field-error {
+  font-size: var(--text-xs);
+  color: var(--color-danger);
+}
+
+.field-row input:user-invalid {
+  border-color: var(--color-danger);
 }
 
 .fact-list {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 0.15rem 0.75rem;
-  margin: 0.5rem 0;
+  gap: 0.15rem var(--space-sm);
+  margin: var(--space-xs) 0;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
 }
 
 .fact-list dt {
   color: var(--color-muted);
-  font-size: 0.85rem;
+  font-size: var(--text-sm);
 }
 
 .fact-list dd {
   margin: 0;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Long unbroken names / IDs must wrap rather than widen the sticky panel. */
+.stat-strip dd,
+.course-context dd {
+  overflow-wrap: anywhere;
 }
 
 .status-dot {
@@ -295,7 +571,6 @@ button.danger:hover:not(:disabled) {
   width: 0.6rem;
   height: 0.6rem;
   border-radius: 50%;
-  margin-right: 0.35rem;
 }
 
 .status-dot--connected {
@@ -306,16 +581,37 @@ button.danger:hover:not(:disabled) {
   background: var(--color-muted);
 }
 
+.status-dot--connecting {
+  background: var(--color-warning);
+  animation: status-dot-pulse 1s ease-in-out infinite;
+}
+
+@keyframes status-dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
 /* Latest scan panel: the most visually prominent element on the page. */
 .latest-scan {
   border-width: 2px;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  padding: var(--space-lg);
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
 }
 
 .latest-scan-status-text {
-  font-weight: 700;
-  font-size: 1.05rem;
-  margin: 0 0 0.5rem;
+  margin: var(--space-2xs) 0 var(--space-sm);
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-bold);
+  line-height: var(--leading-tight);
+  letter-spacing: -0.01em;
 }
 
 .latest-scan--idle {
@@ -324,7 +620,7 @@ button.danger:hover:not(:disabled) {
 }
 
 .latest-scan--pending {
-  background: #eef4ff;
+  background: color-mix(in srgb, var(--color-primary) 8%, var(--color-panel));
   border-color: var(--color-primary);
 }
 
@@ -345,12 +641,11 @@ button.danger:hover:not(:disabled) {
   background: var(--color-danger-bg);
   border-color: var(--color-danger);
   border-width: 3px;
-  box-shadow: 0 0 0 3px rgba(179, 38, 30, 0.15);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-danger) 15%, transparent);
 }
 
 .latest-scan--unexpected .latest-scan-status-text {
   color: var(--color-danger);
-  font-size: 1.3rem;
 }
 
 .table-scroll {
@@ -360,7 +655,8 @@ button.danger:hover:not(:disabled) {
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.9rem;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
 }
 
 th,
@@ -371,12 +667,21 @@ td {
   white-space: nowrap;
 }
 
+th {
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-muted);
+}
+
 .status-badge {
   display: inline-block;
   padding: 0.15rem 0.5rem;
   border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 600;
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.02em;
   background: var(--color-idle-bg);
 }
 
@@ -402,30 +707,31 @@ td {
 
 details.panel > summary {
   cursor: pointer;
-  font-size: 1.05rem;
-  font-weight: 600;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.005em;
   padding: 0.1rem 0;
 }
 
 .diagnostics-body,
-.settings-body {
-  margin-top: 0.75rem;
+.details-body {
+  margin-top: var(--space-sm);
 }
 
-.settings-body {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 1rem;
-  align-items: start;
+.details-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
 }
 
 .diag-pre {
   background: #0b1220;
   color: #d7e2f2;
-  padding: 0.75rem;
-  border-radius: 6px;
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
   overflow-x: auto;
-  font-size: 0.8rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
   max-height: 220px;
   overflow-y: auto;
 }
@@ -433,16 +739,16 @@ details.panel > summary {
 .diag-report-list {
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: var(--space-2xs);
   max-height: 260px;
   overflow-y: auto;
 }
 
 .diag-report-entry {
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 0.4rem 0.6rem;
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
 }
 
 .diag-report-entry-header {
@@ -454,14 +760,47 @@ details.panel > summary {
 
 .diag-report-hex,
 .diag-report-parsed {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   overflow-wrap: anywhere;
 }
 
-@media (max-width: 640px) {
-  .app-grid {
-    grid-template-columns: 1fr;
+/* Loading affordance: neutral grayscale shimmer, no brand colour. Used for
+   the Canvas roster table body while the NRPS call is in flight. */
+.skeleton {
+  display: block;
+  height: 1rem;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    90deg,
+    var(--color-idle-bg) 25%,
+    var(--color-border) 37%,
+    var(--color-idle-bg) 63%
+  );
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+
+.skeleton-row td {
+  padding-block: 0.55rem;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 100% 0;
   }
+  100% {
+    background-position: 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+    background: var(--color-idle-bg);
+  }
+}
+
+@media (max-width: 640px) {
   th,
   td {
     white-space: normal;

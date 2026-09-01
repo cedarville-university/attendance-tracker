@@ -15,6 +15,8 @@ export const elements = {
   readerStatusText: document.getElementById('reader-status-text'),
   readerProductName: document.getElementById('reader-product-name'),
 
+  firstRunHint: document.getElementById('first-run-hint'),
+
   sessionStatusText: document.getElementById('session-status-text'),
   startSessionBtn: document.getElementById('btn-start-session'),
   closeSessionBtn: document.getElementById('btn-close-session'),
@@ -65,6 +67,7 @@ export const elements = {
 
   downloadCsvBtn: document.getElementById('btn-download-csv'),
   clearAllBtn: document.getElementById('btn-clear-all'),
+  exportModeLabel: document.getElementById('export-mode-label'),
   exportModeSelect: document.getElementById('export-mode-select'),
   attendanceTableBody: document.getElementById('attendance-table-body'),
   attendanceEmptyMessage: document.getElementById('attendance-empty-message'),
@@ -104,15 +107,47 @@ export function formatLocalTime(isoTimestamp) {
   }
 }
 
+// ---- Reader / session control-bar emphasis ---------------------------
+
+// The control bar carries two buttons that could each look like "the next
+// thing to do". Only one ever is, so emphasis is state-driven: whichever is
+// the real next action gets .primary, the other drops to .secondary.
+let readerConnected = false;
+let sessionActive = false;
+
+/** @param {HTMLButtonElement} btn @param {boolean} on */
+export function setPrimaryEmphasis(btn, on) {
+  btn.classList.toggle('primary', on);
+  btn.classList.toggle('secondary', !on);
+}
+
+function refreshControlBarEmphasis() {
+  setPrimaryEmphasis(elements.connectBtn, !readerConnected);
+  setPrimaryEmphasis(elements.startSessionBtn, readerConnected && !sessionActive);
+}
+
 // ---- Reader status ----------------------------------------------------
 
 export function setReaderStatus({ connected, device }) {
+  elements.readerStatusDot.classList.remove('status-dot--connecting');
   elements.readerStatusDot.classList.toggle('status-dot--connected', connected);
   elements.readerStatusDot.classList.toggle('status-dot--disconnected', !connected);
   elements.readerStatusText.textContent = connected ? 'Connected' : 'Disconnected';
-  elements.readerProductName.textContent = connected && device ? device.productName : 'No reader connected.';
+  elements.readerProductName.textContent =
+    connected && device ? device.productName : 'No reader connected.';
   elements.connectBtn.disabled = connected;
   elements.disconnectBtn.disabled = !connected;
+  readerConnected = connected;
+  refreshControlBarEmphasis();
+}
+
+/** Transient state shown while the WebHID request is in flight. */
+export function setReaderConnecting() {
+  elements.readerStatusDot.classList.remove('status-dot--connected', 'status-dot--disconnected');
+  elements.readerStatusDot.classList.add('status-dot--connecting');
+  elements.readerStatusText.textContent = 'Connecting…';
+  elements.connectBtn.disabled = true;
+  elements.disconnectBtn.disabled = true;
 }
 
 // ---- Roster status ------------------------------------------------------
@@ -173,6 +208,32 @@ function shortTime(iso) {
   }
 }
 
+const ROSTER_SKELETON_ROWS = 4;
+
+function clearCanvasRosterBody() {
+  const body = elements.canvasRosterTableBody;
+  while (body.firstChild) body.removeChild(body.firstChild);
+}
+
+/** Neutral shimmer placeholder shown while the NRPS roster call is in flight. */
+export function showCanvasRosterLoading() {
+  elements.canvasRosterStatus.textContent = 'Loading roster from Canvas…';
+  elements.canvasRosterEmpty.hidden = true;
+  clearCanvasRosterBody();
+  const body = elements.canvasRosterTableBody;
+  for (let i = 0; i < ROSTER_SKELETON_ROWS; i += 1) {
+    const tr = document.createElement('tr');
+    tr.className = 'skeleton-row';
+    const td = document.createElement('td');
+    td.colSpan = 3;
+    const block = document.createElement('span');
+    block.className = 'skeleton';
+    td.appendChild(block);
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+}
+
 /** @param {{members: import('./course-roster.js').CanvasRosterMember[], fetchedAt: string, stale: boolean}} roster */
 export function renderCanvasRoster({ members, fetchedAt, stale }) {
   const body = elements.canvasRosterTableBody;
@@ -209,9 +270,9 @@ export function renderCanvasRoster({ members, fetchedAt, stale }) {
 
 /** @param {{kind: string, status?: number, message?: string}} error */
 export function renderCanvasRosterError(error) {
+  clearCanvasRosterBody();
   const detail = error?.status ? ` (HTTP ${error.status})` : '';
-  elements.canvasRosterStatus.textContent =
-    `Couldn't load the Canvas roster${detail}. You can retry, or use the Manual Roster (CSV fallback) below.`;
+  elements.canvasRosterStatus.textContent = `Couldn't load the Canvas roster${detail}. You can retry, or use the Manual Roster (CSV fallback) below.`;
   elements.refreshRosterBtn.disabled = false;
 }
 
@@ -220,6 +281,7 @@ export function renderCanvasRosterError(error) {
 /** Shows/hides the Present/Absent export mode selector -- only relevant when a roster is active. */
 export function setExportControlsAvailability({ rosterActive }) {
   elements.exportModeSelect.hidden = !rosterActive;
+  elements.exportModeLabel.hidden = !rosterActive;
   if (!rosterActive) elements.exportModeSelect.value = 'present';
 }
 
@@ -231,6 +293,9 @@ export function setExportControlsAvailability({ rosterActive }) {
  * @param {{state: 'none'|'open'|'closed'|'reopened', label?: string|null}} sessionInfo
  */
 export function renderSessionState(sessionInfo) {
+  sessionActive = sessionInfo.state === 'open' || sessionInfo.state === 'reopened';
+  refreshControlBarEmphasis();
+
   if (sessionInfo.state === 'none') {
     elements.sessionStatusText.textContent = 'No session started.';
     elements.startSessionBtn.hidden = false;
@@ -334,7 +399,10 @@ export function renderGradeSyncState(summary) {
     const last = summary?.lastSyncedAt ? ` Last synced ${shortTime(summary.lastSyncedAt)}.` : '';
     text = `Grades synced — ${total} students.${last}`;
   } else if (state === 'failed') {
-    const retry = counts.pending > 0 ? ` Retrying — next attempt ${nextAttemptPhrase(summary?.nextAttemptAt)}.` : '';
+    const retry =
+      counts.pending > 0
+        ? ` Retrying — next attempt ${nextAttemptPhrase(summary?.nextAttemptAt)}.`
+        : '';
     text = `Grade sync failed for ${counts.failed} of ${total} students (${summary?.lastError ?? 'unknown error'}).${retry}`;
   } else {
     text = state;
@@ -349,8 +417,8 @@ const LATEST_SCAN_STATUS_TEXT = {
   idle: 'Waiting for a card…',
   pending: 'Card scanned — looking up student…',
   present: '✓ Present',
-  unexpected: '⚠ UNEXPECTED STUDENT',
-  lookup_error: '⚠ Lookup error — could not verify roster status',
+  unexpected: '⚠ Not on the class roster',
+  lookup_error: '⚠ Couldn’t check the roster — scan again',
 };
 
 function studentDisplayName(record) {
@@ -404,8 +472,8 @@ export function renderStats(stats, rosterEnabled) {
 const STATUS_LABELS = {
   pending: 'Pending…',
   present: 'Present',
-  unexpected: 'Unexpected',
-  lookup_error: 'Lookup error',
+  unexpected: 'Not on roster',
+  lookup_error: 'Couldn’t check',
   absent: 'Absent',
   excused: 'Excused',
   not_recorded: 'Not recorded',
@@ -475,7 +543,8 @@ function fillAttendanceRow(row, record) {
   row.querySelector('.col-card-code').textContent = record.rawCardCode;
   row.querySelector('.col-university-id').textContent = record.institutionalId || '—';
   const name = studentDisplayName(record);
-  row.querySelector('.col-name').textContent = name || (record.status === 'pending' ? 'Looking up…' : '—');
+  row.querySelector('.col-name').textContent =
+    name || (record.status === 'pending' ? 'Looking up…' : '—');
   renderStatusBadge(row, record.status || 'pending');
   ensureCorrectionControl(row, record);
 }
@@ -584,8 +653,10 @@ export function addErrorLogEntry({ timestamp, category, detail }) {
 }
 
 export function clearDiagLists() {
-  while (elements.diagRawReports.firstChild) elements.diagRawReports.removeChild(elements.diagRawReports.firstChild);
-  while (elements.diagErrorLog.firstChild) elements.diagErrorLog.removeChild(elements.diagErrorLog.firstChild);
+  while (elements.diagRawReports.firstChild)
+    elements.diagRawReports.removeChild(elements.diagRawReports.firstChild);
+  while (elements.diagErrorLog.firstChild)
+    elements.diagErrorLog.removeChild(elements.diagErrorLog.firstChild);
 }
 
 export function setDebugModeUI(enabled) {

@@ -1,277 +1,353 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Attendance Tracker</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🪪</text></svg>" />
-  <link rel="stylesheet" href="styles.css" />
-</head>
-<body>
-  <header class="app-header">
-    <h1>Classroom Attendance Tracker</h1>
-    <p class="app-subtitle">WebHID card-reader attendance tracking, launched from Canvas and backed by a course-scoped server.</p>
-    <dl id="course-context" class="course-context" hidden>
-      <div><dt>Course</dt><dd id="course-context-name">&mdash;</dd></div>
-      <div><dt>Institution</dt><dd id="course-context-institution">&mdash;</dd></div>
-      <div><dt>Instructor</dt><dd id="course-context-instructor">&mdash;</dd></div>
-      <div><dt>Roster</dt><dd id="course-context-roster-count">&mdash;</dd></div>
-    </dl>
-  </header>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Attendance Tracker</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🪪</text></svg>"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <h1>Classroom Attendance Tracker</h1>
+      <p class="app-subtitle">
+        Scan student ID cards to take attendance during class. Attendance syncs to Canvas
+        automatically.
+      </p>
+      <dl id="course-context" class="course-context" hidden>
+        <div>
+          <dt>Course</dt>
+          <dd id="course-context-name">&mdash;</dd>
+        </div>
+        <div>
+          <dt>Institution</dt>
+          <dd id="course-context-institution">&mdash;</dd>
+        </div>
+        <div>
+          <dt>Instructor</dt>
+          <dd id="course-context-instructor">&mdash;</dd>
+        </div>
+        <div>
+          <dt>Roster</dt>
+          <dd id="course-context-roster-count">&mdash;</dd>
+        </div>
+      </dl>
+    </header>
 
-  <div id="app-messages" class="app-messages" role="status" aria-live="polite"></div>
+    <div id="app-messages" class="app-messages" role="status" aria-live="polite"></div>
 
-  <div id="restore-session-banner" class="restore-banner" hidden>
-    <p>A previous session was found saved on this computer.</p>
-    <div class="restore-banner-actions">
-      <button id="btn-restore-session" type="button">Restore Session</button>
-      <button id="btn-discard-session" type="button" class="secondary">Discard</button>
+    <div id="restore-session-banner" class="restore-banner" hidden>
+      <p>An unfinished attendance session is saved on this computer.</p>
+      <div class="restore-banner-actions">
+        <button id="btn-restore-session" type="button" class="primary">Restore session</button>
+        <button id="btn-discard-session" type="button" class="secondary">Discard</button>
+      </div>
     </div>
-  </div>
 
-  <main class="app-grid">
-    <!-- Settings -->
-    <details id="settings-panel" class="panel panel--wide">
-      <summary>Settings</summary>
+    <main class="app-grid">
+      <!-- Live attendance: reader + session controls in one bar -->
+      <section class="control-bar" aria-label="Reader and session controls">
+        <div class="control-bar-group">
+          <span
+            id="reader-status-dot"
+            class="status-dot status-dot--disconnected"
+            aria-hidden="true"
+          ></span>
+          <span id="reader-status-text">Disconnected</span>
+          <span id="reader-product-name" class="muted">No reader connected.</span>
+          <button id="btn-connect" type="button" class="primary">Connect card reader</button>
+          <button id="btn-disconnect" type="button" class="secondary" disabled>Disconnect</button>
+        </div>
+        <div class="control-bar-group">
+          <span id="session-status-text">No session started.</span>
+          <button id="btn-start-session" type="button" class="primary">Start attendance</button>
+          <button id="btn-close-session" type="button" class="secondary" disabled>
+            Close attendance
+          </button>
+          <button id="btn-reopen-session" type="button" class="secondary" hidden>
+            Reopen attendance
+          </button>
+        </div>
+      </section>
 
-      <div class="settings-body">
-        <!-- Canvas Roster (Phase 4 / Task 22B) -->
-        <section class="panel" aria-labelledby="canvas-roster-heading">
-          <h2 id="canvas-roster-heading">Canvas Roster</h2>
-          <p id="canvas-roster-status" class="muted" role="status" aria-live="polite">Loading roster from Canvas&hellip;</p>
+      <p id="first-run-hint" class="control-hint">
+        Connect your card reader to begin taking attendance.
+      </p>
+
+      <div id="manual-present-group" class="button-row" hidden>
+        <label for="manual-present-select">Student without a card</label>
+        <select id="manual-present-select"></select>
+        <button id="btn-manual-present" type="button" class="secondary">Mark present</button>
+      </div>
+
+      <div id="grade-sync-panel" class="grade-sync" hidden>
+        <p id="grade-sync-explainer" class="muted">
+          Attendance grades post to Canvas automatically every few minutes.
+        </p>
+        <p id="grade-sync-status-text">Grades pending</p>
+        <button id="btn-retry-grade-sync" type="button" class="secondary" hidden>
+          Retry grade sync
+        </button>
+      </div>
+
+      <!-- Live-monitoring tier: last scan + running log, side by side on wide screens -->
+      <div class="live-view">
+        <!-- Latest scan: the primary live readout -->
+        <section
+          id="latest-scan-panel"
+          class="panel latest-scan latest-scan--idle"
+          aria-labelledby="latest-scan-heading"
+          aria-live="polite"
+        >
+          <h2 id="latest-scan-heading">Latest scan</h2>
+          <p id="latest-scan-status-text" class="latest-scan-status-text">
+            Waiting for a card&hellip;
+          </p>
+          <dl class="fact-list">
+            <dt>Name</dt>
+            <dd id="latest-scan-name">&mdash;</dd>
+            <dt>University ID</dt>
+            <dd id="latest-scan-university-id">&mdash;</dd>
+            <dt>Card code</dt>
+            <dd id="latest-scan-card-code">&mdash;</dd>
+            <dt>Time</dt>
+            <dd id="latest-scan-time">&mdash;</dd>
+          </dl>
+        </section>
+
+        <!-- Attendance log + inline session tallies -->
+        <section class="panel" aria-labelledby="attendance-heading">
+          <div class="panel-header-row">
+            <h2 id="attendance-heading">Attendance</h2>
+            <div class="button-row">
+              <label id="export-mode-label" for="export-mode-select" hidden>Include</label>
+              <select id="export-mode-select" hidden aria-label="Export mode">
+                <option value="present">Present only</option>
+                <option value="present-absent">Present + Absent</option>
+                <option value="absent">Absent only</option>
+              </select>
+              <button id="btn-download-csv" type="button" class="primary">
+                Download attendance CSV
+              </button>
+              <button id="btn-clear-all" type="button" class="danger">Clear attendance</button>
+            </div>
+          </div>
+          <dl class="stat-strip">
+            <div>
+              <dt>Scanned in</dt>
+              <dd id="stats-total">0</dd>
+            </div>
+            <div>
+              <dt>Duplicates ignored</dt>
+              <dd id="stats-duplicates">0</dd>
+            </div>
+          </dl>
+          <dl id="stats-roster-group" class="stat-strip" hidden>
+            <div>
+              <dt>On roster</dt>
+              <dd id="stats-expected">0</dd>
+            </div>
+            <div>
+              <dt>Not on roster</dt>
+              <dd id="stats-unexpected">0</dd>
+            </div>
+            <div>
+              <dt>Couldn&rsquo;t check</dt>
+              <dd id="stats-lookup-errors">0</dd>
+            </div>
+          </dl>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Card code</th>
+                  <th>University ID</th>
+                  <th>Name</th>
+                  <th>Roster status</th>
+                  <th><span class="sr-only">Row actions</span></th>
+                </tr>
+              </thead>
+              <tbody id="attendance-table-body"></tbody>
+            </table>
+          </div>
+          <p id="attendance-empty-message" class="muted">
+            No scans yet. Start attendance, then scan a student&rsquo;s card.
+          </p>
+        </section>
+      </div>
+
+      <!-- Reference: roster from Canvas, collapsed by default -->
+      <details id="roster-panel" class="panel">
+        <summary>Roster</summary>
+        <div class="details-body">
+          <p id="canvas-roster-status" class="muted" role="status" aria-live="polite">
+            Loading roster from Canvas&hellip;
+          </p>
           <div class="button-row">
-            <button id="btn-refresh-roster" type="button" class="secondary" disabled>Refresh from Canvas</button>
+            <button id="btn-refresh-roster" type="button" class="secondary" disabled>
+              Refresh from Canvas
+            </button>
           </div>
           <div class="table-scroll">
             <table>
               <thead>
-                <tr><th>Name</th><th>Institutional ID</th><th>Status</th></tr>
+                <tr>
+                  <th>Name</th>
+                  <th>University ID</th>
+                  <th>Status</th>
+                </tr>
               </thead>
               <tbody id="canvas-roster-table-body"></tbody>
             </table>
           </div>
-          <p id="canvas-roster-empty" class="muted" hidden>Canvas returned no students for this course.</p>
-        </section>
-
-        <!-- Roster -->
-        <section class="panel" aria-labelledby="roster-heading">
-          <h2 id="roster-heading">Manual Roster (CSV fallback)</h2>
-          <label class="toggle-row">
-            <input type="checkbox" id="roster-enable-toggle" disabled />
-            Enable roster checking
-          </label>
-
-          <div class="button-row">
-            <button id="btn-load-roster" type="button" class="secondary">Load CSV&hellip;</button>
-            <input type="file" id="roster-file-input" accept=".csv,text/csv" hidden />
-            <button id="btn-clear-roster" type="button" class="secondary" disabled>Clear Roster</button>
-          </div>
-
-          <dl class="fact-list">
-            <dt>File</dt>
-            <dd id="roster-filename">None loaded</dd>
-            <dt>Rows loaded</dt>
-            <dd id="roster-row-count">0</dd>
-            <dt>University ID column</dt>
-            <dd>
-              <select id="roster-id-column-select" disabled>
-                <option value="">Select a column&hellip;</option>
-              </select>
-            </dd>
-          </dl>
-        </section>
-
-        <!-- Preferences -->
-        <section class="panel" aria-labelledby="prefs-heading">
-          <h2 id="prefs-heading">Preferences</h2>
-          <label class="toggle-row">
-            <input type="checkbox" id="sound-alerts-toggle" checked />
-            Sound alerts
-          </label>
-          <label class="toggle-row">
-            <input type="checkbox" id="remember-session-toggle" />
-            Remember this session on this computer
-          </label>
-          <div class="button-row">
-            <button id="btn-clear-local-data" type="button" class="secondary">Clear Local Data</button>
-          </div>
-          <p id="storage-warning" class="muted" hidden>Local storage is unavailable in this browser session; "Remember this session" cannot be used.</p>
-        </section>
-      </div>
-    </details>
-
-    <!-- Reader Status -->
-    <section class="panel" aria-labelledby="reader-status-heading">
-      <h2 id="reader-status-heading">Reader Status</h2>
-      <p>
-        <span id="reader-status-dot" class="status-dot status-dot--disconnected" aria-hidden="true"></span>
-        <span id="reader-status-text">Disconnected</span>
-      </p>
-      <p id="reader-product-name" class="muted">No reader connected.</p>
-      <div class="button-row">
-        <button id="btn-connect" type="button" class="primary">Connect Card Reader</button>
-        <button id="btn-disconnect" type="button" class="secondary" disabled>Disconnect</button>
-      </div>
-    </section>
-
-    <!-- Attendance Session -->
-    <section id="session-panel" class="panel" aria-labelledby="session-heading">
-      <h2 id="session-heading">Attendance Session</h2>
-      <p id="session-status-text">No session started.</p>
-      <div class="button-row">
-        <button id="btn-start-session" type="button" class="primary">Start Attendance</button>
-        <button id="btn-close-session" type="button" class="secondary" disabled>Close Attendance</button>
-        <button id="btn-reopen-session" type="button" class="secondary" hidden>Reopen Attendance</button>
-      </div>
-      <div id="manual-present-group" class="button-row" hidden>
-        <label for="manual-present-select">Card-less student</label>
-        <select id="manual-present-select" aria-label="Student to mark present"></select>
-        <button id="btn-manual-present" type="button" class="secondary">Mark present</button>
-      </div>
-      <div id="grade-sync-panel" hidden>
-        <p id="grade-sync-explainer" class="muted">Grades sync to Canvas automatically every few minutes.</p>
-        <p id="grade-sync-status-text">Grades pending</p>
-        <button id="btn-retry-grade-sync" type="button" class="secondary" hidden>Retry grade sync</button>
-      </div>
-    </section>
-
-    <!-- Latest Scan -->
-    <section id="latest-scan-panel" class="panel latest-scan latest-scan--idle" aria-labelledby="latest-scan-heading" aria-live="polite">
-      <h2 id="latest-scan-heading">Latest Scan</h2>
-      <p id="latest-scan-status-text" class="latest-scan-status-text">Waiting for a card&hellip;</p>
-      <dl class="fact-list">
-        <dt>Name</dt>
-        <dd id="latest-scan-name">&mdash;</dd>
-        <dt>University ID</dt>
-        <dd id="latest-scan-university-id">&mdash;</dd>
-        <dt>Card code</dt>
-        <dd id="latest-scan-card-code">&mdash;</dd>
-        <dt>Time</dt>
-        <dd id="latest-scan-time">&mdash;</dd>
-      </dl>
-    </section>
-
-    <!-- Session Statistics -->
-    <section class="panel" aria-labelledby="stats-heading">
-      <h2 id="stats-heading">Session Statistics</h2>
-      <dl class="fact-list">
-        <dt>Total accepted</dt>
-        <dd id="stats-total">0</dd>
-        <dt>Suppressed duplicates</dt>
-        <dd id="stats-duplicates">0</dd>
-      </dl>
-      <dl id="stats-roster-group" class="fact-list" hidden>
-        <dt>Expected</dt>
-        <dd id="stats-expected">0</dd>
-        <dt>Unexpected</dt>
-        <dd id="stats-unexpected">0</dd>
-        <dt>Lookup errors</dt>
-        <dd id="stats-lookup-errors">0</dd>
-      </dl>
-    </section>
-
-    <!-- Attendance Table -->
-    <section class="panel panel--wide" aria-labelledby="attendance-heading">
-      <div class="panel-header-row">
-        <h2 id="attendance-heading">Attendance</h2>
-        <div class="button-row">
-          <select id="export-mode-select" hidden aria-label="Export mode">
-            <option value="present">Present only</option>
-            <option value="present-absent">Present + Absent</option>
-            <option value="absent">Absent only</option>
-          </select>
-          <button id="btn-download-csv" type="button" class="primary">Download Attendance CSV</button>
-          <button id="btn-clear-all" type="button" class="danger">Clear All</button>
+          <p id="canvas-roster-empty" class="muted" hidden>
+            No students are enrolled in this Canvas course yet.
+          </p>
         </div>
+      </details>
+
+      <div class="tools">
+        <p class="tools-divider">Setup &amp; tools</p>
+
+        <!-- CSV fallback + preferences: rarely touched -->
+        <details id="settings-panel" class="panel panel--tool">
+          <summary>Roster CSV fallback &amp; preferences</summary>
+          <div class="details-body">
+            <section aria-labelledby="roster-heading">
+              <h2 id="roster-heading">Manual roster (CSV fallback)</h2>
+              <label class="toggle-row">
+                <input type="checkbox" id="roster-enable-toggle" disabled />
+                Enable roster checking
+              </label>
+
+              <div class="button-row">
+                <button id="btn-load-roster" type="button" class="secondary">
+                  Load CSV&hellip;
+                </button>
+                <input type="file" id="roster-file-input" accept=".csv,text/csv" hidden />
+                <button id="btn-clear-roster" type="button" class="secondary" disabled>
+                  Clear roster
+                </button>
+              </div>
+
+              <dl class="fact-list">
+                <dt>File</dt>
+                <dd id="roster-filename">None loaded</dd>
+                <dt>Rows loaded</dt>
+                <dd id="roster-row-count">0</dd>
+                <dt>University ID column</dt>
+                <dd>
+                  <select id="roster-id-column-select" disabled>
+                    <option value="">Select a column&hellip;</option>
+                  </select>
+                </dd>
+              </dl>
+            </section>
+
+            <section aria-labelledby="prefs-heading">
+              <h2 id="prefs-heading">Preferences</h2>
+              <label class="toggle-row">
+                <input type="checkbox" id="sound-alerts-toggle" checked />
+                Sound alerts
+              </label>
+              <label class="toggle-row">
+                <input type="checkbox" id="remember-session-toggle" />
+                Remember this session on this computer
+              </label>
+              <div class="button-row">
+                <button id="btn-clear-local-data" type="button" class="secondary">
+                  Clear local data
+                </button>
+              </div>
+              <p id="storage-warning" class="muted" hidden>
+                This browser can&rsquo;t save data, so &ldquo;Remember this session on this
+                computer&rdquo; is turned off.
+              </p>
+            </section>
+          </div>
+        </details>
+
+        <!-- Diagnostics -->
+        <details id="diagnostics-panel" class="panel panel--tool">
+          <summary>Reader diagnostics</summary>
+
+          <div class="diagnostics-body">
+            <p class="muted">
+              Shows exactly what the card reader reports, so the OMNIKEY report parsing can be
+              checked against real hardware. Use this when a card won&rsquo;t scan.
+            </p>
+
+            <h3>Support &amp; device</h3>
+            <dl class="fact-list">
+              <dt>WebHID supported</dt>
+              <dd id="diag-webhid-support">Checking&hellip;</dd>
+              <dt>Secure context</dt>
+              <dd id="diag-secure-context">Checking&hellip;</dd>
+              <dt>Product name</dt>
+              <dd id="diag-product-name">&mdash;</dd>
+              <dt>Vendor ID</dt>
+              <dd id="diag-vendor-id">&mdash;</dd>
+              <dt>Product ID</dt>
+              <dd id="diag-product-id">&mdash;</dd>
+              <dt>Opened</dt>
+              <dd id="diag-opened">&mdash;</dd>
+            </dl>
+
+            <h3>HID collections</h3>
+            <pre id="diag-collections" class="diag-pre">No device connected.</pre>
+
+            <label class="toggle-row">
+              <input type="checkbox" id="debug-mode-toggle" />
+              Debug mode (show raw HID reports)
+            </label>
+
+            <h3>Raw HID reports <span class="muted">(most recent first)</span></h3>
+            <div id="diag-raw-reports" class="diag-report-list"></div>
+
+            <h3>Error log</h3>
+            <div id="diag-error-log" class="diag-report-list"></div>
+
+            <div class="button-row">
+              <button id="btn-copy-diagnostics" type="button" class="secondary">
+                Copy diagnostics
+              </button>
+              <button id="btn-clear-diagnostics" type="button" class="secondary">
+                Clear diagnostics
+              </button>
+            </div>
+          </div>
+        </details>
       </div>
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Card Code</th>
-              <th>University ID</th>
-              <th>Name</th>
-              <th>Roster Status</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody id="attendance-table-body"></tbody>
-        </table>
-      </div>
-      <p id="attendance-empty-message" class="muted">No scans yet.</p>
-    </section>
+    </main>
 
-    <!-- Diagnostics -->
-    <details id="diagnostics-panel" class="panel panel--wide">
-      <summary>Reader Diagnostics</summary>
+    <template id="attendance-row-template">
+      <tr>
+        <td class="col-time"></td>
+        <td class="col-card-code"></td>
+        <td class="col-university-id"></td>
+        <td class="col-name"></td>
+        <td class="col-status"><span class="status-badge"></span></td>
+        <td class="col-actions">
+          <button type="button" class="link-button remove-row-button">Remove</button>
+        </td>
+      </tr>
+    </template>
 
-      <div class="diagnostics-body">
-        <p class="muted">
-          This panel doubles as the hardware-test mode: it shows exactly what the reader reports so
-          the OMNIKEY custom-report parsing can be verified/adjusted against real hardware.
-        </p>
-
-        <h3>Support &amp; Device</h3>
-        <dl class="fact-list">
-          <dt>WebHID supported</dt>
-          <dd id="diag-webhid-support">Checking&hellip;</dd>
-          <dt>Secure context</dt>
-          <dd id="diag-secure-context">Checking&hellip;</dd>
-          <dt>Product name</dt>
-          <dd id="diag-product-name">&mdash;</dd>
-          <dt>Vendor ID</dt>
-          <dd id="diag-vendor-id">&mdash;</dd>
-          <dt>Product ID</dt>
-          <dd id="diag-product-id">&mdash;</dd>
-          <dt>Opened</dt>
-          <dd id="diag-opened">&mdash;</dd>
-        </dl>
-
-        <h3>HID Collections</h3>
-        <pre id="diag-collections" class="diag-pre">No device connected.</pre>
-
-        <label class="toggle-row">
-          <input type="checkbox" id="debug-mode-toggle" />
-          Debug mode (show raw HID reports)
-        </label>
-
-        <h3>Raw HID Reports <span class="muted">(most recent first)</span></h3>
-        <div id="diag-raw-reports" class="diag-report-list"></div>
-
-        <h3>Error Log</h3>
-        <div id="diag-error-log" class="diag-report-list"></div>
-
-        <div class="button-row">
-          <button id="btn-copy-diagnostics" type="button" class="secondary">Copy Diagnostics</button>
-          <button id="btn-clear-diagnostics" type="button" class="secondary">Clear Diagnostics</button>
+    <template id="diag-report-entry-template">
+      <div class="diag-report-entry">
+        <div class="diag-report-entry-header">
+          <span class="diag-report-id"></span>
+          <span class="diag-report-timestamp"></span>
         </div>
+        <div class="diag-report-hex"></div>
+        <div class="diag-report-parsed"></div>
       </div>
-    </details>
-  </main>
+    </template>
 
-  <template id="attendance-row-template">
-    <tr>
-      <td class="col-time"></td>
-      <td class="col-card-code"></td>
-      <td class="col-university-id"></td>
-      <td class="col-name"></td>
-      <td class="col-status"><span class="status-badge"></span></td>
-      <td class="col-actions"><button type="button" class="link-button remove-row-button">Remove</button></td>
-    </tr>
-  </template>
-
-  <template id="diag-report-entry-template">
-    <div class="diag-report-entry">
-      <div class="diag-report-entry-header">
-        <span class="diag-report-id"></span>
-        <span class="diag-report-timestamp"></span>
-      </div>
-      <div class="diag-report-hex"></div>
-      <div class="diag-report-parsed"></div>
-    </div>
-  </template>
-
-  <script type="module" src="app.js"></script>
-</body>
+    <script type="module" src="app.js"></script>
+  </body>
 </html>

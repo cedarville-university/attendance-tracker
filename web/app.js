@@ -11,11 +11,17 @@ import { DEBUG_MODE_DEFAULT } from './config.js';
 import * as diagnostics from './diagnostics.js';
 import { HidReader, isWebHidSupported, isSecureContext } from './hid-reader.js';
 import { loadRosterCsv, buildRosterIndex, normalizeId } from './roster.js';
-import { fetchCourseRoster, refreshCourseRoster, buildMemberIndex, countEligible } from './course-roster.js';
+import {
+  fetchCourseRoster,
+  refreshCourseRoster,
+  buildMemberIndex,
+  countEligible,
+} from './course-roster.js';
 import { ScanPipeline } from './scan-pipeline.js';
 import { downloadAttendanceCsv, downloadCsvText } from './csv.js';
 import { computeAbsentRows, computeAbsentRowsFromMembers } from './absentees.js';
 import { eligibleUnrecordedMembers } from './manual-present.js';
+import { bindInlineConfirm } from './confirm-inline.js';
 import * as storage from './storage.js';
 import * as ui from './ui.js';
 import { bootstrapSession } from './api-client.js';
@@ -83,10 +89,14 @@ const canvasRosterState = {
 
 async function loadCanvasRoster({ refresh = false } = {}) {
   elements.refreshRosterBtn.disabled = true;
+  ui.showCanvasRosterLoading();
   const result = refresh ? await refreshCourseRoster() : await fetchCourseRoster();
   if (!result.ok) {
     ui.renderCanvasRosterError(result.error);
-    diagnostics.logEvent('error', { kind: 'canvas-roster-load-failed', message: result.error.message });
+    diagnostics.logEvent('error', {
+      kind: 'canvas-roster-load-failed',
+      message: result.error.message,
+    });
     return;
   }
   canvasRosterState.members = result.members;
@@ -109,14 +119,19 @@ async function handleRemoveRecord(recordOrId) {
   // ui.js now passes the full record; tolerate a bare id for safety.
   const record =
     typeof recordOrId === 'string'
-      ? scanPipeline.getRecords().find((r) => r.id === recordOrId) || resumedRowsById.get(recordOrId) || { id: recordOrId }
+      ? scanPipeline.getRecords().find((r) => r.id === recordOrId) ||
+        resumedRowsById.get(recordOrId) || { id: recordOrId }
       : recordOrId;
 
   // Server-authoritative deletion is only possible for a rostered row (the
   // DELETE route is member-scoped). Unexpected / lookup-error rows fall back to
   // a client-only removal.
   if (currentAttendanceSessionId && record.serverRecordId && record.ltiUserId) {
-    const result = await deleteAttendanceRecord(currentAttendanceSessionId, record.ltiUserId, record.serverRecordId);
+    const result = await deleteAttendanceRecord(
+      currentAttendanceSessionId,
+      record.ltiUserId,
+      record.serverRecordId,
+    );
     if (!result.ok) {
       ui.showAppMessage('error', `Could not remove the record: ${result.error.message}`);
       return; // keep the row
@@ -159,9 +174,12 @@ const scanPipeline = new ScanPipeline({
 // ---- WebHID transport ---------------------------------------------------------
 
 const HID_ERROR_MESSAGES = {
-  'webhid-unavailable': 'This browser does not support WebHID. Use a recent desktop Chrome or Edge.',
-  'insecure-origin': 'This page must be served over HTTPS or from localhost to use the card reader.',
-  'permission-denied': 'Reader access was denied, or the device chooser was closed without selecting a reader.',
+  'webhid-unavailable':
+    'This browser does not support WebHID. Use a recent desktop Chrome or Edge.',
+  'insecure-origin':
+    'This page must be served over HTTPS or from localhost to use the card reader.',
+  'permission-denied':
+    'Reader access was denied, or the device chooser was closed without selecting a reader.',
   'no-device-selected': 'No compatible reader was selected.',
   'open-failed': 'Failed to open the card reader. It may already be in use by another application.',
   'close-failed': 'Failed to cleanly close the card reader.',
@@ -183,7 +201,11 @@ const hidReader = new HidReader({
   onReport: ({ parsed }) => {
     const debugOn = elements.debugModeToggle.checked;
     if (debugOn) {
-      diagnostics.logEvent('raw-report', { reportId: parsed.reportId, rawHex: parsed.rawHex, timestamp: parsed.timestamp });
+      diagnostics.logEvent('raw-report', {
+        reportId: parsed.reportId,
+        rawHex: parsed.rawHex,
+        timestamp: parsed.timestamp,
+      });
       diagnostics.logEvent('parsed-report', parsedReportLogDetail(parsed));
       ui.addRawReportEntry(parsed);
     }
@@ -202,6 +224,7 @@ const hidReader = new HidReader({
   onConnectionChange: ({ connected, device, reason }) => {
     ui.setReaderStatus({ connected, device });
     ui.setDiagDeviceInfo(device);
+    if (connected) noteReaderConnected();
     if (!connected && reason === 'disconnected') {
       ui.showAppMessage('warning', 'The card reader was disconnected.');
     }
@@ -253,17 +276,45 @@ document.addEventListener(
   () => {
     ensureAudioContext();
   },
-  { once: true }
+  { once: true },
 );
+
+// ---- First-run hint ------------------------------------------------------------
+
+// One quiet line under the control bar, retired for good once the reader has
+// connected at least once (this visit or a previous one).
+const CONNECTED_BEFORE_KEY = 'attendance:connected-before';
+
+function hasConnectedBefore() {
+  if (!storage.isStorageAvailable()) return false;
+  try {
+    return localStorage.getItem(CONNECTED_BEFORE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function noteReaderConnected() {
+  elements.firstRunHint.hidden = true;
+  if (!storage.isStorageAvailable()) return;
+  try {
+    localStorage.setItem(CONNECTED_BEFORE_KEY, '1');
+  } catch {
+    // Non-fatal: the hint just reappears on the next fresh load.
+  }
+}
 
 // ---- Reader connect / disconnect buttons -----------------------------------
 
 elements.connectBtn.addEventListener('click', async () => {
   ensureAudioContext();
+  ui.setReaderConnecting();
   try {
     await hidReader.connect();
   } catch {
-    // Already surfaced via the onError callback.
+    // Message already surfaced via the onError callback; just clear the
+    // transient "Connecting…" state back to disconnected.
+    ui.setReaderStatus({ connected: false });
   }
 });
 
@@ -407,15 +458,29 @@ elements.rosterFileInput.addEventListener('change', () => {
     rosterState.idColumnHeader = null;
     rosterState.index = new Map();
 
-    ui.setRosterStatus({ filename: rosterState.filename, rowCount: rosterState.rawRows.length, headers: rosterState.headers, selectedHeader: null });
-    ui.setRosterControlsAvailability({ hasRows: rosterState.rawRows.length > 0, hasIdColumn: false });
+    ui.setRosterStatus({
+      filename: rosterState.filename,
+      rowCount: rosterState.rawRows.length,
+      headers: rosterState.headers,
+      selectedHeader: null,
+    });
+    ui.setRosterControlsAvailability({
+      hasRows: rosterState.rawRows.length > 0,
+      hasIdColumn: false,
+    });
     refreshExportControls();
-    ui.showAppMessage('info', `Loaded ${rosterState.rawRows.length} roster row(s) from ${file.name}.`);
+    ui.showAppMessage(
+      'info',
+      `Loaded ${rosterState.rawRows.length} roster row(s) from ${file.name}.`,
+    );
     schedulePersist();
   };
   reader.onerror = () => {
     ui.showAppMessage('error', `Failed to read file: ${file.name}`);
-    diagnostics.logEvent('error', { kind: 'roster-file-read-failed', message: reader.error?.message });
+    diagnostics.logEvent('error', {
+      kind: 'roster-file-read-failed',
+      message: reader.error?.message,
+    });
   };
   reader.readAsText(file, 'utf-8');
 });
@@ -424,7 +489,10 @@ elements.rosterIdColumnSelect.addEventListener('change', () => {
   const header = elements.rosterIdColumnSelect.value || null;
   rosterState.idColumnHeader = header;
   rosterState.index = header ? buildRosterIndex(rosterState.rawRows, header) : new Map();
-  ui.setRosterControlsAvailability({ hasRows: rosterState.rawRows.length > 0, hasIdColumn: !!header });
+  ui.setRosterControlsAvailability({
+    hasRows: rosterState.rawRows.length > 0,
+    hasIdColumn: !!header,
+  });
   refreshExportControls();
   schedulePersist();
 });
@@ -449,7 +517,10 @@ elements.rosterEnableToggle.addEventListener('change', () => {
   if (elements.rosterEnableToggle.checked && !rosterState.idColumnHeader) {
     elements.rosterEnableToggle.checked = false;
     ui.showAppMessage('error', 'Select a University ID column before enabling roster checking.');
-    diagnostics.logEvent('error', { kind: 'no-id-column-selected', message: 'Roster checking enable was blocked: no University ID column selected.' });
+    diagnostics.logEvent('error', {
+      kind: 'no-id-column-selected',
+      message: 'Roster checking enable was blocked: no University ID column selected.',
+    });
     return;
   }
   rosterState.enabled = elements.rosterEnableToggle.checked;
@@ -492,7 +563,12 @@ elements.downloadCsvBtn.addEventListener('click', async () => {
     return;
   }
 
-  const scannedIds = new Set(presentRecords.map((record) => record.institutionalId).filter(Boolean).map(normalizeId));
+  const scannedIds = new Set(
+    presentRecords
+      .map((record) => record.institutionalId)
+      .filter(Boolean)
+      .map(normalizeId),
+  );
   const absentRows = canvasRosterActive
     ? computeAbsentRowsFromMembers({ memberIndex: canvasRosterState.index, scannedIds })
     : computeAbsentRows({ rosterState, scannedIds });
@@ -509,15 +585,16 @@ elements.downloadCsvBtn.addEventListener('click', async () => {
   }
 });
 
-elements.clearAllBtn.addEventListener('click', () => {
-  if (scanPipeline.getRecords().length === 0) return;
-  const confirmed = window.confirm('Clear all attendance records for this session? This cannot be undone.');
-  if (!confirmed) return;
-  scanPipeline.clearAll();
-  ui.clearAttendanceTable();
-  ui.resetLatestScanPanel();
-  ui.renderStats(scanPipeline.getStats(), rosterState.enabled);
-  schedulePersist();
+bindInlineConfirm(elements.clearAllBtn, {
+  armedLabel: 'Click again to clear',
+  canArm: () => scanPipeline.getRecords().length > 0,
+  onConfirm: () => {
+    scanPipeline.clearAll();
+    ui.clearAttendanceTable();
+    ui.resetLatestScanPanel();
+    ui.renderStats(scanPipeline.getStats(), rosterState.enabled);
+    schedulePersist();
+  },
 });
 
 // ---- Preferences: sound alerts, remember session, clear local data -------------
@@ -567,7 +644,10 @@ elements.copyDiagnosticsBtn.addEventListener('click', async () => {
       document.execCommand('copy');
       ui.showAppMessage('info', 'Diagnostics copied to clipboard.');
     } catch {
-      ui.showAppMessage('error', 'Could not copy diagnostics automatically. Select and copy the text manually.');
+      ui.showAppMessage(
+        'error',
+        'Could not copy diagnostics automatically. Select and copy the text manually.',
+      );
     }
     document.body.removeChild(textarea);
   }
@@ -621,7 +701,9 @@ function restoreFromSaved(saved) {
   rosterState.headers = saved.roster?.headers || [];
   rosterState.rawRows = saved.roster?.rawRows || [];
   rosterState.idColumnHeader = saved.roster?.idColumnHeader || null;
-  rosterState.index = rosterState.idColumnHeader ? buildRosterIndex(rosterState.rawRows, rosterState.idColumnHeader) : new Map();
+  rosterState.index = rosterState.idColumnHeader
+    ? buildRosterIndex(rosterState.rawRows, rosterState.idColumnHeader)
+    : new Map();
   rosterState.enabled = !!saved.roster?.enabled;
 
   ui.setRosterStatus({
@@ -630,7 +712,10 @@ function restoreFromSaved(saved) {
     headers: rosterState.headers,
     selectedHeader: rosterState.idColumnHeader,
   });
-  ui.setRosterControlsAvailability({ hasRows: rosterState.rawRows.length > 0, hasIdColumn: !!rosterState.idColumnHeader });
+  ui.setRosterControlsAvailability({
+    hasRows: rosterState.rawRows.length > 0,
+    hasIdColumn: !!rosterState.idColumnHeader,
+  });
   elements.rosterEnableToggle.checked = rosterState.enabled;
   refreshExportControls();
 
@@ -665,7 +750,11 @@ function initDiagnosticsSupportInfo() {
   const webHidSupported = isWebHidSupported();
   const secureContext = isSecureContext();
   ui.setDiagSupportInfo({ webHidSupported, secureContext });
-  diagnostics.logEvent('webhid-support', { webHidSupported, secureContext, origin: window.location.origin });
+  diagnostics.logEvent('webhid-support', {
+    webHidSupported,
+    secureContext,
+    origin: window.location.origin,
+  });
 
   if (!webHidSupported) {
     ui.showAppMessage('error', HID_ERROR_MESSAGES['webhid-unavailable']);
@@ -680,11 +769,13 @@ function initPreferencesDefaults() {
 
   if (!storage.isStorageAvailable()) {
     ui.setStorageWarning(true);
-    // #storage-warning lives inside the (now collapsed-by-default)
-    // Settings panel, so it's invisible until the user opens it. Also
-    // surface it in the always-visible app-messages area so it can't be
-    // missed at startup.
-    ui.showAppMessage('warning', 'Local storage is unavailable in this browser session; "Remember this session" cannot be used.');
+    // #storage-warning lives inside the collapsed-by-default setup panel,
+    // so it's invisible until the user opens it. Also surface it in the
+    // always-visible app-messages area so it can't be missed at startup.
+    ui.showAppMessage(
+      'warning',
+      'This browser can’t save data, so “Remember this session on this computer” is turned off.',
+    );
     elements.rememberSessionToggle.checked = false;
     elements.rememberSessionToggle.disabled = true;
     elements.clearLocalDataBtn.disabled = true;
@@ -757,7 +848,10 @@ async function resumeOpenSessionIfAny() {
       ui.addAttendanceRow(row, handleRemoveRecord);
     }
   } else {
-    ui.showAppMessage('warning', 'Reconnected to the open attendance session, but its current roster could not be loaded.');
+    ui.showAppMessage(
+      'warning',
+      'Reconnected to the open attendance session, but its current roster could not be loaded.',
+    );
   }
 
   ui.renderSessionState({ state: chosen.state, label: chosen.label });
@@ -770,6 +864,7 @@ async function resumeOpenSessionIfAny() {
 async function init() {
   initDiagnosticsSupportInfo();
   initPreferencesDefaults();
+  if (hasConnectedBefore()) elements.firstRunHint.hidden = true;
   ui.setDiagDeviceInfo(null);
   ui.renderStats(scanPipeline.getStats(), rosterState.enabled);
 
