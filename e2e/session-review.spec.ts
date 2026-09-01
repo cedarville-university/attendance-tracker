@@ -62,6 +62,12 @@ test('instructor: review, reopen-from-panel, delete and restore a past session',
   await delBtn.click();
   await expect(page.locator('#session-history-table-body tr')).toHaveCount(0);
 
+  // The deleted session was the one on screen -> the main view recovers to a
+  // fresh no-session state instead of being stranded on "Session closed".
+  await expect(page.locator('#session-status-text')).toHaveText(/No session started/i);
+  await expect(page.getByRole('button', { name: 'Start Attendance' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Start Attendance' })).toBeEnabled();
+
   // Show deleted -> the row is back with a Restore action.
   await page.locator('#history-show-deleted').check();
   const deletedRow = page.locator('#session-history-table-body tr').first();

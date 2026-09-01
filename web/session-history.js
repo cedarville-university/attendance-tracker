@@ -6,6 +6,9 @@
 // convention. All user-visible strings are written via textContent by the
 // caller/renderer, never innerHTML.
 
+import { bindInlineConfirm } from './confirm-inline.js';
+import { listSessionHistory, deleteSession, restoreSession, reopenAttendanceSession } from './attendance-session.js';
+
 /**
  * Human date/time for a session's openedAt / meetingAt.
  * @param {string} iso
@@ -54,9 +57,6 @@ export function buildHistoryView(sessions, { timeZone, sessionActive = false } =
   return { rows, hasDeleted: rows.some((r) => r.isDeleted) };
 }
 
-import { bindInlineConfirm } from './confirm-inline.js';
-import { listSessionHistory, deleteSession, restoreSession, reopenAttendanceSession } from './attendance-session.js';
-
 /**
  * Binds the #session-history-panel. Returns { refresh } so the host (app.js) can
  * re-pull the list after start/close/reopen. Not unit-tested (DOM binder), same
@@ -65,6 +65,7 @@ import { listSessionHistory, deleteSession, restoreSession, reopenAttendanceSess
  *   isSessionActive: () => boolean,
  *   attachToServerSession: (sessionId: string, opts?: {announce?: boolean}) => Promise<void>,
  *   showMessage: (kind: string, text: string) => void,
+ *   onSessionDeleted?: (sessionId: string) => void,
  *   timeZone?: string,
  * }} deps
  */
@@ -146,7 +147,14 @@ export function mountSessionHistory(deps) {
     wire('.js-delete', rowData.actions.delete, (btn) => {
       bindInlineConfirm(btn, {
         armedLabel: 'Click again to delete',
-        onConfirm: () => runAction(() => deleteSession(rowData.id), 'Session deleted. You can restore it from “Show deleted”.'),
+        onConfirm: () =>
+          runAction(async () => {
+            const result = await deleteSession(rowData.id);
+            // Only a genuine successful delete unsticks the main screen; { ok: false }
+            // leaves it untouched (runAction still surfaces the error + refreshes).
+            if (result.ok) deps.onSessionDeleted?.(rowData.id);
+            return result;
+          }, 'Session deleted. You can restore it from “Show deleted”.'),
       });
     });
 

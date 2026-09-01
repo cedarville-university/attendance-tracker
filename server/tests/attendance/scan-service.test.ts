@@ -109,6 +109,19 @@ describe('submitScan', () => {
       submitScan(db, session.id, { clientScanId: 'scan-1', cardCode: 'CARD001', scannedAt: new Date().toISOString() }, { resolver, institution: { id: institutionId, cardFingerprintEnabled: false } })
     ).rejects.toMatchObject({ code: 'session_closed' });
   });
+
+  it('rejects a scan against a soft-deleted session (session_closed) and inserts no attendance_records row', async () => {
+    const { institutionId, sessionId } = await seedOpenSessionWithMember('1000000');
+    await db.update(attendanceSessions).set({ deletedAt: new Date(), deletedByLtiUserId: 'instructor-1' }).where(eq(attendanceSessions.id, sessionId));
+    const resolver: IdentityResolver = { resolveCard: async () => successResolution({ universityId: '1000000' }) };
+
+    await expect(
+      submitScan(db, sessionId, { clientScanId: 'scan-1', cardCode: 'CARD001', scannedAt: new Date().toISOString() }, { resolver, institution: { id: institutionId, cardFingerprintEnabled: false } })
+    ).rejects.toMatchObject({ code: 'session_closed' });
+
+    const rows = await db.select().from(attendanceRecords).where(eq(attendanceRecords.attendanceSessionId, sessionId));
+    expect(rows).toHaveLength(0);
+  });
 });
 
 describe('submitScan -- roster matching edge cases', () => {

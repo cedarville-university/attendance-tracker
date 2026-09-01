@@ -69,6 +69,12 @@ export class SessionNotDeletedError extends Error {
     super('Only a deleted attendance session can be restored.');
   }
 }
+export class SessionDeletedError extends Error {
+  code = 'session_deleted' as const;
+  constructor() {
+    super('Attendance session is deleted; it cannot be modified until it is restored.');
+  }
+}
 
 export async function createAttendanceSession(
   db: Database,
@@ -150,6 +156,7 @@ export async function closeAttendanceSession(
     // state guard and each write a set of system_absence + audit rows.
     const [session] = await tx.select().from(attendanceSessions).where(eq(attendanceSessions.id, sessionId)).for('update');
     if (!session) throw new Error(`Attendance session ${sessionId} not found.`);
+    if (session.deletedAt) throw new SessionDeletedError(); // a soft-deleted session is not writable until restored
     if (session.state === 'closed') throw new SessionAlreadyClosedError(); // Q7 state guard
 
     // B5: load the course once and use course.institutionId unconditionally
@@ -216,6 +223,7 @@ export async function reopenAttendanceSession(
     // state guard and each write an audit row.
     const [session] = await tx.select().from(attendanceSessions).where(eq(attendanceSessions.id, sessionId)).for('update');
     if (!session) throw new Error(`Attendance session ${sessionId} not found.`);
+    if (session.deletedAt) throw new SessionDeletedError(); // a soft-deleted session is not writable until restored
     if (session.state !== 'closed') throw new SessionNotClosedError(); // Q7 state guard
 
     const [course] = await tx.select().from(courses).where(eq(courses.id, session.courseId)); // B5

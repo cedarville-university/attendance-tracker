@@ -11,6 +11,7 @@ import {
   restoreAttendanceSession,
   SessionAlreadyDeletedError,
   SessionNotDeletedError,
+  SessionDeletedError,
 } from '../../src/attendance/session-lifecycle.js';
 import { attendanceSessions, attendanceSessionMembers, attendanceRecords, auditEvents, gradeSyncJobs, courseMembers } from '../../src/database/schema.js';
 import type { ToolSigningKey } from '../../src/lti/signing-keys.js';
@@ -431,5 +432,36 @@ describe('softDeleteAttendanceSession / restoreAttendanceSession', () => {
     vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
     const s = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
     await expect(restoreAttendanceSession(db, s.id, 'i1')).rejects.toBeInstanceOf(SessionNotDeletedError);
+  });
+});
+
+describe('writes to a soft-deleted session', () => {
+  it('closeAttendanceSession rejects with SessionDeletedError and does not flip state or write an audit row', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    const s = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await softDeleteAttendanceSession(db, s.id, 'i1');
+
+    await expect(closeAttendanceSession(db, s.id, 'i1', 'req-close')).rejects.toBeInstanceOf(SessionDeletedError);
+
+    const [row] = await db.select().from(attendanceSessions).where(eq(attendanceSessions.id, s.id));
+    expect(row.state).toBe('open'); // unchanged
+    expect(row.closedAt).toBeNull();
+    expect(await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'attendance_session_closed'))).toHaveLength(0);
+    expect(await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_sync_requested'))).toHaveLength(0);
+  });
+
+  it('reopenAttendanceSession rejects with SessionDeletedError and does not flip state to reopened', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members: [], fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    const s = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await closeAttendanceSession(db, s.id, 'i1', 'req-close');
+    await softDeleteAttendanceSession(db, s.id, 'i1');
+
+    await expect(reopenAttendanceSession(db, s.id, 'i1', 'fix', 'req-reopen')).rejects.toBeInstanceOf(SessionDeletedError);
+
+    const [row] = await db.select().from(attendanceSessions).where(eq(attendanceSessions.id, s.id));
+    expect(row.state).toBe('closed'); // still closed, not 'reopened'
+    expect(await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'attendance_session_reopened'))).toHaveLength(0);
   });
 });

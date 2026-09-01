@@ -46,6 +46,11 @@ export async function submitScan(
   // Defensive only: the route resolves tenancy and returns 404 before calling this.
   if (!session) throw new SessionClosedError();
   if (session.state === 'closed') throw new SessionClosedError();
+  // A soft-deleted session accepts no scans. submitScan's single failure mode is
+  // SessionClosedError (client contract: session_closed -> 409); from the scanner's
+  // point of view a deleted session is closed. The service layer (close/reopen/
+  // manual-correction) raises the distinct SessionDeletedError.
+  if (session.deletedAt) throw new SessionClosedError();
 
   const resolution = await deps.resolver.resolveCard(input.cardCode);
 

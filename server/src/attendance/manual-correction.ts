@@ -17,7 +17,7 @@ import { resolveCurrentRecord } from './member-status.js';
 class ManualCorrectionError extends Error {
   constructor(
     message: string,
-    public readonly code: 'session_not_found' | 'member_not_in_snapshot',
+    public readonly code: 'session_not_found' | 'member_not_in_snapshot' | 'session_deleted',
   ) {
     super(message);
   }
@@ -34,6 +34,7 @@ export async function applyManualCorrection(
   return db.transaction(async (tx) => {
     const [session] = await tx.select().from(attendanceSessions).where(eq(attendanceSessions.id, sessionId));
     if (!session) throw new ManualCorrectionError(`Attendance session ${sessionId} not found.`, 'session_not_found');
+    if (session.deletedAt) throw new ManualCorrectionError(`Attendance session ${sessionId} is deleted.`, 'session_deleted');
 
     const [member] = await tx
       .select()

@@ -923,6 +923,21 @@ async function init() {
     isSessionActive: () => currentSessionState === 'open' || currentSessionState === 'reopened',
     attachToServerSession,
     showMessage: ui.showAppMessage,
+    // When the session deleted from the panel is the one currently on screen, the
+    // main view would otherwise be stranded on a session the server no longer
+    // accepts writes for. Reset it to a fresh no-session state (Start Attendance
+    // visible/enabled, table empty, status "no session").
+    onSessionDeleted: (sessionId) => {
+      if (sessionId !== currentAttendanceSessionId) return;
+      currentAttendanceSessionId = null;
+      scanPipeline.sessionId = null;
+      scanPipeline.clearAll();
+      currentSessionState = 'none';
+      ui.renderSessionState({ state: 'none' });
+      ui.clearAttendanceTable();
+      ui.renderStats(scanPipeline.getStats(), rosterState.enabled);
+      ui.setManualPresentGroupVisible(false);
+    },
   });
   await sessionHistory.refresh();
 

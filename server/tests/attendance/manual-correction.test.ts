@@ -66,6 +66,19 @@ describe('applyManualCorrection', () => {
     ).rejects.toMatchObject({ code: 'member_not_in_snapshot' });
   });
 
+  it('rejects a correction against a soft-deleted session (code session_deleted) and writes no attendance_records / audit_events row', async () => {
+    const sessionId = await seedSessionWithScannedMember();
+    await db.update(attendanceSessions).set({ deletedAt: new Date(), deletedByLtiUserId: 'instructor-1' }).where(eq(attendanceSessions.id, sessionId));
+
+    await expect(
+      applyManualCorrection(db, sessionId, 'user-1', { status: 'excused', note: 'nope' }, 'instructor-1'),
+    ).rejects.toMatchObject({ code: 'session_deleted' });
+
+    const records = await db.select().from(attendanceRecords).where(and(eq(attendanceRecords.attendanceSessionId, sessionId), eq(attendanceRecords.source, 'manual')));
+    expect(records).toHaveLength(0);
+    expect(await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'attendance_manual_change'))).toHaveLength(0);
+  });
+
   it('works for a member with no prior record (oldValue is null)', async () => {
     const { courseId } = await seedInstitutionAndCourse(db, platform);
     const [session] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'instructor-1', state: 'open' }).returning();

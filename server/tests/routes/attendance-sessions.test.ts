@@ -365,6 +365,22 @@ describe('attendance-sessions routes', () => {
     expect(conflict.json()).toMatchObject({ error: 'session_not_deleted' });
   });
 
+  it('POST /api/attendance-sessions/:id/reopen on a soft-deleted session returns 409 session_deleted', async () => {
+    const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
+    const [session] = await db
+      .insert(attendanceSessions)
+      .values({ courseId, startedByLtiUserId: 'i1', state: 'closed', deletedAt: new Date(), deletedByLtiUserId: 'i1' })
+      .returning();
+    const app = buildTestApp({ resolver: { resolveCard: vi.fn() }, session: makeSession({ institutionId, courseId }) });
+
+    const res = await app.inject({ method: 'POST', url: `/api/attendance-sessions/${session.id}/reopen`, headers: CSRF });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ error: 'session_deleted', requestId: expect.any(String) });
+    const [row] = await db.select().from(attendanceSessions).where(eq(attendanceSessions.id, session.id));
+    expect(row.state).toBe('closed'); // not flipped to 'reopened'
+  });
+
   it('GET /api/attendance-sessions (resume list) excludes a soft-deleted open session', async () => {
     const { institutionId, courseId } = await seedInstitutionAndCourse(db, platform);
     const [visible] = await db.insert(attendanceSessions).values({ courseId, startedByLtiUserId: 'i1', state: 'open' }).returning();

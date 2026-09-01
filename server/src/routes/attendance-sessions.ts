@@ -68,6 +68,7 @@ const HTTP_FOR_CODE: Record<string, number> = {
   session_not_closed: 409,
   session_already_deleted: 404,
   session_not_deleted: 409,
+  session_deleted: 409,
   roster_unavailable: 502,
   session_not_found: 404,
   member_not_in_snapshot: 404,
