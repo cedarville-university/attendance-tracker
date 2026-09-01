@@ -1291,13 +1291,18 @@ POST /api/attendance-sessions/{id}/restore
 excluded unless `includeDeleted=1`). `DELETE` is a soft delete: it sets
 `attendance_sessions.deleted_at` / `deleted_by_lti_user_id`, is restorable, and —
 when the session was `closed` — recomputes the course's cumulative attendance
-grades from the remaining non-deleted closed sessions. It responds
-`200 { ok: true, lastClosedSessionRemoved }`. When the deleted session was the
-course's **last** closed session there is nothing left to recompute from:
-`grade_sync_jobs` rows and any scores already written to Canvas are left in
-place, and `lastClosedSessionRemoved` is `true` so the client can warn the
-instructor. Automatically clearing the Canvas attendance line item in that case
-is a tracked follow-up. `restore` is the inverse. Both audit actor + time and,
+grades from the remaining non-deleted closed sessions. It responds `200 { ok: true, lastClosedSessionRemoved }`. When the deleted session
+was the course's **last** closed session there is nothing left to recompute from:
+the course's `grade_sync_jobs` are purged and the cumulative Canvas line item is
+flagged for durable removal on `grade_line_items` (`delete_requested_at` +
+`delete_next_attempt_at`). The grade-sync worker's line-item-deletion pass then
+issues the AGS `DELETE` (a Canvas `404` counts as already removed), drops the
+`grade_line_items` row, and audits `grade_line_item_deleted`. `lastClosedSessionRemoved`
+is `true` so the client can tell the instructor the column is being removed. A later
+close or restore in the course cancels a still-pending removal
+(`grade_line_item_delete_canceled`); the next recompute recreates the line item
+idempotently via `ensureLineItem` (spec §27.1). `POST /grade-sync` re-arms a removal
+that hit its retry ceiling. `restore` is the inverse. Both audit actor + time and,
 when a recompute ran, emit `grade_sync_requested`. Editing a past session is
 unchanged: reopen it, correct records, close it.
 
@@ -1568,6 +1573,19 @@ Before creating a line item:
 4. persist its returned identifier/URL.
 
 This operation MUST be idempotent.
+
+### Removing the line item
+
+When a course loses its last non-deleted closed session, the tool durably removes
+the cumulative line item rather than leaving a stale Gradebook column. The request
+is recorded on `grade_line_items` (`delete_requested_at`, `delete_requested_by_lti_user_id`,
+`delete_attempt_count`, `delete_next_attempt_at`, `delete_last_error`) inside the
+soft-delete transaction — never as a synchronous Canvas call (spec §28). A worker
+pass issues the AGS `DELETE`; a Canvas `404` is treated as success. Retryable
+failures (429 / 5xx / network / 401) back off with jitter to the shared attempt
+ceiling, then terminally fail (`delete_next_attempt_at` NULL) pending a manual
+re-arm. A close or restore before the worker runs cancels the request. Recreation
+on the next close/restore goes through the same idempotent `ensureLineItem` path.
 
 ## 27.2 Grade calculation
 
@@ -1949,6 +1967,10 @@ roster_refreshed
 grade_sync_requested
 grade_sync_failed
 grade_sync_completed
+grade_line_item_delete_requested
+grade_line_item_deleted
+grade_line_item_delete_failed
+grade_line_item_delete_canceled
 institution_configuration_changed
 ```
 

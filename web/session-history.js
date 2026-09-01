@@ -156,7 +156,7 @@ export function mountSessionHistory(deps) {
             if (result.ok && result.lastClosedSessionRemoved) {
               deps.showMessage(
                 'warning',
-                'That was the last closed session in this course. Attendance scores already sent to Canvas are not removed automatically.',
+                'That was the last closed session in this course. The Canvas attendance column will be removed automatically.',
               );
             }
             return result;

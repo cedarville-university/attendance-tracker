@@ -180,7 +180,9 @@ export async function listSessionHistory({ includeDeleted = false } = {}) {
 /**
  * Soft-deletes an attendance session created by accident (restorable). Never throws.
  * A successful DELETE is `200 { ok: true, lastClosedSessionRemoved }`; an unparseable
- * body degrades to `lastClosedSessionRemoved: false`.
+ * body degrades to `lastClosedSessionRemoved: false`. When `lastClosedSessionRemoved`
+ * is true the server has scheduled durable removal of the course's Canvas attendance
+ * line item (handled by the grade-sync worker); the caller only needs to inform the user.
  * @param {string} sessionId
  * @returns {Promise<{ok: true, lastClosedSessionRemoved: boolean}|{ok: false, error: {kind: string, message: string}}>}
  */
