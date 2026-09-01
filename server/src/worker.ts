@@ -25,6 +25,7 @@ import { createDbClient, applyMigrations } from './database/client.js';
 import { getActiveSigningKey } from './lti/signing-keys.js';
 import { loadSigningKeys } from './lti/signing-key-store.js';
 import { processGradeSyncJobs } from './attendance/grade-worker.js';
+import { processLineItemDeletions } from './attendance/line-item-deletion.js';
 import { runMaintenancePass } from './maintenance/purge.js';
 import { setGradeJobGauges } from './telemetry/metrics.js';
 import { countGradeJobsByState } from './attendance/grade-sync-store.js';
@@ -45,11 +46,14 @@ const shouldStop = () => stopRequested;
 try {
   const maintenance = await runMaintenancePass(db, { retentionDays: env.RETENTION_DAYS, shouldStop });
   const signingKey = getActiveSigningKey(await loadSigningKeys(db, env.LTI_TOOL_SIGNING_KEYS_JSON));
+  // Runs BEFORE processGradeSyncJobs so a course marked for removal loses its line item before any
+  // stray score post targets it (spec §25.11, §27.1).
+  const lineItemDeletions = await processLineItemDeletions(db, { signingKey, shouldStop });
   const grade = await processGradeSyncJobs(db, { signingKey, shouldStop });
   const gauges = await countGradeJobsByState(db);
   setGradeJobGauges(gauges.pending, gauges.failed);
   // Tally only — no member ids, scores, tokens, or URLs (spec §31.8).
-  console.log(`[worker] ${JSON.stringify({ maintenance, grade })}`);
+  console.log(`[worker] ${JSON.stringify({ maintenance, lineItemDeletions, grade })}`);
 } catch (err) {
   // Server-side log only; never reaches a client. Every Canvas error is captured as an opaque code
   // inside processGradeSyncJobs, so anything caught here is a DB/config fault — log the message only,

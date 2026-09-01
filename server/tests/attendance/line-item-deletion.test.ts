@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { getTestDb, resetDb, closeTestDb } from '../support/db.js';
 import { seedInstitutionAndCourse } from '../support/seed.js';
 import { MockCanvasPlatform } from '../support/mock-canvas.js';
-import { gradeLineItems, gradeSyncJobs } from '../../src/database/schema.js';
+import { getActiveSigningKey, loadSigningKeysFromEnv, type ToolSigningKey } from '../../src/lti/signing-keys.js';
+import { auditEvents, gradeLineItems, gradeSyncJobs } from '../../src/database/schema.js';
 import {
   requestLineItemDeletion,
   cancelLineItemDeletion,
@@ -15,10 +16,17 @@ import {
   deleteGradeLineItemRow,
 } from '../../src/attendance/line-item-deletion-store.js';
 import { deleteCourseGradeSyncJobs } from '../../src/attendance/grade-sync-store.js';
+import { processLineItemDeletions } from '../../src/attendance/line-item-deletion.js';
 
 const { db } = getTestDb();
-const platform = new MockCanvasPlatform();
+let platform: MockCanvasPlatform;
+let signingKey: ToolSigningKey;
 afterAll(() => closeTestDb());
+beforeAll(async () => {
+  platform = new MockCanvasPlatform();
+  await platform.start();
+  signingKey = getActiveSigningKey(await loadSigningKeysFromEnv(undefined));
+});
 beforeEach(async () => {
   await resetDb();
 });
@@ -167,5 +175,154 @@ describe('line-item-deletion-store', () => {
     expect(removed).toBe(2);
     expect(await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, a.courseId))).toHaveLength(0);
     expect(await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, b.courseId))).toHaveLength(1);
+  });
+});
+
+describe('processLineItemDeletions', () => {
+  let agsKey = 0;
+  // Seed a course whose AGS URL points at an isolated mock course key, plus a persisted line item
+  // with a real mock line-item URL, already flagged as a due deletion request.
+  async function seedDueDeletion(over: Partial<typeof gradeLineItems.$inferInsert> = {}) {
+    const key = `lid-${agsKey++}`;
+    // Vary client_id — seedInstitutionAndCourse inserts an lti_registrations row with
+    // UNIQUE(issuer, client_id), so cases that seed more than one course would collide.
+    const { courseId } = await seedInstitutionAndCourse(db, platform, {
+      clientId: `client-${randomUUID()}`,
+      agsLineitemsUrl: platform.lineItemsUrlFor(key),
+    });
+    const canvasLineItemUrl = platform.seedExistingLineItem(key);
+    const canvasLineItemId = canvasLineItemUrl.split('/').pop()!;
+    await db.insert(gradeLineItems).values({
+      courseId,
+      canvasLineItemId,
+      canvasLineItemUrl,
+      resourceId: 'attendance-cumulative-v1',
+      tag: 'attendance',
+      scoreMaximum: 100,
+      deleteRequestedAt: new Date(Date.now() - 60_000),
+      deleteRequestedByLtiUserId: 'i1',
+      deleteNextAttemptAt: new Date(Date.now() - 60_000),
+      ...over,
+    });
+    return { courseId, key, canvasLineItemId };
+  }
+
+  it('DELETEs the Canvas line item, removes the grade_line_items row, audits grade_line_item_deleted', async () => {
+    const { courseId, key, canvasLineItemId } = await seedDueDeletion();
+
+    const result = await processLineItemDeletions(db, { signingKey });
+
+    expect(result).toMatchObject({ processed: 1, deleted: 1, retried: 0, failed: 0 });
+    expect(platform.getLineItems(key)).toHaveLength(0);
+    expect(await db.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId))).toHaveLength(0);
+    const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_line_item_deleted'));
+    expect(audit).toMatchObject({ targetType: 'grade_line_item', targetId: courseId, actorLtiUserId: null });
+    expect(audit.newValue).toMatchObject({ canvasLineItemId, canvas404: false });
+  });
+
+  it('treats a Canvas 404 as success (row removed, canvas404 true)', async () => {
+    const { courseId } = await seedDueDeletion();
+    // Repoint at a well-formed line-item URL on the live mock that was never created -> DELETE 404.
+    const mockBase = platform.lineItemsUrlFor('x').replace(/\/ags\/x\/lineitems$/, '');
+    await db
+      .update(gradeLineItems)
+      .set({ canvasLineItemUrl: `${mockBase}/ags/lineitems/never-created`, canvasLineItemId: 'never-created' })
+      .where(eq(gradeLineItems.courseId, courseId));
+
+    const result = await processLineItemDeletions(db, { signingKey });
+
+    expect(result).toMatchObject({ processed: 1, deleted: 1, failed: 0 });
+    expect(await db.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId))).toHaveLength(0);
+    const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_line_item_deleted'));
+    expect(audit.newValue).toMatchObject({ canvas404: true });
+  });
+
+  it('a 429 schedules a retry: attempt+1, future delete_next_attempt_at, row kept, no failure audit', async () => {
+    const { courseId } = await seedDueDeletion();
+    const now = new Date('2026-09-01T00:00:00.000Z');
+    platform.failNextAgsRequest('rate-limited');
+
+    const result = await processLineItemDeletions(db, { signingKey, now: () => now, rand: () => 0.5 });
+
+    expect(result).toMatchObject({ processed: 1, deleted: 0, retried: 1, failed: 0 });
+    const [row] = await db.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId));
+    expect(row.deleteAttemptCount).toBe(1);
+    expect(row.deleteRequestedAt).not.toBeNull();
+    expect(new Date(row.deleteNextAttemptAt!).getTime()).toBeGreaterThan(now.getTime());
+    expect(row.deleteLastError).toBe('ags:rate-limited');
+    expect(await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_line_item_delete_failed'))).toHaveLength(0);
+  });
+
+  it('at the attempt ceiling a retryable failure is terminal: delete_next_attempt_at NULL + grade_line_item_delete_failed', async () => {
+    const { courseId } = await seedDueDeletion({ deleteAttemptCount: 5 }); // MAX_GRADE_SYNC_ATTEMPTS - 1
+    platform.failNextAgsRequest('server-error');
+
+    const result = await processLineItemDeletions(db, { signingKey });
+
+    expect(result).toMatchObject({ processed: 1, deleted: 0, retried: 0, failed: 1 });
+    const [row] = await db.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId));
+    expect(row.deleteRequestedAt).not.toBeNull();
+    expect(row.deleteNextAttemptAt).toBeNull();
+    expect(row.deleteLastError).toBe('ags:server-error');
+    const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_line_item_delete_failed'));
+    expect(audit.newValue).toMatchObject({ attemptCount: 6, error: 'ags:server-error' });
+  });
+
+  it('a permanent 4xx is terminal on the first attempt', async () => {
+    const { courseId } = await seedDueDeletion();
+    platform.failNextAgsRequest('client-error');
+
+    const result = await processLineItemDeletions(db, { signingKey });
+
+    expect(result).toMatchObject({ deleted: 0, retried: 0, failed: 1 });
+    const [row] = await db.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId));
+    expect(row.deleteNextAttemptAt).toBeNull();
+    expect(row.deleteLastError).toBe('ags:client-error');
+  });
+
+  it('a 401 is re-minted once and then succeeds', async () => {
+    const { courseId, key } = await seedDueDeletion();
+    platform.failNextAgsRequest('auth'); // one-shot 401
+
+    const result = await processLineItemDeletions(db, { signingKey });
+
+    expect(result.deleted).toBe(1);
+    expect(platform.getLineItems(key)).toHaveLength(0);
+    void courseId;
+  });
+
+  it('if the request is cleared between the AGS call and the finalize, the row is kept and not counted', async () => {
+    const { courseId, key } = await seedDueDeletion();
+    // fetchImpl clears the deletion request right after the DELETE resolves, simulating a
+    // concurrent close/restore winning the race.
+    const realFetch = fetch;
+    const raceFetch: typeof fetch = async (input, init) => {
+      const res = await realFetch(input as string, init);
+      if ((init?.method ?? 'GET') === 'DELETE') {
+        await db.update(gradeLineItems)
+          .set({ deleteRequestedAt: null, deleteRequestedByLtiUserId: null, deleteAttemptCount: 0, deleteNextAttemptAt: null, deleteLastError: null })
+          .where(eq(gradeLineItems.courseId, courseId));
+      }
+      return res;
+    };
+
+    const result = await processLineItemDeletions(db, { signingKey, fetchImpl: raceFetch });
+
+    expect(result).toMatchObject({ processed: 1, deleted: 0, retried: 0, failed: 0 });
+    // Canvas line item was deleted, but the local row survives because the request was cleared.
+    expect(platform.getLineItems(key)).toHaveLength(0);
+    expect(await db.select().from(gradeLineItems).where(eq(gradeLineItems.courseId, courseId))).toHaveLength(1);
+    expect(await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_line_item_deleted'))).toHaveLength(0);
+  });
+
+  it('stops between rows when shouldStop() flips', async () => {
+    await seedDueDeletion();
+    await seedDueDeletion();
+    let calls = 0;
+    const result = await processLineItemDeletions(db, {
+      signingKey,
+      shouldStop: () => calls++ >= 1, // false for the first row, true before the second
+    });
+    expect(result.processed).toBe(1);
   });
 });
