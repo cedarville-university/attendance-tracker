@@ -32,6 +32,8 @@ param postgresAdministratorPassword string
 @description('Identity API base URL for the real ProxID resolver (decision #3). Non-secret; empty disables the HTTP resolver.')
 param identityApiUrl string = ''
 param identityApiKeyName string = 'attendance-resolver'
+@description('When true, wire SETUP_TOKEN into the web app from the `setup-token` Key Vault secret (admin/setup page bootstrap). Seed that secret in the vault BEFORE deploying, or the web deploy fails to resolve it. Enable in dev only.')
+param setupTokenEnabled bool = false
 @description('When false, skip creating the managed-identity role assignments in the foundation modules. Set false for CI/pipeline deploys — the assignments are created once at bootstrap by an Owner. Default true so a first bootstrap works.')
 param deployRoleAssignments bool = true
 
@@ -136,6 +138,7 @@ module web 'modules/web.bicep' = {
     maxReplicas: webMaxReplicas
     identityApiUrl: identityApiUrl
     identityApiKeyName: identityApiKeyName
+    setupTokenEnabled: setupTokenEnabled
   }
 }
 

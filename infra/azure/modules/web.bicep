@@ -19,6 +19,8 @@ param identityApiUrl string
 param identityApiKeyName string
 @description('Bare public hostname for the Container App custom domain, e.g. attendance-dev.cedarville.edu. Empty or a CHANGEME placeholder disables the binding.')
 param appHostname string = ''
+@description('When true, wire SETUP_TOKEN from the `setup-token` Key Vault secret (admin/setup page bootstrap). The secret MUST be seeded in the vault first or the deploy fails to resolve it. Enable in dev only; leave off for stage/prod.')
+param setupTokenEnabled bool = false
 
 var kvRef = '${keyVaultUri}secrets/'
 
@@ -70,13 +72,15 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
       registries: [
         { server: acrLoginServer, identity: managedIdentityId }
       ]
-      secrets: [
+      secrets: concat([
         { name: 'database-url', keyVaultUrl: '${kvRef}database-url', identity: managedIdentityId }
         { name: 'lti-tool-signing-keys-json', keyVaultUrl: '${kvRef}lti-tool-signing-keys-json', identity: managedIdentityId }
         { name: 'card-fingerprint-secret', keyVaultUrl: '${kvRef}card-fingerprint-secret', identity: managedIdentityId }
         { name: 'identity-api-key', keyVaultUrl: '${kvRef}identity-api-key', identity: managedIdentityId }
         { name: 'appinsights-connection-string', keyVaultUrl: '${kvRef}appinsights-connection-string', identity: managedIdentityId }
-      ]
+      ], setupTokenEnabled ? [
+        { name: 'setup-token', keyVaultUrl: '${kvRef}setup-token', identity: managedIdentityId }
+      ] : [])
     }
     template: {
       containers: [
@@ -85,7 +89,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
           image: image
           resources: { cpu: json(cpu), memory: memory }
           command: ['node', '--import', './server/dist/telemetry/otel-preload.js', 'server/dist/index.js']
-          env: [
+          env: concat([
             { name: 'NODE_ENV', value: 'production' }
             { name: 'PORT', value: '3000' }
             { name: 'RUN_MIGRATIONS_ON_BOOT', value: 'false' }
@@ -99,7 +103,9 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'CARD_FINGERPRINT_SECRET', secretRef: 'card-fingerprint-secret' }
             { name: 'IDENTITY_API_KEY', secretRef: 'identity-api-key' }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'appinsights-connection-string' }
-          ]
+          ], setupTokenEnabled ? [
+            { name: 'SETUP_TOKEN', secretRef: 'setup-token' }
+          ] : [])
           probes: [
             { type: 'Liveness', httpGet: { path: '/health/live', port: 3000 }, periodSeconds: 10, failureThreshold: 3 }
             { type: 'Readiness', httpGet: { path: '/health/ready', port: 3000 }, periodSeconds: 10, failureThreshold: 3 }
