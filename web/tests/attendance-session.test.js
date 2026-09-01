@@ -12,6 +12,9 @@ import {
   deleteAttendanceRecord,
   correctMemberStatus,
   fetchAttendanceCsv,
+  listSessionHistory,
+  deleteSession,
+  restoreSession,
 } from '../attendance-session.js';
 
 beforeEach(() => {
@@ -141,5 +144,47 @@ describe('attendance-session.js', () => {
     vi.mocked(apiFetch).mockResolvedValue({ ok: false, status: 500, json: () => Promise.reject(new Error('not json')) });
     const result = await retryGradeSync('sess-1');
     expect(result.ok).toBe(false);
+  });
+
+  it('listSessionHistory GETs the history endpoint and returns the sessions array', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ sessions: [{ id: 's1', state: 'closed' }] }) });
+    const result = await listSessionHistory();
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance-sessions/history');
+    expect(result).toEqual({ ok: true, sessions: [{ id: 's1', state: 'closed' }] });
+  });
+
+  it('listSessionHistory passes ?includeDeleted=1 when asked, and normalizes a missing sessions key', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    const result = await listSessionHistory({ includeDeleted: true });
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance-sessions/history?includeDeleted=1');
+    expect(result).toEqual({ ok: true, sessions: [] });
+  });
+
+  it('listSessionHistory normalizes a network failure', async () => {
+    vi.mocked(apiFetch).mockRejectedValueOnce(new Error('offline'));
+    const result = await listSessionHistory();
+    expect(result.ok).toBe(false);
+    expect(result.error.kind).toBe('network');
+  });
+
+  it('deleteSession DELETEs the session path and treats 204 (no body) as success', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 204, json: () => Promise.reject(new Error('no body')) });
+    const result = await deleteSession('s1');
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance-sessions/s1', expect.objectContaining({ method: 'DELETE' }));
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('deleteSession surfaces a non-2xx as {ok:false}', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: false, status: 404 });
+    const result = await deleteSession('s1');
+    expect(result.ok).toBe(false);
+    expect(result.error.kind).toBe('http-status');
+  });
+
+  it('restoreSession POSTs to the restore endpoint', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) });
+    const result = await restoreSession('s1');
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance-sessions/s1/restore', expect.objectContaining({ method: 'POST' }));
+    expect(result).toEqual({ ok: true });
   });
 });

@@ -161,3 +161,49 @@ export async function fetchAttendanceCsv(sessionId) {
     return { ok: false, error: { kind: 'bad-body', message: `${url} returned an unreadable body: ${err.message}` } };
   }
 }
+
+/**
+ * Lists this course's full attendance-session history, newest-first (spec §25.11 / session
+ * review). `includeDeleted` also returns soft-deleted sessions. Never throws.
+ * @param {{includeDeleted?: boolean}} [opts]
+ * @returns {Promise<{ok: true, sessions: object[]}|{ok: false, error: {kind: string, message: string}}>}
+ */
+export async function listSessionHistory({ includeDeleted = false } = {}) {
+  const url = includeDeleted
+    ? '/api/attendance-sessions/history?includeDeleted=1'
+    : '/api/attendance-sessions/history';
+  const result = await request(url);
+  if (!result.ok) return result;
+  return { ok: true, sessions: Array.isArray(result.body?.sessions) ? result.body.sessions : [] };
+}
+
+/**
+ * Soft-deletes an attendance session created by accident (restorable). Never throws.
+ * A successful DELETE is 204 with no body.
+ * @param {string} sessionId
+ * @returns {Promise<{ok: true}|{ok: false, error: {kind: string, message: string}}>}
+ */
+export async function deleteSession(sessionId) {
+  const url = `/api/attendance-sessions/${sessionId}`;
+  let response;
+  try {
+    response = await apiFetch(url, { method: 'DELETE' });
+  } catch (err) {
+    return { ok: false, error: { kind: 'network', message: `Request to ${url} failed: ${err.message}` } };
+  }
+  if (!response.ok) {
+    return { ok: false, error: { kind: 'http-status', message: `${url} returned HTTP ${response.status}` } };
+  }
+  return { ok: true };
+}
+
+/**
+ * Restores a previously soft-deleted attendance session. Never throws.
+ * @param {string} sessionId
+ * @returns {Promise<{ok: true}|{ok: false, error: {kind: string, message: string}}>}
+ */
+export async function restoreSession(sessionId) {
+  const result = await request(`/api/attendance-sessions/${sessionId}/restore`, { method: 'POST' });
+  if (!result.ok) return result;
+  return { ok: true };
+}
