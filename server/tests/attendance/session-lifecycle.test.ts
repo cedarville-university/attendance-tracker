@@ -47,6 +47,24 @@ function member(overrides: Partial<import('../../src/lti/nrps.js').CourseRosterM
   };
 }
 
+// The N1 grade population reads course_members directly; seed it to match the mocked roster.
+// File-scoped so every describe (close, and later soft-delete / restore) can reuse it.
+async function seedCourseMembers(courseId: string, ms: ReturnType<typeof member>[]) {
+  await db.insert(courseMembers).values(
+    ms.map((m) => ({
+      courseId,
+      ltiUserId: m.ltiUserId,
+      institutionalId: m.institutionalId,
+      displayName: m.displayName,
+      givenName: m.givenName,
+      familyName: m.familyName,
+      email: m.email,
+      roles: m.roles,
+      status: m.status, // 'Active' -> eligible for a Learner; 'Inactive' -> not
+    })),
+  );
+}
+
 describe('createAttendanceSession', () => {
   it('snapshots every roster member verbatim into attendance_session_members and writes an attendance_session_created audit event', async () => {
     const { courseId } = await seedInstitutionAndCourse(db, platform);
@@ -178,23 +196,6 @@ describe('closeAttendanceSession', () => {
 
   // --- Phase 6: cumulative grade calculation + durable grade-sync enqueue on close ---
 
-  // The N1 grade population reads course_members directly; seed it to match the mocked roster.
-  async function seedCourseMembers(courseId: string, ms: ReturnType<typeof member>[]) {
-    await db.insert(courseMembers).values(
-      ms.map((m) => ({
-        courseId,
-        ltiUserId: m.ltiUserId,
-        institutionalId: m.institutionalId,
-        displayName: m.displayName,
-        givenName: m.givenName,
-        familyName: m.familyName,
-        email: m.email,
-        roles: m.roles,
-        status: m.status, // 'Active' -> eligible for a Learner; 'Inactive' -> not
-      })),
-    );
-  }
-
   it('enqueues one pending grade_sync_job per eligible current-roster member and writes a grade_sync_requested audit row', async () => {
     const { courseId } = await seedInstitutionAndCourse(db, platform);
     const members = [
@@ -274,6 +275,31 @@ describe('closeAttendanceSession', () => {
     expect(jobs[0].score).toBeCloseTo(100);
     const [audit] = await db.select().from(auditEvents).where(eq(auditEvents.eventType, 'grade_sync_requested')).orderBy(auditEvents.id);
     expect(audit).toBeTruthy();
+  });
+
+  it('excludes a SOFT-DELETED closed session from a later close\'s cumulative recompute', async () => {
+    const { courseId } = await seedInstitutionAndCourse(db, platform);
+    const members = [member({ ltiUserId: 'u1', institutionalId: '111' })];
+    vi.mocked(getRosterWithFallback).mockResolvedValue({ members, fetchedAt: new Date().toISOString(), stale: false, refreshed: true });
+    await seedCourseMembers(courseId, members);
+
+    // Session A: closed with an ABSENT outcome (system_absence at close) -> would drag to 50 if counted.
+    const a = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await closeAttendanceSession(db, a.id, 'i1', 'ra');
+    // Soft-delete A directly (Task 3 wires the real path; here we only need the column set).
+    await db.update(attendanceSessions).set({ deletedAt: new Date() }).where(eq(attendanceSessions.id, a.id));
+
+    // Session B: present. Only B is a live closed session -> score is 1/1 -> 100.
+    const b = await createAttendanceSession(db, courseId, 'i1', {}, 'r', { signingKey });
+    await db.insert(attendanceRecords).values({
+      attendanceSessionId: b.id, ltiUserId: 'u1', institutionalId: '111',
+      clientScanId: 'b1', status: 'present', source: 'card', scannedAt: new Date(),
+    });
+    await closeAttendanceSession(db, b.id, 'i1', 'rb');
+
+    const jobs = await db.select().from(gradeSyncJobs).where(eq(gradeSyncJobs.courseId, courseId));
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].score).toBeCloseTo(100);
   });
 
   it('enqueues no jobs (but still audits) when the current roster has no eligible members', async () => {

@@ -1,4 +1,4 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import type { Database } from '../database/client.js';
 import {
   attendanceSessions,
@@ -10,11 +10,9 @@ import {
 } from '../database/schema.js';
 import type { ToolSigningKey } from '../lti/signing-keys.js';
 import type { CourseRosterMember } from '../lti/nrps.js';
-import { getRosterWithFallback, getCachedRosterAsMembers } from './roster-store.js';
+import { getRosterWithFallback } from './roster-store.js';
 import { resolveCurrentRecord } from './member-status.js';
-import { DEFAULT_GRADING_POLICY } from './grade-policy.js';
-import { computeCumulativeScores, type SessionResolvedStatuses } from './grade-calc.js';
-import { upsertGradeSyncJobs } from './grade-sync-store.js';
+import { recomputeCourseGrades } from './grade-recompute.js';
 
 // The optional test-injection fields mirror Phase 4's getRosterWithFallback deps so a
 // caller can stub the Canvas fetch; signingKey is REQUIRED (Phase 4 D5 — no module-level
@@ -188,70 +186,9 @@ export async function closeAttendanceSession(
       requestId: requestId ?? null,
     });
 
-    // --- Phase 6: cumulative grade calculation + durable grade-sync enqueue (spec §25.7 steps 3-4,
-    //     §28 steps 2-3). NO Canvas call here — only the outbox is written, inside this same txn. ---
-
-    // Population: the course's CURRENT roster (2026-08-28 ruling on pre-flight note N1). course_members
-    // is genuinely current — every createAttendanceSession refreshes it via getRosterWithFallback ->
-    // refreshCourseRoster -> upsertCourseMembers. getCachedRosterAsMembers computes eligibleForAttendance
-    // per institution config, the same converter every cache read uses. Read via the outer `db`, not
-    // `tx`: course_members / institutions / courses are not mutated in this transaction, so there is no
-    // consistency concern, and getCachedRosterAsMembers is typed `db: Database` (not `Database | Tx`).
-    const currentRoster = await getCachedRosterAsMembers(db, session.courseId);
-    const eligibleLtiUserIds = (currentRoster?.members ?? [])
-      .filter((m) => m.eligibleForAttendance)
-      .map((m) => m.ltiUserId);
-
-    // Every CLOSED session in the course (this one is already 'closed' within this txn). 'reopened'
-    // sessions are deliberately excluded — they are mid-correction.
-    const closedSessions = await tx
-      .select({ id: attendanceSessions.id })
-      .from(attendanceSessions)
-      .where(and(eq(attendanceSessions.courseId, session.courseId), eq(attendanceSessions.state, 'closed')));
-    const closedSessionIds = closedSessions.map((s) => s.id);
-
-    const allRecords = closedSessionIds.length
-      ? await tx.select().from(attendanceRecords).where(inArray(attendanceRecords.attendanceSessionId, closedSessionIds))
-      : [];
-
-    const resolvedBySession: SessionResolvedStatuses[] = closedSessionIds.map((closedId) => {
-      const perUser = new Map<string, typeof allRecords>();
-      for (const rec of allRecords) {
-        if (rec.attendanceSessionId !== closedId || !rec.ltiUserId) continue;
-        const list = perUser.get(rec.ltiUserId) ?? [];
-        list.push(rec);
-        perUser.set(rec.ltiUserId, list);
-      }
-      const statusByLtiUserId = new Map<string, 'present' | 'absent' | 'excused'>();
-      for (const [ltiUserId, recs] of perUser) {
-        const current = resolveCurrentRecord(recs);
-        if (current && (current.status === 'present' || current.status === 'absent' || current.status === 'excused')) {
-          statusByLtiUserId.set(ltiUserId, current.status);
-        }
-        // lookup_error / unexpected -> not gradeable (spec §24); left out of the map.
-      }
-      return { sessionId: closedId, statusByLtiUserId };
-    });
-
-    const scores = computeCumulativeScores(resolvedBySession, eligibleLtiUserIds, DEFAULT_GRADING_POLICY);
-    const jobCount = await upsertGradeSyncJobs(
-      tx,
-      session.courseId,
-      sessionId,
-      new Map([...scores].map(([ltiUserId, s]) => [ltiUserId, { scoreGiven: s.scoreGiven }])),
-    );
-
-    await tx.insert(auditEvents).values({
-      institutionId: course.institutionId,
-      courseId: session.courseId,
-      attendanceSessionId: sessionId,
-      actorLtiUserId,
-      eventType: 'grade_sync_requested',
-      targetType: 'attendance_session',
-      targetId: sessionId,
-      newValue: { jobCount, closedSessionCount: closedSessionIds.length, eligibleMemberCount: eligibleLtiUserIds.length },
-      requestId: requestId ?? null,
-    });
+    // Phase 6 cumulative recompute + durable enqueue (spec §25.7 steps 3-4, §28 steps 2-3),
+    // shared with soft delete / restore. `state='closed'` is already applied above in this txn.
+    await recomputeCourseGrades(tx, db, session.courseId, sessionId, actorLtiUserId, requestId);
   });
 }
 
