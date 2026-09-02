@@ -8,6 +8,8 @@
 // response fields) are always written via textContent, never innerHTML, to
 // avoid injecting markup from scanned/roster/API data.
 
+import { formatLocalTime } from './time-format.js';
+
 export const elements = {
   connectBtn: document.getElementById('btn-connect'),
   disconnectBtn: document.getElementById('btn-disconnect'),
@@ -97,15 +99,6 @@ export const elements = {
 
 const MAX_APP_MESSAGES = 5;
 const MAX_VISIBLE_DIAG_ENTRIES = 50;
-
-/** @param {string} isoTimestamp */
-export function formatLocalTime(isoTimestamp) {
-  try {
-    return new Date(isoTimestamp).toLocaleString();
-  } catch {
-    return isoTimestamp;
-  }
-}
 
 // ---- Reader / session control-bar emphasis ---------------------------
 
