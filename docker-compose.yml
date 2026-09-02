@@ -1,5 +1,7 @@
-# Postgres is scaffolded here now (Phase 1) but unused until Phase 5's
-# persistent-attendance work. No application code reads this database yet.
+# Local development database. Required by `npm run dev`, `npm run worker`, and the test suites --
+# `npm test` fails at global setup if this server is not running. Only `attendance_tracker` is
+# created here; the separate test and e2e databases are created on demand by their own harnesses.
+# See docs/operations.md.
 services:
   postgres:
     image: postgres:16

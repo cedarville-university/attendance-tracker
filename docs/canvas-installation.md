@@ -1,207 +1,173 @@
-# Canvas registration and real-launch verification (Phase 7, post-deployment)
+# Canvas installation
 
-This is the one-time, per-institution setup that registers this tool in Canvas and the checklist for
-verifying an instructor launch works end-to-end against a **real** Canvas instance.
+One-time, per-institution setup: register the tool in Canvas, tell the app about Canvas, and verify
+an instructor launch.
 
-**This step cannot run until the app is deployed.** Canvas delivers an LTI launch by form-POSTing a
-signed `id_token` to a public HTTPS URL and by redirecting the instructor's browser to another one;
-it cannot reach `http://localhost`. So everything below requires a publicly reachable HTTPS
-deployment of this application — i.e. **Phase 7** (spec §54 "Implementation phases": Dockerfile,
-Bicep, Azure Container Apps, DNS/TLS) must be done first. Until then, `<APP_BASE_URL>` in the steps
-below has no value to fill in.
+**Requires a deployed app.** Canvas delivers a launch by form-POSTing a signed `id_token` to a public
+HTTPS URL and redirecting the instructor's browser to another one. It cannot reach `localhost`.
+Deploy first — see [../infra/azure/README.md](../infra/azure/README.md).
 
-Phase 3's exit criterion is met entirely by the automated suite: `npm test` runs all 24 cases in
-spec §45 against an in-process mock Canvas platform. The steps here are the separate, real-Canvas
-confirmation, and they are the only place `server/src/lti/roles.ts`'s `AUTHORIZED_INSTRUCTOR_ROLE_URIS`
-set gets checked against an actual Canvas launch payload (step 5).
+Throughout, `<APP_HOST>` is your deployed hostname with no scheme and no trailing slash, e.g.
+`attendance.example.edu`.
 
-## 1. Register the tool in Canvas (Admin → Apps)
+## 1. Set the app's own configuration
 
-Register from the account-level **Admin → Apps** page (the LTI registration UI). Canvas's current
-Apps form collects the redirect URI, target link URI, OIDC initiation URL, and JWK/JWKS, but it does
-**not** expose the LTI Advantage (NRPS/AGS) scope toggles, and it has **no** placement
-"window target" / "open in new tab" field. Both of those are required here, and both can only be set
-through the **JSON configuration** method. So configure the whole tool as JSON.
+Before registering, the deployed app needs:
 
-In **Admin → Apps**, add the app and choose the **paste-JSON / manual JSON configuration** option
-(exact label varies by Canvas version), then paste the block below with `<APP_BASE_URL>` replaced by
-your deployed origin (e.g. `https://attendance.example.edu`, no trailing slash):
+| Variable | Value |
+|---|---|
+| `APP_BASE_URL` | `https://<APP_HOST>` |
+| `ALLOWED_TARGET_LINK_URIS` | `https://<APP_HOST>/index.html` |
 
-```json
-{
-  "title": "Attendance",
-  "description": "Classroom attendance via a browser-connected HID card reader",
-  "oidc_initiation_url": "https://<APP_BASE_URL>/lti/login",
-  "target_link_uri": "https://<APP_BASE_URL>/index.html",
-  "public_jwk_url": "https://<APP_BASE_URL>/lti/jwks",
-  "redirect_uris": ["https://<APP_BASE_URL>/lti/launch"],
-  "scopes": [
-    "https://purl.imsglobal.org/spec/lti-nrps/scope/contextmembership.readonly",
-    "https://purl.imsglobal.org/spec/lti-ags/scope/lineitem",
-    "https://purl.imsglobal.org/spec/lti-ags/scope/score"
-  ],
-  "extensions": [
-    {
-      "platform": "canvas.instructure.com",
-      "domain": "<APP_BASE_URL>",
-      "privacy_level": "name_only",
-      "settings": {
-        "text": "Attendance",
-        "placements": [
-          {
-            "placement": "course_navigation",
-            "message_type": "LtiResourceLinkRequest",
-            "target_link_uri": "https://<APP_BASE_URL>/index.html",
-            "text": "Attendance",
-            "windowTarget": "_blank",
-            "default": "enabled",
-            "visibility": "admins"
-          }
-        ]
-      }
-    }
-  ]
-}
+`ALLOWED_TARGET_LINK_URIS` is the exact-match allowlist of pages `/lti/launch` may redirect to after
+a successful launch. If it does not contain the `target_link_uri` Canvas sends, **every launch
+fails** — this is the single most common install error. The app logs a warning at boot if the value
+it advertises to Canvas is missing from this list, so check the startup logs.
+
+Also confirm `DATABASE_URL` is set and the schema is migrated. Full variable list:
+[operations.md](operations.md).
+
+## 2. Register the tool in Canvas
+
+**Admin → Developer Keys → + Developer Key → + LTI Key.** Set **Method** to **Enter URL** (labels
+vary slightly by Canvas version) and enter:
+
+```
+https://<APP_HOST>/lti/config.json
 ```
 
-Field notes:
+**Save**, toggle the key **ON**, and copy its **Client ID** (a number like `10000000000001`).
 
-- **`redirect_uris` → `https://<APP_BASE_URL>/lti/launch`**: where Canvas form-POSTs the signed
-  `id_token`. If you use the Apps form for this field instead of the JSON, its value must still be
-  exactly this.
-- **`target_link_uri` → `https://<APP_BASE_URL>/index.html`, not `/lti/launch`.** Canvas copies this
-  into the launch's `target_link_uri`, and `/lti/launch` issues a 303 redirect to it after a
-  successful launch. Pointing it at `/lti/launch` would redirect the launch endpoint back to itself.
-  Whatever you put here must also appear verbatim in the app's `ALLOWED_TARGET_LINK_URIS` env var
-  (step 5.1), which is the exact-match allowlist that makes that redirect safe.
-- **`oidc_initiation_url` → `https://<APP_BASE_URL>/lti/login`.**
-- **`public_jwk_url` → `https://<APP_BASE_URL>/lti/jwks`** (this app publishes its own public keys
-  there; do not paste a static `public_jwk`).
-- **`scopes`**: spec §10 requires NRPS context-membership read-only, AGS line items read/write, and
-  AGS scores write — and nothing else (no AGS Result read scope). This app does not call NRPS or AGS
-  until Phases 4 and 6, but the same registration is reused through those phases, so grant the scopes
-  now. **Confirm these three scope strings against Canvas's current LTI configuration reference
-  (spec §58) — do not trust this file's copy over Canvas's own documentation.**
-- **`windowTarget: "_blank"`** on the `course_navigation` placement is required: WebHID's
-  Permissions Policy defaults to `self`, so a cross-origin Canvas iframe does not receive WebHID
-  capability and the scanner must open top-level (spec §8). This key is JSON-only — it is the main
-  reason the whole config goes in as JSON rather than the form.
-- **`visibility: "admins"`** — in a course placement this shows the link to admins and instructors,
-  not learners. It is a UI convenience only; the backend still validates the LTI role claim
-  independently (spec §10.1).
-- **`privacy_level: "name_only"`** — NRPS then returns `lis_person_sourcedid` and names but not
-  email (spec §10.2).
+That endpoint generates the registration from the running app's own configuration. Do not hand-write
+or paste this JSON: every URL in it must agree with `APP_BASE_URL`, and the LTI Advantage scope
+strings must match `server/src/lti/scopes.ts` character-for-character. Generating it removes both
+failure modes. To inspect what Canvas will read:
 
-Save, toggle the resulting key/app **On**, and copy its **Client ID**.
+```bash
+curl -s https://<APP_HOST>/lti/config.json | jq
+```
 
-## 2. Install it in your test course
+What it configures, and why:
 
-In the Canvas test course: **Settings → Apps → + App → By Client ID**, paste the Client ID, install
-it, and note the generated **Deployment ID** (shown after installation).
+- **`redirect_uris`** → `/lti/launch`, where Canvas form-POSTs the signed `id_token`.
+- **`target_link_uri`** → `/index.html`, *not* `/lti/launch`. Canvas copies this into the launch, and
+  `/lti/launch` 303-redirects to it on success; naming the launch endpoint would redirect it to
+  itself. This is the value that must appear in `ALLOWED_TARGET_LINK_URIS`.
+- **`oidc_initiation_url`** → `/lti/login`.
+- **`public_jwk_url`** → `/lti/jwks`. The app publishes its own rotating public keys there, so
+  Canvas fetches them by URL rather than caching a static `public_jwk`. Rotating the key then needs
+  no Canvas edit, only a re-fetch.
+- **`scopes`** → NRPS context-membership read, AGS line items read/write, AGS scores write. The AGS
+  Result read scope is deliberately **not** requested.
+- **`windowTarget: "_blank"`** on the course-navigation placement. Required: WebHID's Permissions
+  Policy defaults to `self`, so a cross-origin Canvas iframe never receives HID capability and the
+  card reader cannot be connected at all. This field is why the registration must be JSON — the
+  Canvas Apps form has no input for it.
+- **`privacy_level: "name_only"`** → NRPS returns names and `lis_person_sourcedid`, but not email.
+- **`visibility: "admins"`** → shows the course-nav link to admins and instructors, not learners.
+  A UI convenience only; `/lti/launch` validates the role claim independently.
 
-## 3. Get Canvas's real LTI 1.3 endpoints
+> If your Canvas version's Apps page offers only **Paste JSON**, fetch the endpoint with the `curl`
+> command above and paste the output. Re-paste after any upgrade that changes scopes or placements —
+> the URL method avoids this.
 
-**Never derive these by pattern-matching the *institution's* Canvas hostname** (e.g.
-`https://<school>.instructure.com/...`) — the spec forbids it (spec §11). Instructure-hosted Canvas
-delivers LTI 1.3 from a small set of **environment-level** endpoints that are the same for every
-account in that environment, and it does **not** publish them via
-`https://<school>.instructure.com/.well-known/openid-configuration`. That path serves Canvas's
-*generic* Canvas-API OAuth2 config (`scopes_supported: ["openid"]`, `client_secret_*` auth) — a
-different protocol. Two of its three values are **wrong** for LTI 1.3:
+## 3. Install it in a course
 
-- its `issuer` is the account subdomain — but the LTI `id_token` `iss` is the environment issuer
-  below;
-- its `authorization_endpoint` is `/login/oauth2/auth` (the human API-login flow) — but LTI's OIDC
-  redirect target is `/api/lti/authorize_redirect`.
+**Course → Settings → Apps → + App → By Client ID.** Paste the Client ID, install, and note the
+**Deployment ID** shown afterwards (looks like `1234:abcdef...`).
 
-Use these values instead, per Canvas's LTI configuration reference (spec §58). Pick the row matching
-the environment you registered in — **confirm the current strings against Canvas's own docs; do not
-trust this table over them:**
+Installing at the account level instead deploys it to all courses in that account; the Deployment ID
+is then found under the account's Apps list.
 
-| Environment | `--issuer` (`id_token` `iss`) | `--oidc-auth-endpoint` | `--token-endpoint` | `--platform-jwks-uri` |
+## 4. Get Canvas's real LTI 1.3 endpoints
+
+**Do not derive these from your institution's Canvas hostname, and do not read them from
+`https://<school>.instructure.com/.well-known/openid-configuration`.** That path serves Canvas's
+*generic API OAuth2* config — a different protocol — and two of its three values are wrong for
+LTI 1.3: its `issuer` is the account subdomain rather than the environment issuer, and its
+`authorization_endpoint` is the human API-login flow, not LTI's `/api/lti/authorize_redirect`.
+
+Instructure-hosted Canvas serves LTI 1.3 from **environment-level** endpoints shared by every
+account in that environment. Pick the row for the environment you registered in:
+
+| Environment | Issuer (`id_token` `iss`) | OIDC auth endpoint | Token endpoint | Platform JWKS URI |
 |---|---|---|---|---|
 | Production | `https://canvas.instructure.com` | `https://sso.canvaslms.com/api/lti/authorize_redirect` | `https://sso.canvaslms.com/login/oauth2/token` | `https://sso.canvaslms.com/api/lti/security/jwks` |
 | Beta | `https://canvas.beta.instructure.com` | `https://sso.beta.canvaslms.com/api/lti/authorize_redirect` | `https://sso.beta.canvaslms.com/login/oauth2/token` | `https://sso.beta.canvaslms.com/api/lti/security/jwks` |
 | Test | `https://canvas.test.instructure.com` | `https://sso.test.canvaslms.com/api/lti/authorize_redirect` | `https://sso.test.canvaslms.com/login/oauth2/token` | `https://sso.test.canvaslms.com/api/lti/security/jwks` |
 
-The issuer is fixed per environment **regardless of the account subdomain** the tool launches from
-(a launch from `cedarville.test.instructure.com` still carries `iss:
-https://canvas.test.instructure.com`). Seeding the account subdomain as the issuer makes every
-launch fail the `(issuer, client_id)` registration lookup.
+**Confirm these against Canvas's current LTI configuration documentation — do not trust this table
+over Canvas's own.**
 
-Confirm the platform JWKS actually responds before seeding:
+The issuer is fixed per environment **regardless of your account subdomain**: a launch from
+`yourschool.test.instructure.com` still carries `iss: https://canvas.test.instructure.com`. Using
+the account subdomain as the issuer makes every launch fail the `(issuer, client_id)` lookup.
+
+Confirm the JWKS responds before continuing:
 
 ```bash
-curl -s https://sso.test.canvaslms.com/api/lti/security/jwks | jq '.keys | length'   # expect a small integer, e.g. 3
+curl -s https://sso.test.canvaslms.com/api/lti/security/jwks | jq '.keys | length'   # expect e.g. 3
 ```
 
-`seed-registration.ts` sets `token_audience` equal to whatever you pass as `--token-endpoint`. If
-AGS/NRPS token requests later return 401, Canvas may require the audience to be the bare production
-URL `https://canvas.instructure.com/login/oauth2/token` even from beta/test — delete the
-`lti_registrations` row and re-seed with that as `--token-endpoint`.
+## 5. Tell the app about Canvas
 
-## 4. Seed the registration
+Open `https://<APP_HOST>/admin.html`. It is deliberately **not linked** from the scanner UI — type
+the URL.
 
-The **admin setup page (section 4a) is now the primary path** for standing up a Canvas connection.
-The `server/src/database/seed-registration.ts` CLI is kept as a fallback for scripted/headless
-setup: run it (see its usage comment) with the issuer, client ID, endpoints, and deployment ID
-gathered above, against the `DATABASE_URL` of the deployed app instance. Unlike the admin page, the
-CLI does **not** update an existing registration's endpoints — delete the `lti_registrations` row
-first to re-seed it.
+**Access** — either:
 
-## 4a. Admin setup page
+- launch the tool from Canvas as a user with the **LTI Administrator role**, then open `/admin.html`
+  in the same browser; or
+- set **`SETUP_TOKEN`** (≥ 16 characters) on the deployed app and paste it into the page's *Setup
+  token* field. This bootstraps the first connection before any admin launch is possible. Unset it
+  once an admin launch works, which disables the token path.
 
-`https://<APP_BASE_URL>/admin.html` configures the full Canvas connection (institution +
-registration + deployment) and the tool's own LTI signing key from a browser. It is **not linked**
-from the scanner UI — reach it by typing the URL.
+**Add the connection** using the Client ID from step 2, the Deployment ID from step 3, and the
+endpoints from step 4. Upserts are keyed on `issuer + client_id` (endpoints are updated in place) and
+on `registration + deployment_id`.
 
-**Access** — either of:
+> **Restart caveat.** The Content-Security-Policy `form-action` allowlist is computed once at boot
+> from the enabled registrations. After adding a connection for a **new Canvas origin**, restart the
+> app before launching from it, or CSP will block the launch. Adding another deployment to an
+> already-configured origin needs no restart.
 
-- an **LTI Administrator-role** launch session (launch the tool as a Canvas admin, then open
-  `/admin.html` in the same browser), or
-- the **`SETUP_TOKEN`** environment value: set `SETUP_TOKEN` (≥ 16 characters) on the deployed app,
-  open `/admin.html`, and paste it into the "Setup token" field. This bootstraps the first
-  connection before any Administrator launch exists. Leave `SETUP_TOKEN` unset once an admin launch
-  works, to disable the token path.
+**Tool signing key.** The same page shows the active `kid`, its creation time, and the JWKS URL.
+*Rotate key* generates a new keypair and marks the old one `previous` — still published at
+`/lti/jwks` so in-flight assertions still verify — effective immediately with no restart. Have Canvas
+re-fetch the JWKS afterwards. If `LTI_TOOL_SIGNING_KEYS_JSON` is set it takes precedence; otherwise
+the key lives in the `tool_signing_keys` table and survives restarts.
 
-**Adding a connection** — fill the form with the section 3 endpoint values. Upserts are keyed on
-`issuer + client_id` (endpoints are updated) and `registration + deployment_id`.
+If AGS or NRPS token requests later return 401, Canvas may require the token audience to be the bare
+production URL `https://canvas.instructure.com/login/oauth2/token` even from beta or test. Re-save
+the connection with that as the token audience.
 
-> **CSP restart caveat.** The Content-Security-Policy `form-action` allowlist is computed once at
-> boot from the enabled registrations. After adding a connection for a **new Canvas origin**, the
-> app must be **restarted** before a launch from that origin will pass CSP. Adding another
-> deployment to an origin that is already configured needs no restart.
+## 6. Verify
 
-**Tool signing key** — the page shows the active `kid`, its creation time, and the **JWKS URL to
-paste into the Canvas Developer Key**. "Rotate key" generates a new keypair, marks the old one
-`previous` (still published at `/lti/jwks` so in-flight assertions verify), and takes effect
-immediately with no restart. After rotating, have Canvas re-fetch the JWKS URL. When
-`LTI_TOOL_SIGNING_KEYS_JSON` is set it takes precedence and the page's key is read-only in effect;
-otherwise the key is stored in the `tool_signing_keys` table and is stable across restarts.
+1. From the test course, launch **Attendance** as an instructor. Confirm a **new browser tab**
+   opens, the launch completes, the scanner UI loads with the course name and roster count, and an
+   `attendance_session` cookie is set.
+2. Click **Connect card reader** and confirm the browser shows the HID device chooser. If the app
+   reports no WebHID capability, the launch opened in the Canvas iframe — check `windowTarget` on
+   the placement.
+3. Attempt a **learner-role** launch (a test student account, or Canvas Student View if your
+   instance sends learner-role claims). Confirm **HTTP 403** and that no session cookie is set.
+4. Start a session, scan or **Mark present** a student, then **Close attendance**. Within a few
+   minutes the worker should create an **Attendance** column in the Canvas gradebook. If the panel
+   reports a failure, use **Retry grade sync**; check worker logs for AGS errors.
 
-## 5. Verify the launch
+If step 3 does not return 403, capture the real `roles` claim from a launch and compare it against
+`AUTHORIZED_INSTRUCTOR_ROLE_URIS` in `server/src/lti/roles.ts`. That set was written from the
+standard 1EdTech role vocabulary; this is the checkpoint where it gets confirmed against a real
+Canvas payload.
 
-1. Set the deployed app's `ALLOWED_TARGET_LINK_URIS` to include the exact **target link URI** you
-   configured in step 1 — `https://<APP_BASE_URL>/index.html` — since that is the page `/lti/launch`
-   redirects to on success. (The list may hold several entries, e.g. `/index.html,/scanner.html`; a
-   launch is redirected to whichever one Canvas sent, not to the first.) Also set
-   `LTI_TOOL_SIGNING_KEYS_JSON` for any non-throwaway instance (otherwise a restart rotates the
-   signing key and Canvas's cached JWKS fetch may briefly go stale). When it is unset, the signing
-   key is instead persisted to the `tool_signing_keys` table on first boot, so a restart keeps the
-   same `kid`; use the admin setup page (section 4a) to rotate it deliberately.
+## Troubleshooting
 
-   Environment variables referenced by this setup: `APP_BASE_URL`, `ALLOWED_TARGET_LINK_URIS`,
-   `LTI_TOOL_SIGNING_KEYS_JSON` (optional), `SETUP_TOKEN` (optional, ≥ 16 chars — enables the admin
-   page's token bootstrap).
-2. From the test course, launch **Attendance** as an instructor.
-3. Confirm: a new browser tab opens (per spec §8's window-target requirement), the launch completes
-   without error, the browser lands on the scanner UI, and a session cookie (`attendance_session`)
-   is set.
-4. Attempt or simulate a learner-role launch of the same tool (e.g. a test student account, or a
-   Canvas "Student View" launch if your Canvas instance's Student View sends learner-role claims).
-   Confirm it returns **HTTP 403** and does **not** set a session cookie.
-5. If step 4 fails in a way that suggests Canvas's real role-claim URIs differ from
-   `server/src/lti/roles.ts`'s `AUTHORIZED_INSTRUCTOR_ROLE_URIS` set, capture the actual `roles`
-   claim from a real launch (e.g. via a temporary debug log statement, removed before committing)
-   and update that set to match — this set was written from the standard 1EdTech role vocabulary but
-   has not yet been verified against a real Canvas launch payload before this checkpoint.
+| Symptom | Cause / fix |
+|---|---|
+| Every launch fails after a clean registration | `ALLOWED_TARGET_LINK_URIS` does not contain `https://<APP_HOST>/index.html`. Check the boot warning in the app logs. |
+| Launch fails with a CSP or `form-action` error | A connection was added for a new Canvas origin without restarting the app (step 5). |
+| Launch rejected as an unknown registration | The issuer is the account subdomain instead of the environment issuer (step 4). |
+| "This browser does not support WebHID" after launch | The tool opened inside the Canvas iframe. Confirm the placement's `windowTarget` is `_blank`. |
+| Launch works, roster is empty | The NRPS scope is missing from the Developer Key, or the course has no enrolled students. Re-check the key was created from `/lti/config.json`. |
+| AGS/NRPS calls return 401 | Token audience mismatch — see the end of step 5. |
+| Grades never appear in Canvas | The worker is not running. In Azure it is a scheduled Container Apps Job; see [operations.md](operations.md). |

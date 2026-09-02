@@ -563,10 +563,36 @@ listed below for continuity but have not been planned in detail yet.
   terminally-failed removals to operators now that the purged
   `grade_sync_jobs` mean `getGradeSyncSummary` can't.
 
+- **Canvas install JSON is generated, not documented.** `GET /lti/config.json`
+  (`server/src/routes/lti-config.ts`, builder `server/src/lti/tool-config.ts`)
+  serves the Canvas LTI 1.3 registration body, so an operator registers the tool
+  by URL (Developer Keys → + LTI Key → Method: Enter URL) instead of pasting
+  JSON. This closed two real defects in the old hand-written block: the
+  `<APP_BASE_URL>` placeholder was documented as an origin *with* scheme but
+  templated as `https://<APP_BASE_URL>/...`, so filling it in as instructed
+  produced a doubled scheme in five fields, and `domain` was given an origin
+  where Canvas wants a bare host. Every URL is now built with
+  `new URL(path, appBaseUrl)`, and `scopes` imports the three `lti/scopes.ts`
+  constants, retiring that file's hand-sync-to-the-docs instruction (asserted by
+  `server/tests/lti/tool-config.test.ts`). `buildApp` additionally logs one boot
+  warning when the advertised `target_link_uri` is absent from
+  `ALLOWED_TARGET_LINK_URIS` — the failure mode that breaks every launch of an
+  otherwise correctly registered tool.
+
+- **User-facing docs restructured.** `README.md` had drifted to Phase-3 content
+  (env table missing 7 variables, project tree predating the `web/` + `server/`
+  split, no mention of sessions, grade sync, the admin page, or the worker) and
+  mixed deep internals into the setup path. It is now a lean front door;
+  reference material moved to `docs/operations.md` (env vars, processes,
+  migrations, worker, security posture, known gaps) and `docs/card-reader.md`
+  (OMNIKEY config, diagnostics, troubleshooting, CSV fallback).
+  `docs/canvas-installation.md` was rewritten around the config URL. Design:
+  `docs/superpowers/specs/2026-09-02-canvas-install-json-and-docs-design.md`.
+
 ## Deferred decisions
 
 - **Real ProxID credentials.** `HttpIdentityResolver` is implemented (ported
-  from `lookup.js`'s `realLookup`) and documented in `README.md` §5
+  from `lookup.js`'s `realLookup`) and documented in `docs/operations.md`
   (`IDENTITY_API_URL`, `IDENTITY_API_KEY_NAME`, `IDENTITY_API_KEY`, and five
   optional overrides), but no real Cedarville ProxID values have been set
   anywhere — `createHttpIdentityResolverFromEnv()` returns `null` until they
