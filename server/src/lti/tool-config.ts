@@ -17,7 +17,12 @@ import {
   AGS_SCORE_SCOPE,
 } from './scopes.js';
 
-const TOOL_TITLE = 'Attendance';
+// The official tool name. Drives every `title` and `text` field in the generated registration: the
+// app title in Canvas and the course-navigation link label instructors click. Overridable per
+// deployment via LTI_TOOL_TITLE; this constant is the single definition of the default, so
+// config/env.ts leaves LTI_TOOL_TITLE optional rather than restating it.
+export const DEFAULT_TOOL_TITLE = 'Scanttendance';
+
 const TOOL_DESCRIPTION = 'Classroom attendance via a browser-connected HID card reader';
 
 // The scanner page, NOT /lti/launch. Canvas copies this into the launch's `target_link_uri` and
@@ -68,11 +73,14 @@ export function toolTargetLinkUri(appBaseUrl: string): string {
   return at(appBaseUrl, TARGET_LINK_PATH);
 }
 
-export function buildCanvasToolConfig(appBaseUrl: string): CanvasToolConfig {
+export function buildCanvasToolConfig(
+  appBaseUrl: string,
+  title: string = DEFAULT_TOOL_TITLE,
+): CanvasToolConfig {
   const targetLinkUri = toolTargetLinkUri(appBaseUrl);
 
   return {
-    title: TOOL_TITLE,
+    title,
     description: TOOL_DESCRIPTION,
     oidc_initiation_url: at(appBaseUrl, '/lti/login'),
     target_link_uri: targetLinkUri,
@@ -93,13 +101,13 @@ export function buildCanvasToolConfig(appBaseUrl: string): CanvasToolConfig {
         // Spec §10.2: NRPS then returns names and lis_person_sourcedid, but not email.
         privacy_level: 'name_only',
         settings: {
-          text: TOOL_TITLE,
+          text: title,
           placements: [
             {
               placement: 'course_navigation',
               message_type: 'LtiResourceLinkRequest',
               target_link_uri: targetLinkUri,
-              text: TOOL_TITLE,
+              text: title,
               // Required (spec §8). WebHID's Permissions Policy defaults to `self`, so a
               // cross-origin Canvas iframe never receives HID capability -- the scanner has to open
               // top-level or the card reader cannot be connected at all. This key is the original

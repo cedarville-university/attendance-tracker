@@ -8,6 +8,7 @@ import { buildCanvasToolConfig } from '../lti/tool-config.js';
 // Developer Key, long before any session exists. It exposes nothing sensitive -- public URLs,
 // standardized 1EdTech scope URIs, and placement settings. It also does no I/O, which is why it
 // sits outside the 30 req/min rate-limit scope that wraps /lti/login and /lti/launch.
-export function registerLtiConfigRoute(app: FastifyInstance, appBaseUrl: string): void {
-  app.get('/lti/config.json', async () => buildCanvasToolConfig(appBaseUrl));
+// `title` is LTI_TOOL_TITLE; undefined falls back to DEFAULT_TOOL_TITLE.
+export function registerLtiConfigRoute(app: FastifyInstance, appBaseUrl: string, title?: string): void {
+  app.get('/lti/config.json', async () => buildCanvasToolConfig(appBaseUrl, title));
 }

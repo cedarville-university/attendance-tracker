@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { buildCanvasToolConfig, toolTargetLinkUri } from '../../src/lti/tool-config.js';
+import {
+  buildCanvasToolConfig,
+  toolTargetLinkUri,
+  DEFAULT_TOOL_TITLE,
+} from '../../src/lti/tool-config.js';
 import {
   NRPS_MEMBERSHIP_READONLY_SCOPE,
   AGS_LINEITEM_SCOPE,
@@ -74,6 +78,37 @@ describe('buildCanvasToolConfig', () => {
 
   it('keeps privacy_level at name_only so NRPS omits email', () => {
     expect(buildCanvasToolConfig(BASE).extensions[0].privacy_level).toBe('name_only');
+  });
+});
+
+describe('tool title', () => {
+  it('defaults to Scanttendance in every title and text field', () => {
+    const config = buildCanvasToolConfig(BASE);
+
+    expect(DEFAULT_TOOL_TITLE).toBe('Scanttendance');
+    expect(config.title).toBe('Scanttendance');
+    expect(config.extensions[0].settings.text).toBe('Scanttendance');
+    expect(config.extensions[0].settings.placements[0].text).toBe('Scanttendance');
+  });
+
+  it('applies an override to every title and text field at once', () => {
+    // One value drives all three, so a deployment cannot end up with the app named one thing and
+    // its course-navigation link another.
+    const config = buildCanvasToolConfig(BASE, 'Class Check-In');
+
+    expect(config.title).toBe('Class Check-In');
+    expect(config.extensions[0].settings.text).toBe('Class Check-In');
+    expect(config.extensions[0].settings.placements[0].text).toBe('Class Check-In');
+  });
+
+  it('leaves the rest of the registration untouched when the title changes', () => {
+    const renamed = buildCanvasToolConfig(BASE, 'Class Check-In');
+    const dflt = buildCanvasToolConfig(BASE);
+
+    expect(renamed.scopes).toEqual(dflt.scopes);
+    expect(renamed.target_link_uri).toBe(dflt.target_link_uri);
+    expect(renamed.oidc_initiation_url).toBe(dflt.oidc_initiation_url);
+    expect(renamed.extensions[0].domain).toBe(dflt.extensions[0].domain);
   });
 });
 

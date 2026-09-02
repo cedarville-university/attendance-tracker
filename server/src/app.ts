@@ -123,7 +123,7 @@ export async function buildApp(env: Env, deps: AppDeps): Promise<FastifyInstance
   });
 
   registerLtiJwksRoute(app, signingKeyProvider);
-  registerLtiConfigRoute(app, env.APP_BASE_URL);
+  registerLtiConfigRoute(app, env.APP_BASE_URL, env.LTI_TOOL_TITLE);
 
   // The one install error /lti/config.json cannot prevent by itself: Canvas copies the config's
   // `target_link_uri` into every launch, and /lti/launch only redirects to an entry in

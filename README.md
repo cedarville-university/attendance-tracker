@@ -5,6 +5,8 @@ it from a Canvas course-navigation link, students tap their ID cards on an HID G
 reader, and each scan is matched against the Canvas course roster. Attendance posts back to the
 Canvas gradebook as a single **Attendance** column.
 
+It appears in Canvas as **Scanttendance** — override that per deployment with `LTI_TOOL_TITLE`.
+
 - The roster comes from Canvas over LTI NRPS. A CSV upload exists only as an offline fallback.
 - Grades post to Canvas over LTI AGS from a background worker, with retries and backoff.
 - Card lookups happen server-side. No lookup credentials reach the browser.

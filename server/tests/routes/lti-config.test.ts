@@ -19,6 +19,18 @@ describe('GET /lti/config.json', () => {
     await app.close();
   });
 
+  it('serves the LTI_TOOL_TITLE override when one is configured', async () => {
+    const app = Fastify({ logger: false });
+    registerLtiConfigRoute(app, BASE, 'Class Check-In');
+
+    const body = (await app.inject({ method: 'GET', url: '/lti/config.json' })).json();
+
+    expect(body.title).toBe('Class Check-In');
+    expect(body.extensions[0].settings.placements[0].text).toBe('Class Check-In');
+
+    await app.close();
+  });
+
   it('touches no database', async () => {
     // The route is deliberately dependency-free so it stays as cheap as /health/live and can sit
     // outside the /lti/login + /lti/launch rate-limit scope.

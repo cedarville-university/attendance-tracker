@@ -13,6 +13,11 @@ const envSchema = z.object({
     .transform((v) => new URL(v).origin),
   ALLOWED_TARGET_LINK_URIS: z.string().min(1),
   LTI_TOOL_SIGNING_KEYS_JSON: z.string().optional(),
+  // Overrides the tool name in the registration served at GET /lti/config.json -- the app title in
+  // Canvas and the course-navigation link label. Unset -> DEFAULT_TOOL_TITLE in lti/tool-config.ts,
+  // which owns the default so it is defined in exactly one place. Changing this after registration
+  // requires Canvas to re-read the config URL before the new name appears.
+  LTI_TOOL_TITLE: z.string().trim().min(1).optional(),
   // Bootstrap credential for the admin/setup page (Feature 3). When unset, the token path is
   // disabled and only an LTI Administrator-role session can reach the admin routes.
   SETUP_TOKEN: z.string().min(16).optional(),

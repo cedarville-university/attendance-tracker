@@ -63,6 +63,10 @@ What it configures, and why:
   Policy defaults to `self`, so a cross-origin Canvas iframe never receives HID capability and the
   card reader cannot be connected at all. This field is why the registration must be JSON — the
   Canvas Apps form has no input for it.
+- **`title` and the two `text` fields** → **Scanttendance**, the tool's name in Canvas and the label
+  on the course-navigation link. Override per deployment with the `LTI_TOOL_TITLE` environment
+  variable, which sets all three at once so the app name and the link label cannot disagree. This
+  does not rename the gradebook column, which is always **Attendance**.
 - **`privacy_level: "name_only"`** → NRPS returns names and `lis_person_sourcedid`, but not email.
 - **`visibility: "admins"`** → shows the course-nav link to admins and instructors, not learners.
   A UI convenience only; `/lti/launch` validates the role claim independently.
@@ -143,7 +147,7 @@ the connection with that as the token audience.
 
 ## 6. Verify
 
-1. From the test course, launch **Attendance** as an instructor. Confirm a **new browser tab**
+1. From the test course, launch **Scanttendance** as an instructor. Confirm a **new browser tab**
    opens, the launch completes, the scanner UI loads with the course name and roster count, and an
    `attendance_session` cookie is set.
 2. Click **Connect card reader** and confirm the browser shows the HID device chooser. If the app
@@ -171,3 +175,4 @@ Canvas payload.
 | Launch works, roster is empty | The NRPS scope is missing from the Developer Key, or the course has no enrolled students. Re-check the key was created from `/lti/config.json`. |
 | AGS/NRPS calls return 401 | Token audience mismatch — see the end of step 5. |
 | Grades never appear in Canvas | The worker is not running. In Azure it is a scheduled Container Apps Job; see [operations.md](operations.md). |
+| Changed `LTI_TOOL_TITLE` but Canvas still shows the old name | Canvas caches the registration it fetched at install time. Have it re-read the config URL, or edit the key's name in Canvas directly. |

@@ -63,6 +63,7 @@ except where noted as unvalidated below.
 | Variable | Default | Purpose |
 |---|---|---|
 | `LTI_TOOL_SIGNING_KEYS_JSON` | unset → a key is generated on first boot and persisted to `tool_signing_keys` | JSON array of `{ kid, privateKeyPkcs8Pem, status: 'active' \| 'previous' }`. Takes precedence over the database table. Generate with `node scripts/generate-signing-keys.mjs`. **Never commit.** |
+| `LTI_TOOL_TITLE` | `Scanttendance` | The tool's name in Canvas. Sets every `title` and `text` field in `/lti/config.json` at once — the app title and the course-navigation link label instructors click — so the two cannot disagree. Whitespace is trimmed and an empty value is rejected. Does **not** rename the gradebook column, which is always `Attendance`. |
 | `SETUP_TOKEN` | unset → the admin page's token bootstrap is disabled | Bootstrap credential (≥ 16 chars) for `/admin.html`, sent as the `x-setup-token` header. Lets you add the first Canvas connection before an Administrator-role launch exists. Unset it once an admin launch works. **Never commit.** |
 | `CLOCK_SKEW_SECONDS` | `120` | Allowed skew when validating a launch JWT's `exp`/`nbf`/`iat`. |
 | `LOGIN_TRANSACTION_TTL_SECONDS` | `300` | How long an `/lti/login`-issued `state`/`nonce` stays valid. |
