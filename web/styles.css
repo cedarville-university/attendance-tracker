@@ -26,6 +26,13 @@
   --radius: 8px; /* panels, surfaces */
   --radius-sm: 6px; /* buttons, inputs, small controls */
 
+  /* One page measure, shared by the header, message strip, restore banner and
+     the main column so they all sit on the same axis. Wide enough for the
+     6-column attendance table to breathe on a classroom projector or a 1440+
+     desktop; prose inside still caps itself at 68ch. */
+  --measure: 1400px;
+  --gutter: var(--space-lg);
+
   /* Spacing scale — every structural gap/padding pulls from here. */
   --space-2xs: 0.25rem;
   --space-xs: 0.5rem;
@@ -47,7 +54,8 @@
   --text-md: 1rem; /* 16 — body */
   --text-lg: 1.125rem; /* 18 — panel headings / summaries */
   --text-xl: 1.375rem; /* 22 — page title */
-  --text-2xl: 1.75rem; /* 28 — Latest Scan headline */
+  --text-2xl: 1.75rem; /* 28 — Latest Scan headline, narrow layout */
+  --text-3xl: 2.375rem; /* 38 — Latest Scan headline once it spans the full measure */
 
   --weight-normal: 400;
   --weight-medium: 500;
@@ -56,6 +64,12 @@
 
   --leading-tight: 1.2;
   --leading-normal: 1.55;
+}
+
+/* Form-shaped pages (admin setup) keep the narrower reading measure — the wide
+   one exists for the scanner's tables and would only strand a 9-field form. */
+.page-form {
+  --measure: 960px;
 }
 
 * {
@@ -69,6 +83,10 @@ body {
   line-height: var(--leading-normal);
   background: var(--color-bg);
   color: var(--color-text);
+  /* Full-bleed CU Gold rule. Lives here rather than on .app-header so the
+     header's text can be constrained to --measure without pulling the rule
+     in with it. */
+  border-top: 3px solid var(--color-accent);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -118,9 +136,12 @@ textarea {
   }
 }
 
+/* The gold rule stays full-bleed (it lives on <body>, above); the header's text
+   does not, so it lands on the same axis as the panels below. */
 .app-header {
-  padding: var(--space-md) var(--space-lg) var(--space-xs);
-  border-top: 3px solid var(--color-accent);
+  max-width: var(--measure);
+  margin-inline: auto;
+  padding: var(--space-md) var(--gutter) var(--space-xs);
 }
 
 .app-header h1 {
@@ -176,7 +197,9 @@ textarea {
 }
 
 .app-messages {
-  padding: 0 var(--space-lg);
+  max-width: var(--measure);
+  margin-inline: auto;
+  padding: 0 var(--gutter);
   display: flex;
   flex-direction: column;
   gap: var(--space-xs);
@@ -207,7 +230,11 @@ textarea {
 }
 
 .restore-banner {
-  margin: var(--space-sm) var(--space-lg) 0;
+  /* Same axis as the panels: the measure minus the gutter it would otherwise
+     have padded. */
+  max-width: calc(var(--measure) - 2 * var(--gutter));
+  width: calc(100% - 2 * var(--gutter));
+  margin: var(--space-sm) auto 0;
   padding: var(--space-sm) var(--space-md);
   background: var(--color-warning-bg);
   border: 1px solid var(--color-warning);
@@ -238,9 +265,9 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: var(--space-md);
-  max-width: 960px;
+  max-width: var(--measure);
   margin: 0 auto;
-  padding: var(--space-md) var(--space-lg) var(--space-xl);
+  padding: var(--space-md) var(--gutter) var(--space-xl);
 }
 
 .panel {
@@ -248,6 +275,11 @@ textarea {
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
   padding: var(--space-md) var(--space-lg);
+  /* Every wide table on this page lives in a .panel, and the .table-scroll that
+     owns the overflow is a *descendant*, not the panel itself. Without this the
+     panel's automatic minimum size resolves to the `white-space: nowrap` table's
+     min-content and the panel bursts out of its column. */
+  min-width: 0;
 }
 
 /* Reader + session controls: one bar, not two equal-weight cards. */
@@ -280,34 +312,72 @@ textarea {
   display: none;
 }
 
+/* Canvas sync status. Was two bare paragraphs on the gray ground, which read as
+   stray debug output; now a quiet strip on the panel surface, status first. */
+.grade-sync {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2xs) var(--space-md);
+  padding: var(--space-xs) var(--space-md);
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
 .grade-sync[hidden] {
   display: none;
 }
 
 .grade-sync p {
-  margin: var(--space-2xs) 0;
+  margin: 0;
 }
 
-/* Live-monitoring tier: Latest Scan beside the growing attendance log.
-   Extra top margin sets it apart from the control bar above. */
+#grade-sync-status-text {
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-sm);
+}
+
+/* Source order puts the standing explainer first; it is the least urgent thing
+   in the strip, so it follows the live status. */
+#grade-sync-explainer {
+  order: 1;
+  font-size: var(--text-xs);
+}
+
+/* A slim bar for a single labelled control acting on the panel beneath it.
+   `.button-row[hidden]` still wins on specificity, so toggling `hidden` in
+   ui.js keeps working. */
+.control-strip {
+  margin: 0;
+  align-items: center;
+  gap: var(--space-xs) var(--space-sm);
+  padding: var(--space-xs) var(--space-md);
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+/* Sized to hold a long "Name — 1234567" without growing to fill the strip and
+   becoming the loudest thing in it. */
+.control-strip select {
+  flex: 0 1 22rem;
+  min-width: 0;
+}
+
+/* Live-monitoring tier, read top to bottom: the scan readout spans the full
+   measure, then the control that acts on the log, then the log itself. The
+   readout used to be a narrow sticky column beside the table, which capped the
+   6-column table at ~740px and shrank the one thing meant to be legible from
+   across a room. Extra top margin sets the tier apart from the control bar. */
 .live-view {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-md);
   margin-top: var(--space-xs);
 }
 
 @media (min-width: 900px) {
-  .live-view {
-    grid-template-columns: minmax(300px, 340px) 1fr;
-    align-items: start;
-    gap: var(--space-lg);
-  }
-
-  .live-view .latest-scan {
-    position: sticky;
-    top: var(--space-md);
-  }
-
   /* Reader and session clusters share one line here; a rule keeps them
      visually distinct. Scoped to the wide layout so a wrapped, stacked
      group never shows a stray vertical edge. */
@@ -380,6 +450,15 @@ textarea {
   display: none;
 }
 
+/* A label introducing a control in a button row ("Include", "Student without a
+   card") is secondary to the control itself. `.toggle-row` labels are excluded —
+   those are checkbox labels and read at body size. */
+.button-row > label:not(.toggle-row) {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-muted);
+}
+
 button {
   font: inherit;
   padding: 0.55rem 1rem;
@@ -439,6 +518,70 @@ button.is-confirming {
   background: var(--color-danger);
   border-color: var(--color-danger);
   color: #fff;
+}
+
+/* Dropdowns share the button's box exactly — same padding block, same radius,
+   same border token, so a select and a button sitting in one .button-row line up
+   instead of a 23px native widget next to a 44px button. `appearance: none` is
+   required: macOS ignores height/radius/border on a native select. The chevron is
+   a data: URI (CSP allows `img-src 'self' data:`), tinted to --color-muted so it
+   reads as a control affordance rather than decoration. */
+select {
+  appearance: none;
+  font: inherit;
+  padding: 0.55rem 2.1rem 0.55rem 0.7rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  background-color: var(--color-panel);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5l5-5' fill='none' stroke='%23526577' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.7rem center;
+  background-size: 0.7rem 0.47rem;
+  cursor: pointer;
+  max-width: 100%;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+select:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-border) 55%, var(--color-text));
+}
+
+select:focus {
+  border-color: var(--color-primary);
+}
+
+select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: var(--color-idle-bg);
+}
+
+/* Compact variant for the per-row correction control (created in ui.js), where a
+   44px control would double every table row's height. */
+.correct-status-select {
+  padding: 0.15rem 1.6rem 0.15rem 0.45rem;
+  font-size: var(--text-sm);
+  background-position: right 0.45rem center;
+  background-size: 0.6rem 0.4rem;
+}
+
+/* Row actions: the correction dropdown and the Remove link on one baseline.
+   Left as a real table-cell (no flex) so the column keeps aligning with its
+   header. */
+.col-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.col-actions > * {
+  vertical-align: middle;
+}
+
+.col-actions .correct-status-select {
+  margin-inline-end: var(--space-sm);
 }
 
 .link-button {
@@ -596,7 +739,9 @@ button.is-confirming {
   }
 }
 
-/* Latest scan panel: the most visually prominent element on the page. */
+/* Latest scan panel: the most visually prominent element on the page. Now spans
+   the full measure, so the verdict gets real size and the supporting facts sit
+   beside it instead of under it. */
 .latest-scan {
   border-width: 2px;
   padding: var(--space-lg);
@@ -606,12 +751,70 @@ button.is-confirming {
     box-shadow 0.15s ease;
 }
 
+.latest-scan-inner {
+  display: grid;
+  gap: var(--space-md);
+}
+
+/* "Latest scan" is an eyebrow, not the headline — the verdict below it is. */
+.latest-scan h2 {
+  margin: 0 0 var(--space-2xs);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-muted);
+}
+
 .latest-scan-status-text {
-  margin: var(--space-2xs) 0 var(--space-sm);
+  margin: 0;
   font-size: var(--text-2xl);
   font-weight: var(--weight-bold);
   line-height: var(--leading-tight);
-  letter-spacing: -0.01em;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+
+/* The scanned student's name is the fact the instructor actually reads; the
+   other three are there to confirm/debug. */
+#latest-scan-name {
+  font-size: var(--text-lg);
+}
+
+@media (min-width: 900px) {
+  .latest-scan {
+    padding: var(--space-lg) var(--space-xl);
+  }
+
+  .latest-scan-inner {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-xl);
+  }
+
+  .latest-scan-status-text {
+    font-size: var(--text-3xl);
+  }
+
+  /* Facts turn into a labelled row: two grid rows, filled column by column, so
+     Name / University ID / Card code / Time read left to right. The column floor
+     keeps the row from reshuffling on every scan as values change length. */
+  .latest-scan-facts {
+    grid-template-columns: none;
+    grid-template-rows: auto auto;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(7rem, max-content);
+    justify-content: end;
+    gap: 0 var(--space-xl);
+    margin: 0;
+  }
+
+  .latest-scan-facts dt {
+    font-size: var(--text-2xs);
+    font-weight: var(--weight-medium);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
 }
 
 .latest-scan--idle {
@@ -648,13 +851,19 @@ button.is-confirming {
   color: var(--color-danger);
 }
 
+/* Long tables scroll inside their own panel rather than pushing the rest of the
+   page down; the header row stays put while they do. */
 .table-scroll {
   overflow-x: auto;
+  overflow-y: auto;
+  max-height: 60vh;
+  overscroll-behavior: contain;
 }
 
 table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate; /* `collapse` drops borders on a sticky thead */
+  border-spacing: 0;
   font-size: var(--text-sm);
   font-variant-numeric: tabular-nums;
 }
@@ -668,11 +877,20 @@ td {
 }
 
 th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--color-panel);
   font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--color-muted);
+}
+
+/* Tool panels sit on the gray ground, so their sticky header must match. */
+.panel--tool th {
+  background: var(--color-bg);
 }
 
 .status-badge {
@@ -805,6 +1023,12 @@ details.panel > summary {
   td {
     white-space: normal;
   }
+}
+
+/* Reference roster: three short columns. Left un-capped they stretch across the
+   full measure and put 300px of air between a name and its ID. */
+#roster-panel table {
+  max-width: 60rem;
 }
 
 /* Past sessions panel */

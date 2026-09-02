@@ -77,12 +77,6 @@
         Connect your card reader to begin taking attendance.
       </p>
 
-      <div id="manual-present-group" class="button-row" hidden>
-        <label for="manual-present-select">Student without a card</label>
-        <select id="manual-present-select"></select>
-        <button id="btn-manual-present" type="button" class="secondary">Mark present</button>
-      </div>
-
       <div id="grade-sync-panel" class="grade-sync" hidden>
         <p id="grade-sync-explainer" class="muted">
           Attendance grades post to Canvas automatically every few minutes.
@@ -93,30 +87,41 @@
         </button>
       </div>
 
-      <!-- Live-monitoring tier: last scan + running log, side by side on wide screens -->
+      <!-- Live-monitoring tier, stacked: scan readout, then the control that acts
+           on the log, then the log itself. -->
       <div class="live-view">
-        <!-- Latest scan: the primary live readout -->
+        <!-- Latest scan: the primary live readout, full measure -->
         <section
           id="latest-scan-panel"
           class="panel latest-scan latest-scan--idle"
           aria-labelledby="latest-scan-heading"
           aria-live="polite"
         >
-          <h2 id="latest-scan-heading">Latest scan</h2>
-          <p id="latest-scan-status-text" class="latest-scan-status-text">
-            Waiting for a card&hellip;
-          </p>
-          <dl class="fact-list">
-            <dt>Name</dt>
-            <dd id="latest-scan-name">&mdash;</dd>
-            <dt>University ID</dt>
-            <dd id="latest-scan-university-id">&mdash;</dd>
-            <dt>Card code</dt>
-            <dd id="latest-scan-card-code">&mdash;</dd>
-            <dt>Time</dt>
-            <dd id="latest-scan-time">&mdash;</dd>
-          </dl>
+          <div class="latest-scan-inner">
+            <div>
+              <h2 id="latest-scan-heading">Latest scan</h2>
+              <p id="latest-scan-status-text" class="latest-scan-status-text">
+                Waiting for a card&hellip;
+              </p>
+            </div>
+            <dl class="fact-list latest-scan-facts">
+              <dt>Name</dt>
+              <dd id="latest-scan-name">&mdash;</dd>
+              <dt>University ID</dt>
+              <dd id="latest-scan-university-id">&mdash;</dd>
+              <dt>Card code</dt>
+              <dd id="latest-scan-card-code">&mdash;</dd>
+              <dt>Time</dt>
+              <dd id="latest-scan-time">&mdash;</dd>
+            </dl>
+          </div>
         </section>
+
+        <div id="manual-present-group" class="button-row control-strip" hidden>
+          <label for="manual-present-select">Student without a card</label>
+          <select id="manual-present-select"></select>
+          <button id="btn-manual-present" type="button" class="secondary">Mark present</button>
+        </div>
 
         <!-- Attendance log + inline session tallies -->
         <section class="panel" aria-labelledby="attendance-heading">
@@ -166,9 +171,9 @@
                   <th>Time</th>
                   <th>Card code</th>
                   <th>University ID</th>
-                  <th>Name</th>
+                  <th class="col-name">Name</th>
                   <th>Roster status</th>
-                  <th><span class="sr-only">Row actions</span></th>
+                  <th class="col-actions"><span class="sr-only">Row actions</span></th>
                 </tr>
               </thead>
               <tbody id="attendance-table-body"></tbody>

@@ -535,7 +535,9 @@ function ensureCorrectionControl(row, record) {
     }
     if (ok) renderStatusBadge(row, status);
   });
-  actions.appendChild(select);
+  // Before the Remove link, not after it: the routine correction should come
+  // first and the destructive action last.
+  actions.insertBefore(select, actions.firstChild);
 }
 
 function fillAttendanceRow(row, record) {
