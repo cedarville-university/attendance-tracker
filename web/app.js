@@ -362,13 +362,13 @@ async function closeSession() {
   const result = await closeAttendanceSession(currentAttendanceSessionId);
   if (!result.ok) {
     elements.closeSessionBtn.disabled = false;
-    ui.showAppMessage('error', `Could not close attendance: ${result.error.message}`);
+    ui.showAppMessage('error', `Could not submit attendance: ${result.error.message}`);
     return;
   }
   currentSessionState = 'closed';
   ui.renderSessionState({ state: 'closed' });
   ui.setManualPresentGroupVisible(false);
-  ui.showAppMessage('info', 'Attendance session closed. Unscanned students were marked absent.');
+  ui.showAppMessage('info', 'Attendance submitted. Unscanned students were marked absent.');
   await refreshGradeSync(currentAttendanceSessionId);
   if (sessionHistory) sessionHistory.refresh();
 }

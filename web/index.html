@@ -14,8 +14,8 @@
     <header class="app-header">
       <h1>Classroom Attendance Tracker</h1>
       <p class="app-subtitle">
-        Scan student ID cards to take attendance during class. Attendance syncs to Canvas
-        automatically.
+        Scan student ID cards to take attendance during class. Submitting at the end of class is
+        what sends the grades to Canvas.
       </p>
       <dl id="course-context" class="course-context" hidden>
         <div>
@@ -64,8 +64,10 @@
         <div class="control-bar-group">
           <span id="session-status-text">No session started.</span>
           <button id="btn-start-session" type="button" class="primary">Start attendance</button>
+          <!-- Named for what it actually does: this click is what queues the grades
+               for Canvas. "Close attendance" read like tidying up after class. -->
           <button id="btn-close-session" type="button" class="secondary" disabled>
-            Close attendance
+            Submit attendance to Canvas
           </button>
           <button id="btn-reopen-session" type="button" class="secondary" hidden>
             Reopen attendance
@@ -78,8 +80,11 @@
       </p>
 
       <div id="grade-sync-panel" class="grade-sync" hidden>
+        <!-- This panel is only ever visible once attendance has been submitted, so the
+             reassurance below is safe to state unconditionally. -->
         <p id="grade-sync-explainer" class="muted">
-          Attendance grades post to Canvas automatically every few minutes.
+          Attendance grades post to Canvas automatically every few minutes. You can close this page
+          or shut your laptop — posting continues without it.
         </p>
         <p id="grade-sync-status-text">Grades pending</p>
         <button id="btn-retry-grade-sync" type="button" class="secondary" hidden>

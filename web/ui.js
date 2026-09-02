@@ -118,6 +118,11 @@ export function setPrimaryEmphasis(btn, on) {
 function refreshControlBarEmphasis() {
   setPrimaryEmphasis(elements.connectBtn, !readerConnected);
   setPrimaryEmphasis(elements.startSessionBtn, readerConnected && !sessionActive);
+  // While a session is open, submitting it IS the next action -- it is the click that
+  // sends the grades to Canvas, and nothing else happens until it lands. Gated on the
+  // reader being connected so a reader that drops mid-class pulls emphasis back to
+  // Connect rather than leaving two .primary buttons in the bar.
+  setPrimaryEmphasis(elements.closeSessionBtn, readerConnected && sessionActive);
 }
 
 // ---- Reader status ----------------------------------------------------
@@ -307,7 +312,9 @@ export function renderSessionState(sessionInfo) {
     elements.closeSessionBtn.disabled = false;
     elements.reopenSessionBtn.hidden = true;
   } else if (sessionInfo.state === 'closed') {
-    elements.sessionStatusText.textContent = `Session closed${label}`;
+    // "Attendance submitted", not "Session closed": the professor's mental model is
+    // the submission, and this line is the confirmation that the important click landed.
+    elements.sessionStatusText.textContent = `Attendance submitted${label}`;
     elements.startSessionBtn.hidden = true;
     elements.closeSessionBtn.hidden = true;
     elements.reopenSessionBtn.hidden = false;

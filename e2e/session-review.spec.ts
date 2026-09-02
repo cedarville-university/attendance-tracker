@@ -38,8 +38,8 @@ test('instructor: review, reopen-from-panel, delete and restore a past session',
   await startButton.click();
   await expect(page.locator('#session-status-text')).toHaveText(/Session open/i);
 
-  await page.getByRole('button', { name: 'Close Attendance' }).click();
-  await expect(page.locator('#session-status-text')).toHaveText(/Session closed/i);
+  await page.getByRole('button', { name: 'Submit attendance to Canvas' }).click();
+  await expect(page.locator('#session-status-text')).toHaveText(/Attendance submitted/i);
 
   // Open the Past sessions panel — it refreshes on expand.
   const panel = page.locator('#session-history-panel');
@@ -53,8 +53,8 @@ test('instructor: review, reopen-from-panel, delete and restore a past session',
   await expect(page.locator('#session-status-text')).toHaveText(/Session reopened/i);
 
   // Close again, then delete from the panel (two-click inline confirm).
-  await page.getByRole('button', { name: 'Close Attendance' }).click();
-  await expect(page.locator('#session-status-text')).toHaveText(/Session closed/i);
+  await page.getByRole('button', { name: 'Submit attendance to Canvas' }).click();
+  await expect(page.locator('#session-status-text')).toHaveText(/Attendance submitted/i);
   await panel.locator('summary').click(); // collapse
   await panel.locator('summary').click(); // expand -> refresh
   const delBtn = page.locator('#session-history-table-body tr').first().getByRole('button', { name: /Delete|Click again to delete/ });
@@ -71,7 +71,7 @@ test('instructor: review, reopen-from-panel, delete and restore a past session',
   await expect(page.getByText(/column will be removed automatically/i)).toBeVisible();
 
   // The deleted session was the one on screen -> the main view recovers to a
-  // fresh no-session state instead of being stranded on "Session closed".
+  // fresh no-session state instead of being stranded on "Attendance submitted".
   await expect(page.locator('#session-status-text')).toHaveText(/No session started/i);
   await expect(page.getByRole('button', { name: 'Start Attendance' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Start Attendance' })).toBeEnabled();

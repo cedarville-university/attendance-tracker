@@ -102,8 +102,8 @@ test('instructor: login -> launch -> start -> scan -> close -> reopen -> grade s
   await expect(page.locator('#manual-present-select')).not.toContainText(seeded.cardlessLearner.name);
 
   // Close — unscanned eligible members become absent; grade-sync jobs are enqueued (pending).
-  await page.getByRole('button', { name: 'Close Attendance' }).click();
-  await expect(page.locator('#session-status-text')).toHaveText(/Session closed/i);
+  await page.getByRole('button', { name: 'Submit attendance to Canvas' }).click();
+  await expect(page.locator('#session-status-text')).toHaveText(/Attendance submitted/i);
   await expect(page.locator('#grade-sync-panel')).toBeVisible();
   await expect(page.locator('#manual-present-group')).toBeHidden();
   // Richer summary line: a "N of M students" count plus a scheduling phrase.
