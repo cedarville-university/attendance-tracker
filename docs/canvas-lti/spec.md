@@ -364,7 +364,14 @@ label: Attendance
 
 In Canvas's current Admin → Apps registration UI, `window target: _blank` (JSON key `windowTarget`)
 and the NRPS/AGS `scopes` are not exposed as form fields — they can only be supplied through the JSON
-configuration method. `docs/canvas-installation.md` gives the full JSON.
+configuration method.
+
+**Amended (Phase 7):** the application serves that JSON itself at `GET /lti/config.json`
+(`server/src/lti/tool-config.ts`), generated from `APP_BASE_URL` and the `lti/scopes.ts` constants,
+so the operator registers by URL rather than pasting a template. This is normative: the registration
+body MUST be generated, not hand-written, because a documented template cannot keep its URLs in
+agreement with `APP_BASE_URL` nor its scope strings identical to `lti/scopes.ts`.
+`docs/canvas-installation.md` gives the procedure.
 
 In a course placement, Canvas's `admins` visibility includes administrators and instructors rather than learners.
 
@@ -2863,8 +2870,9 @@ monitoring
 ```
 
 Once a public HTTPS deployment exists, perform the real-Canvas registration and launch verification
-that earlier phases could not: register the tool in Canvas (Admin → Apps, JSON configuration — the
-scopes and `windowTarget: _blank` are not settable through the form), install it in a test course,
+that earlier phases could not: register the tool in Canvas (Developer Keys → LTI Key → Enter URL,
+pointed at the app's own `GET /lti/config.json` — the scopes and `windowTarget: _blank` are not
+settable through the Apps form), install it in a test course,
 seed the registration, then confirm an instructor launch opens the scanner in a new tab and a
 learner-role launch returns HTTP 403. Verify `AUTHORIZED_INSTRUCTOR_ROLE_URIS` against a real launch
 payload at this point. Full steps: `docs/canvas-installation.md`.
@@ -2975,7 +2983,7 @@ The completed repository shall contain:
 
 ## `docs/canvas-installation.md`
 
-* LTI tool registration (Admin → Apps, JSON configuration);
+* LTI tool registration (Developer Keys → LTI Key → Enter URL → `GET /lti/config.json`);
 * required scopes;
 * course-navigation placement;
 * new-tab configuration (`windowTarget`, JSON-only);
@@ -3018,6 +3026,17 @@ The completed repository shall contain:
 * monitoring;
 * backup/restore;
 * incident response.
+
+## `docs/card-reader.md`
+
+**Added (Phase 7).** Reader-specific material, split out of `README.md` so the setup path stays
+short:
+
+* required OMNIKEY Custom Report configuration;
+* connecting, reconnecting, and the secure-context / top-level-window requirements;
+* the diagnostics panel and the parser's tunable constants;
+* hardware troubleshooting;
+* the browser-only CSV roster fallback.
 
 ---
 

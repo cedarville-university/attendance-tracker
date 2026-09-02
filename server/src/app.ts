@@ -26,6 +26,8 @@ import { createAllowlist } from './lti/login.js';
 import { findEnabledDeployment } from './lti/registrations.js';
 import { createOidcTransaction } from './lti/oidc-transactions.js';
 import { registerLtiJwksRoute } from './routes/lti-jwks.js';
+import { registerLtiConfigRoute } from './routes/lti-config.js';
+import { toolTargetLinkUri } from './lti/tool-config.js';
 import { registerLtiLoginRoute } from './routes/lti-login.js';
 import { registerLtiLaunchRoute } from './routes/lti-launch.js';
 import { registerMeRoute } from './routes/me.js';
@@ -121,6 +123,21 @@ export async function buildApp(env: Env, deps: AppDeps): Promise<FastifyInstance
   });
 
   registerLtiJwksRoute(app, signingKeyProvider);
+  registerLtiConfigRoute(app, env.APP_BASE_URL);
+
+  // The one install error /lti/config.json cannot prevent by itself: Canvas copies the config's
+  // `target_link_uri` into every launch, and /lti/launch only redirects to an entry in
+  // ALLOWED_TARGET_LINK_URIS. A correctly-registered tool whose allowlist omits it fails every
+  // launch. Both values are known here, so say so once at boot. A warning, not a fatal: pointing
+  // the placement at some other allowlisted page is legitimate.
+  const advertisedTargetLinkUri = toolTargetLinkUri(env.APP_BASE_URL);
+  if (!parseAllowedTargetLinkUris(env).includes(advertisedTargetLinkUri)) {
+    app.log.warn(
+      { advertisedTargetLinkUri, allowedTargetLinkUris: parseAllowedTargetLinkUris(env) },
+      '/lti/config.json advertises a target_link_uri that is not in ALLOWED_TARGET_LINK_URIS; ' +
+        'launches using it will be rejected. Add it to ALLOWED_TARGET_LINK_URIS.',
+    );
+  }
 
   const requireSession = createRequireSession(db);
   const requireCsrf = createRequireCsrf(env.APP_BASE_URL);
