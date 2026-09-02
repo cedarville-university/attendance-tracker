@@ -100,13 +100,17 @@
           <div class="latest-scan-inner">
             <div>
               <h2 id="latest-scan-heading">Latest scan</h2>
+              <!-- The verdict line: status glyph + the student's name, which is
+                   the part that actually changes from scan to scan. The status
+                   phrase itself lives in the facts row beside it. -->
               <p id="latest-scan-status-text" class="latest-scan-status-text">
-                Waiting for a card&hellip;
+                <span id="latest-scan-glyph" class="latest-scan-glyph" aria-hidden="true" hidden></span>
+                <span id="latest-scan-headline">Waiting for a card&hellip;</span>
               </p>
             </div>
             <dl class="fact-list latest-scan-facts">
-              <dt>Name</dt>
-              <dd id="latest-scan-name">&mdash;</dd>
+              <dt>Status</dt>
+              <dd id="latest-scan-roster-status">&mdash;</dd>
               <dt>University ID</dt>
               <dd id="latest-scan-university-id">&mdash;</dd>
               <dt>Card code</dt>

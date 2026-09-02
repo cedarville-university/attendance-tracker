@@ -79,7 +79,11 @@ test('instructor: login -> launch -> start -> scan -> close -> reopen -> grade s
   }, seeded.cardReportBytes);
   expect((await scanResponse).ok()).toBe(true);
 
-  await expect(page.locator('#latest-scan-status-text')).toHaveText(/Present/i);
+  // The verdict line leads with the student's name (plus the ✓ glyph); the status
+  // phrase itself sits in the facts row beside it.
+  await expect(page.locator('#latest-scan-headline')).toHaveText(seeded.learner.name);
+  await expect(page.locator('#latest-scan-glyph')).toHaveText('✓');
+  await expect(page.locator('#latest-scan-roster-status')).toHaveText('Present');
   await expect(page.locator('#attendance-table-body .status-badge').first()).toHaveText('Present');
   await expect(page.locator('#attendance-table-body .col-university-id').first()).toHaveText(
     seeded.learner.universityId,

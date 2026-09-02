@@ -49,8 +49,9 @@ export const elements = {
   canvasRosterEmpty: document.getElementById('canvas-roster-empty'),
 
   latestScanPanel: document.getElementById('latest-scan-panel'),
-  latestScanStatusText: document.getElementById('latest-scan-status-text'),
-  latestScanName: document.getElementById('latest-scan-name'),
+  latestScanGlyph: document.getElementById('latest-scan-glyph'),
+  latestScanHeadline: document.getElementById('latest-scan-headline'),
+  latestScanRosterStatus: document.getElementById('latest-scan-roster-status'),
   latestScanUniversityId: document.getElementById('latest-scan-university-id'),
   latestScanCardCode: document.getElementById('latest-scan-card-code'),
   latestScanTime: document.getElementById('latest-scan-time'),
@@ -406,12 +407,16 @@ export function renderGradeSyncState(summary) {
 
 // ---- Latest scan ---------------------------------------------------------
 
-const LATEST_SCAN_STATUS_TEXT = {
-  idle: 'Waiting for a card…',
-  pending: 'Card scanned — looking up student…',
-  present: '✓ Present',
-  unexpected: '⚠ Not on the class roster',
-  lookup_error: '⚠ Couldn’t check the roster — scan again',
+// Glyph and phrase are kept apart so the panel can lead with whichever one is
+// actually informative: the glyph rides alongside the student's name on the
+// verdict line, and the phrase drops into the facts row. "✓ Present" was the
+// largest text on the page while being the same words on nearly every scan.
+const LATEST_SCAN_STATUS = {
+  idle: { glyph: '', label: 'Waiting for a card…' },
+  pending: { glyph: '', label: 'Card scanned — looking up student…' },
+  present: { glyph: '✓', label: 'Present' },
+  unexpected: { glyph: '⚠', label: 'Not on the class roster' },
+  lookup_error: { glyph: '⚠', label: 'Couldn’t check the roster — scan again' },
 };
 
 function studentDisplayName(record) {
@@ -421,10 +426,24 @@ function studentDisplayName(record) {
   return record.displayName || null;
 }
 
+/**
+ * Writes the verdict line. With a name in hand the name is the headline and the
+ * status phrase becomes a fact; the nameless states (idle, pending, an
+ * unrecognised card, a roster lookup that failed) have nothing else to say, so
+ * the phrase is promoted back into the headline and the fact reads '—' rather
+ * than printing the same sentence twice in one panel.
+ */
+function renderLatestScanVerdict(state, name) {
+  const { glyph = '', label = state } = LATEST_SCAN_STATUS[state] ?? {};
+  elements.latestScanGlyph.textContent = glyph;
+  elements.latestScanGlyph.hidden = !glyph;
+  elements.latestScanHeadline.textContent = name || label;
+  elements.latestScanRosterStatus.textContent = name ? label : '—';
+}
+
 function applyLatestScanState(state, record) {
   elements.latestScanPanel.className = `panel latest-scan latest-scan--${state}`;
-  elements.latestScanStatusText.textContent = LATEST_SCAN_STATUS_TEXT[state] || state;
-  elements.latestScanName.textContent = studentDisplayName(record) || '—';
+  renderLatestScanVerdict(state, studentDisplayName(record));
   elements.latestScanUniversityId.textContent = record.institutionalId || '—';
   elements.latestScanCardCode.textContent = record.rawCardCode || '—';
   elements.latestScanTime.textContent = formatLocalTime(record.timestamp);
@@ -440,8 +459,7 @@ export function renderLatestScanResult(record) {
 
 export function resetLatestScanPanel() {
   elements.latestScanPanel.className = 'panel latest-scan latest-scan--idle';
-  elements.latestScanStatusText.textContent = LATEST_SCAN_STATUS_TEXT.idle;
-  elements.latestScanName.textContent = '—';
+  renderLatestScanVerdict('idle', null);
   elements.latestScanUniversityId.textContent = '—';
   elements.latestScanCardCode.textContent = '—';
   elements.latestScanTime.textContent = '—';

@@ -766,19 +766,40 @@ select:disabled {
   color: var(--color-muted);
 }
 
+/* The verdict line carries the student's name at the top of the type scale --
+   it is the one thing here that differs scan to scan, so it earns the size.
+   The status glyph sits beside it as its own flex child: fixed width, baseline
+   aligned, and never pulled into the name's wrapping. */
 .latest-scan-status-text {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  /* nowrap, not wrap: a long name has to wrap inside its own span rather than
+     pushing itself below the glyph and leaving the ✓ orphaned on a line. */
+  flex-wrap: nowrap;
   margin: 0;
   font-size: var(--text-2xl);
   font-weight: var(--weight-bold);
   line-height: var(--leading-tight);
   letter-spacing: -0.015em;
-  text-wrap: balance;
 }
 
-/* The scanned student's name is the fact the instructor actually reads; the
-   other three are there to confirm/debug. */
-#latest-scan-name {
-  font-size: var(--text-lg);
+.latest-scan-glyph {
+  flex: none;
+  /* Glyphs render optically larger than caps at the same size. */
+  font-size: 0.9em;
+  line-height: 1;
+}
+
+.latest-scan-glyph[hidden] {
+  display: none;
+}
+
+/* A long unbroken name wraps inside the column rather than widening the panel. */
+#latest-scan-headline {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
 }
 
 @media (min-width: 900px) {
