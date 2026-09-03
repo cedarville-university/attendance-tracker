@@ -18,6 +18,10 @@ param webMinReplicas = 1
 param webMaxReplicas = 3
 param logRetentionDays = 90
 param acrSku = 'Basic'
+// Key Vault, Postgres, and ACR names are globally unique DNS labels, and the bare
+// `attendance-prod` forms are already taken by unrelated tenants (confirmed against
+// checkNameAvailability, not merely soft-deleted here). Suffix them.
+param globalNameSuffix = 'cu'
 param alertEmail = 'nbiggs112@cedarville.edu'
 // Real ProxID resolver URL template is supplied at deploy time via the IDENTITY_API_URL
 // GitHub 'production' environment variable (-p identityApiUrl=... in deploy-prod.yml).

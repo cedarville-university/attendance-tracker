@@ -191,12 +191,32 @@ runs, including the browser tests that never touch the database — so if Postgr
 suite fails at setup rather than on an assertion. Test files run serially because they share that one
 database.
 
+## Releases
+
+`main` is the release branch, and the two tag patterns are disjoint so one tag never rolls both
+environments:
+
+| Command | Deploys | Gate |
+|---|---|---|
+| `git tag dev-vX.Y.Z && git push origin dev-vX.Y.Z` | dev | none |
+| `git tag vX.Y.Z && git push origin vX.Y.Z` | prod | approval on the `guard` job |
+
+Both workflows also accept `workflow_dispatch`. See
+[../infra/azure/README.md](../infra/azure/README.md) for the pipeline shape and the bootstrap
+runbook.
+
 ## Known gaps
 
-- **`RETENTION_DAYS` is not set in any Bicep parameter file**, so the audit-event retention sweep is
-  currently inert in all deployed environments.
 - **The identity resolver falls back to mock silently** when any required `IDENTITY_API_*` variable
   is missing (see the caveat above).
-- Only `deploy-dev.yml` exists. Stage and prod Bicep parameter files are present, but no workflow
-  deploys them. The dev deploy triggers on a `v*` tag or manual dispatch.
+- **`RETENTION_DAYS` is set on prod only** (365 days, via the `retentionDays` Bicep parameter, which
+  reaches the worker job alone). Dev leaves it at `0`, so the audit-event sweep is still a no-op
+  there.
+- **`IDENTITY_API_UNIVERSITY_ID_FIELD` and its siblings are not wired into `web.bicep`.** Both
+  deployed environments rely on the code defaults (`redwoodId`, `firstName`, `lastName`, `email`)
+  matching the live ProxID response. They do today; a resolver change would need those env vars
+  added.
+- `stage.bicepparam` still carries `CHANGEME` placeholders and no workflow deploys it. The
+  two-environment model (dev + prod) is deliberate.
 - Attendance data has no retention sweep; only `audit_events` are pruned.
+- The alert fire→email round trip has never been exercised end to end (see the infra README).

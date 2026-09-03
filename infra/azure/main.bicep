@@ -41,8 +41,15 @@ param bindCustomDomain bool = true
 @description('Days of audit_events history the worker keeps (RETENTION_DAYS). 0 leaves the variable unset, which makes the retention sweep a no-op. Attendance records are never pruned regardless.')
 @minValue(0)
 param retentionDays int = 0
+@description('Uniquifier appended to the Key Vault, Postgres, and ACR names. Those three carry GLOBALLY unique DNS labels, and the bare `attendance-<env>` forms are generic enough to be taken by unrelated tenants — `kv-attendance-prod` and `psql-attendance-prod` both were. Empty by default so existing environments keep the names they were built with; changing it on a live environment renames (i.e. recreates) all three.')
+@maxLength(8)
+param globalNameSuffix string = ''
 
 var namePrefix = 'attendance-${environmentName}'
+// Dashed form for the resource types that allow dashes; ACR strips them separately.
+var globalSuffix = empty(globalNameSuffix) ? '' : '-${globalNameSuffix}'
+// Truncate the BASE to fit, never the suffix — a clipped uniquifier is not unique.
+var keyVaultName = '${take('kv-${namePrefix}', 24 - length(globalSuffix))}${globalSuffix}'
 var tags = {
   application: 'attendance-tracker'
   environment: environmentName
@@ -73,7 +80,7 @@ module registry 'modules/registry.bicep' = {
   name: 'registry'
   params: {
     // ACR names are alphanumeric only, <=50 chars.
-    name: replace('acr${namePrefix}', '-', '')
+    name: replace('acr${namePrefix}${globalSuffix}', '-', '')
     location: location
     tags: tags
     sku: acrSku
@@ -86,7 +93,7 @@ module keyvault 'modules/keyvault.bicep' = {
   name: 'keyvault'
   params: {
     // KV names <=24 chars, alphanumeric + dashes.
-    name: take('kv-${namePrefix}', 24)
+    name: keyVaultName
     location: location
     tags: tags
     secretsReaderPrincipalId: identity.outputs.principalId
@@ -97,7 +104,7 @@ module keyvault 'modules/keyvault.bicep' = {
 module postgres 'modules/postgres.bicep' = {
   name: 'postgres'
   params: {
-    name: 'psql-${namePrefix}'
+    name: 'psql-${namePrefix}${globalSuffix}'
     location: location
     tags: tags
     skuName: postgresSkuName
@@ -178,7 +185,7 @@ module alerts 'modules/alerts.bicep' = {
     tags: tags
     alertEmail: alertEmail
     appInsightsId: resourceId('Microsoft.Insights/components', 'appi-${namePrefix}')
-    postgresResourceId: resourceId('Microsoft.DBforPostgreSQL/flexibleServers', 'psql-${namePrefix}')
+    postgresResourceId: resourceId('Microsoft.DBforPostgreSQL/flexibleServers', 'psql-${namePrefix}${globalSuffix}')
     webContainerAppId: web.outputs.name
   }
 }

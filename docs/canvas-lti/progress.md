@@ -44,9 +44,12 @@ listed below for continuity but have not been planned in detail yet.
       score submission, grade outbox, retry worker, status UI.
       Exit criterion: closing attendance updates the expected Canvas Gradebook
       column. ✅ met.
-- [ ] **Phase 7 — Infrastructure and CI/CD** — Dockerfile, Bicep, Azure
+- [x] **Phase 7 — Infrastructure and CI/CD** — Dockerfile, Bicep, Azure
       Container Apps, PostgreSQL, Key Vault, ACR, GitHub Actions OIDC
-      deployment, stage/prod environments, health checks, monitoring.
+      deployment, dev + prod environments, health checks, monitoring.
+      Collapsed to **two** environments (dev + prod); `stage` is authored but
+      unused. Production stood up at `attendance.cedarville.edu` on 2026-09-03
+      and releases on a `v*` tag plus an approval; dev moved to `dev-v*`.
       **Then, once a public HTTPS instance exists:** register the tool in
       Canvas (Admin → Apps, JSON config), install it in a test course, seed the
       registration, and verify an instructor launch opens the scanner in a new

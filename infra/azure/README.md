@@ -117,10 +117,30 @@ environments.
 
 ## CI/CD deploy trigger and promotion model
 
-`deploy-dev.yml` runs on a `v*` tag push (`git tag vX.Y.Z && git push origin
-vX.Y.Z`) or `workflow_dispatch` — there is no branch-push trigger. The promotion
-model is `tag v*` → `dev` (the single non-prod environment). `prod` is
-authored-only for now; its pipeline is Task 23.
+`main` is the release branch. Tags divide the two environments, and the two tag
+patterns are disjoint on purpose — when both workflows matched `v*`, a single tag
+rolled dev and prod together.
+
+| Command | Workflow | Gate |
+| --- | --- | --- |
+| `git tag dev-vX.Y.Z && git push origin dev-vX.Y.Z` | `deploy-dev` | none |
+| `git tag vX.Y.Z && git push origin vX.Y.Z` | `deploy-prod` | `guard` job → required reviewer |
+| `gh workflow run deploy-{dev,prod}.yml` | either | approval on prod |
+
+There is no branch-push trigger on either workflow.
+
+`deploy-prod.yml` is structurally identical to `deploy-dev.yml` and differs in six
+places only: `name`, tag pattern, `environment`, `concurrency.group`, param file,
+and a leading `guard` job. `guard` does nothing but echo the target; it exists so
+that the `production` environment's required-reviewer rule suspends the run
+*before* an image is built and long before Azure is touched. Keep the two files in
+sync — `diff .github/workflows/deploy-dev.yml .github/workflows/deploy-prod.yml`
+should show only those six.
+
+The `production` GitHub Environment uses **custom** deployment branch policies
+(`v*` as a tag policy, `main` as a branch policy), not `protected_branches`. A
+`protected_branches` policy is evaluated against branches and silently blocks
+tag-triggered deployments, which is precisely this pipeline's trigger.
 
 ## Real ProxID resolver on `dev`
 
@@ -404,6 +424,125 @@ secret, `PG_ADMIN_PASSWORD`, is covered above).
 | `POSTGRES_FQDN` | Step 1 output `postgresFqdn` | `psql-attendance-dev.postgres.database.azure.com` |
 | `KEY_VAULT_NAME` | Step 1 output `keyVaultName` | `kv-attendance-dev` |
 | `APP_HOSTNAME` | operator-chosen public hostname (matches `appHostname` in the `.bicepparam`) | `attendance-dev.cedarville.edu` |
+
+## Custom domains and the three-pass first deploy
+
+`web.bicep` declares a `managedCertificates` resource whenever `appHostname` is a
+real hostname. Azure validates that certificate **against live DNS at provisioning
+time**, and the DNS record has to point at the Container App's FQDN — which does
+not exist until the app is created. A from-scratch environment therefore cannot
+both set its hostname and bind its certificate on the first deploy.
+
+`bindCustomDomain` (default `true`) gates the certificate and the `customDomains`
+binding independently of `appHostname`, which makes the ordering tractable:
+
+| Pass | Command | Result |
+| --- | --- | --- |
+| 1 | deploy with `-p bindCustomDomain=false` | foundation provisions; **web + worker fail** on unresolvable Key Vault secret refs — expected |
+| 2 | seed the secrets, re-run the identical command | web + worker provision; app live on `*.azurecontainerapps.io` |
+| — | create the DNS records (below) | — |
+| 3 | deploy **without** `bindCustomDomain` | certificate issues; the custom domain serves |
+
+`APP_BASE_URL` and `ALLOWED_TARGET_LINK_URIS` derive from `appHostname`, not from
+the binding, so they are correct from the very first boot.
+
+CI never passes `bindCustomDomain`. Pipeline deploys always bind, which is right —
+by the time CI runs, DNS exists.
+
+### The two DNS records
+
+Both values come from the pass-2 deployment outputs:
+
+```bash
+FQDN=$(az deployment group show -g rg-attendance-<ENV> -n main \
+  --query properties.outputs.webAppFqdn.value -o tsv)
+ASUID=$(az deployment group show -g rg-attendance-<ENV> -n main \
+  --query properties.outputs.webCustomDomainVerificationId.value -o tsv)
+```
+
+| Record | Name | Value |
+| --- | --- | --- |
+| `CNAME` | the app subdomain, e.g. `attendance` | `$FQDN` |
+| `TXT` | `asuid.` + that subdomain, e.g. `asuid.attendance` | `$ASUID` |
+
+The `TXT` record proves domain ownership; without it the certificate request is
+rejected even when the `CNAME` resolves. Both must be live before pass 3.
+
+## Production bootstrap
+
+> **Production is deliberately not part of any automated first-run.** Work through
+> this once, by hand, when the team decides to go live. Afterwards every release is
+> a `v*` tag plus an approval.
+
+Identical to the dev bootstrap above with `<ENV>` = `prod` and the environment name
+`production` on the GitHub side (the Azure resource group stays
+`rg-attendance-prod`). The corrections proven on dev all carry forward:
+
+- The federated-credential subject uses the **name@id** prefix:
+  `repo:cedarville-university@48759751/attendance-tracker@1345554752:environment:production`.
+  Confirm with `gh api /repos/cedarville-university/attendance-tracker/actions/oidc/customization/sub`.
+- The first bootstrap deploy keeps `deployRoleAssignments` at its default `true`
+  (it is Owner-run); the CI workflow passes `=false`.
+- The operator needs **Key Vault Secrets Officer** on the RBAC-mode vault before
+  seeding — subscription Owner grants the management plane only.
+- `PG_ADMIN_PASSWORD` reaches the workflow as a GitHub **environment secret** and
+  the job exports it as `env:`; never as `-p postgresAdministratorPassword=`.
+- `az extension add --name containerapp` before any `az containerapp*` call.
+- `az postgres flexible-server firewall-rule` flags are `--server-name` + `--name`.
+
+Three things differ from dev:
+
+- **Six** Key Vault secrets, not five: the five listed above plus `setup-token`,
+  because `prod.bicepparam` sets `setupTokenEnabled = true` for go-live.
+- The three-pass sequence above, because prod is the first environment stood up
+  after `bindCustomDomain` existed.
+- **Suffixed resource names.** `prod.bicepparam` sets `globalNameSuffix = 'cu'`, so
+  the vault is `kv-attendance-prod-cu`, the server `psql-attendance-prod-cu`, and
+  the registry `acrattendanceprodcu`.
+
+### Why `globalNameSuffix` exists
+
+Key Vault, Postgres Flexible Server, and ACR names are **globally unique DNS
+labels** — unique across all of Azure, not just this subscription. The first prod
+bootstrap failed on `VaultAlreadyExists` and `ServerNameAlreadyExists` for the bare
+`kv-attendance-prod` / `psql-attendance-prod`: unrelated tenants hold them.
+Nothing was soft-deleted locally; `checkNameAvailability` confirmed the names are
+genuinely taken.
+
+`globalNameSuffix` (max 8 chars, default empty) is appended to those three names
+only. It defaults to empty so `dev` keeps the names it was built with — **changing
+it on a live environment renames, which means recreates, all three.**
+
+Before choosing a suffix for a new environment, probe all three:
+
+```bash
+SUB=$(az account show --query id -o tsv)
+az rest --method post \
+  --url "https://management.azure.com/subscriptions/$SUB/providers/Microsoft.KeyVault/checkNameAvailability?api-version=2023-07-01" \
+  --body '{"name":"kv-attendance-<ENV>-<SUFFIX>","type":"Microsoft.KeyVault/vaults"}' \
+  --query '{available:nameAvailable,reason:reason}'
+```
+
+A `false` with reason `Invalid` means the name broke a length or charset rule
+(Key Vault caps at 24 characters), not that it is taken. `main.bicep` truncates the
+*base* rather than the suffix when it has to fit, because a clipped uniquifier is
+not unique.
+
+### `setup-token` is temporary
+
+`/admin.html` normally requires an LTI Administrator-role session — which cannot
+exist until the first Canvas registration is seeded, which is what `/admin.html` is
+for. `SETUP_TOKEN` bridges that gap once. As soon as an Administrator launch
+reaches the admin page:
+
+```bash
+# in prod.bicepparam
+param setupTokenEnabled = false
+
+az keyvault secret delete --vault-name kv-attendance-prod --name setup-token
+```
+
+then cut a release so the web app drops the env var.
 
 ## Alert verification
 
