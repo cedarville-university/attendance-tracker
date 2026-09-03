@@ -64,6 +64,21 @@ Unchanged: `postgresStorageGb = 64`, `postgresBackupRetentionDays = 14`,
 Expected steady-state cost: roughly $95–120/mo across Postgres, one always-warm
 Container App replica, ACR, and Log Analytics.
 
+> **Amended 2026-09-03 during execution.** Three things this design got wrong, all
+> found by running it:
+>
+> 1. `bindCustomDomain` was specified as a boolean and a three-pass bootstrap. Azure
+>    also refuses to create a managed certificate unless the hostname is *already*
+>    registered on an app in the environment, which the boolean could not express.
+>    It became `customDomainMode` (`none` | `hostname` | `bound`) and a four-pass
+>    bootstrap. The section below is kept as written; see `infra/azure/README.md`
+>    for the shipped behavior.
+> 2. Key Vault, Postgres, and ACR names are globally unique across all of Azure and
+>    the bare `attendance-prod` forms are taken. Added `globalNameSuffix`, set to
+>    `cu` for prod.
+> 3. The prod resource names in this document (`kv-attendance-prod`,
+>    `psql-attendance-prod`) are therefore wrong; the real ones carry the suffix.
+
 ### New parameter: `bindCustomDomain`
 
 `web.bicep` creates a `managedCertificates` resource whenever a real (non-

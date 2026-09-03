@@ -90,8 +90,10 @@ jobs:
           # config re-PUT intermittently returns ServerIsBusy. The deploy is idempotent, so retry.
           n=0
           # identityApiUrl: -p override wins over prod.bicepparam's ''.
-          # bindCustomDomain is deliberately NOT passed — pipeline deploys always bind the
-          # custom domain. Only the from-scratch bootstrap passes it as false (see infra/azure/README.md).
+          # customDomainMode is deliberately NOT passed, so it defaults to 'bound'. In steady
+          # state the hostname is registered and the certificate exists, so that is a no-op.
+          # Only a from-scratch environment climbs the none -> hostname -> bound ladder by
+          # hand, one deployment per rung (see infra/azure/README.md).
           until az deployment group create -g "${{ vars.RESOURCE_GROUP }}" \
             -f infra/azure/main.bicep -p infra/azure/environments/prod.bicepparam \
             -p containerImage="$CURRENT_IMAGE" \
