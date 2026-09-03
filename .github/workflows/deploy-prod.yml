@@ -1,25 +1,41 @@
-name: deploy-dev
+name: deploy-prod
 
 on:
   push:
-    tags: ['dev-v*']  # dev release is cut with `git tag dev-vX.Y.Z && git push origin dev-vX.Y.Z`
+    tags: ['v*']  # production release is cut with `git tag vX.Y.Z && git push origin vX.Y.Z`
   workflow_dispatch:
-# `v*` belongs to deploy-prod.yml. The two patterns are disjoint on purpose: when both
-# workflows matched `v*`, a single tag rolled dev and prod at once, so there was no way to
-# cut a production release without also moving dev.
+# Structurally identical to deploy-dev.yml. The differences are deliberate and limited to:
+# name, trigger (v* vs dev-v*), environment, concurrency group, param file, and the guard job.
+# Anything else that diverges is a bug in one of the two files.
 
 permissions:
   contents: read
   id-token: write
 
 concurrency:
-  group: deploy-dev
+  group: deploy-prod
   cancel-in-progress: false
 
 jobs:
-  build-push:
+  # Nothing but a checkpoint. Carrying `environment: production` makes the environment's
+  # required-reviewer rule suspend the run here — before an image is built and long before
+  # anything touches Azure. Pushing a v* tag is a proposal; a human turns it into a deploy.
+  guard:
     runs-on: ubuntu-latest
-    environment: dev
+    environment: production
+    timeout-minutes: 5
+    steps:
+      - name: Announce the target
+        run: |
+          echo "environment : production"
+          echo "ref         : ${{ github.ref }}"
+          echo "commit      : ${{ github.sha }}"
+          echo "image tag   : ${{ github.sha }}"
+
+  build-push:
+    needs: guard
+    runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 30
     outputs:
       image: ${{ steps.meta.outputs.image }}
@@ -44,11 +60,11 @@ jobs:
           cache-to: type=gha,mode=max
 
   infra:
-    needs: build-push
+    needs: [guard, build-push]
     runs-on: ubuntu-latest
-    environment: dev
+    environment: production
     timeout-minutes: 25
-    # environments/dev.bicepparam resolves postgresAdministratorPassword via
+    # environments/prod.bicepparam resolves postgresAdministratorPassword via
     # readEnvironmentVariable('PG_ADMIN_PASSWORD') when the param file is compiled
     # on the runner, so the password must be present in the job environment here.
     # A `-p postgresAdministratorPassword=...` override on the CLI is ignored /
@@ -73,10 +89,11 @@ jobs:
           # Postgres Flexible Server serialises control-plane ops; the require_secure_transport
           # config re-PUT intermittently returns ServerIsBusy. The deploy is idempotent, so retry.
           n=0
-          # identityApiUrl: -p override wins over dev.bicepparam's ''. When vars.IDENTITY_API_URL
-          # is unset the arg is '' — identical to prior behaviour, so safe to land before the var exists.
+          # identityApiUrl: -p override wins over prod.bicepparam's ''.
+          # bindCustomDomain is deliberately NOT passed — pipeline deploys always bind the
+          # custom domain. Only the from-scratch bootstrap passes it as false (see infra/azure/README.md).
           until az deployment group create -g "${{ vars.RESOURCE_GROUP }}" \
-            -f infra/azure/main.bicep -p infra/azure/environments/dev.bicepparam \
+            -f infra/azure/main.bicep -p infra/azure/environments/prod.bicepparam \
             -p containerImage="$CURRENT_IMAGE" \
             -p identityApiUrl='${{ vars.IDENTITY_API_URL }}' \
             -p deployRoleAssignments=false ; do
@@ -87,9 +104,9 @@ jobs:
           done
 
   migrate:
-    needs: [build-push, infra]
+    needs: [guard, build-push, infra]
     runs-on: ubuntu-latest
-    environment: dev
+    environment: production
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -125,9 +142,9 @@ jobs:
             --name "ci-migrate-${{ github.run_id }}" --yes || true
 
   deploy:
-    needs: [build-push, migrate]
+    needs: [guard, build-push, migrate]
     runs-on: ubuntu-latest
-    environment: dev
+    environment: production
     timeout-minutes: 15
     steps:
       - uses: azure/login@v2

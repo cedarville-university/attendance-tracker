@@ -15,6 +15,9 @@ param appBaseUrl string
 param allowedTargetLinkUris string
 param cpu string
 param memory string
+@description('Days of audit_events history to keep (RETENTION_DAYS). 0 omits the variable entirely, which makes the worker maintenance sweep a no-op. Only the worker runs the sweep, so this belongs on the job and not on the web app.')
+@minValue(0)
+param retentionDays int = 0
 
 var kvRef = '${keyVaultUri}secrets/'
 
@@ -55,7 +58,7 @@ resource job 'Microsoft.App/jobs@2024-03-01' = {
           image: image
           resources: { cpu: json(cpu), memory: memory }
           command: ['node', '--import', './server/dist/telemetry/otel-preload.js', 'server/dist/worker.js']
-          env: [
+          env: concat([
             { name: 'NODE_ENV', value: 'production' }
             { name: 'RUN_MIGRATIONS_ON_BOOT', value: 'false' }
             { name: 'APP_BASE_URL', value: appBaseUrl }
@@ -68,7 +71,9 @@ resource job 'Microsoft.App/jobs@2024-03-01' = {
             { name: 'CARD_FINGERPRINT_SECRET', secretRef: 'card-fingerprint-secret' }
             { name: 'IDENTITY_API_KEY', secretRef: 'identity-api-key' }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'appinsights-connection-string' }
-          ]
+          ], retentionDays > 0 ? [
+            { name: 'RETENTION_DAYS', value: string(retentionDays) }
+          ] : [])
         }
       ]
     }

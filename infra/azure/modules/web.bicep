@@ -19,14 +19,18 @@ param identityApiUrl string
 param identityApiKeyName string
 @description('Bare public hostname for the Container App custom domain, e.g. attendance-dev.cedarville.edu. Empty or a CHANGEME placeholder disables the binding.')
 param appHostname string = ''
+@description('When false, skip the managed certificate and binding even for a real appHostname — so a from-scratch environment can boot with the correct APP_BASE_URL while its DNS records do not exist yet. See main.bicep.')
+param bindCustomDomain bool = true
 @description('When true, wire SETUP_TOKEN from the `setup-token` Key Vault secret (admin/setup page bootstrap). The secret MUST be seeded in the vault first or the deploy fails to resolve it. Enable in dev only; leave off for stage/prod.')
 param setupTokenEnabled bool = false
 
 var kvRef = '${keyVaultUri}secrets/'
 
-// Only bind a custom domain when a real hostname is supplied. Placeholder envs
-// (prod today still has appHostname = 'CHANGEME...') deploy cleanly with no binding.
-var useCustomDomain = !empty(appHostname) && !contains(toLower(appHostname), 'changeme')
+// Only bind a custom domain when a real hostname is supplied AND the caller has
+// confirmed its DNS records exist. Placeholder envs deploy cleanly with no binding;
+// so does a from-scratch bootstrap that knows its hostname but cannot yet point
+// DNS at an app that does not exist (bindCustomDomain=false).
+var useCustomDomain = bindCustomDomain && !empty(appHostname) && !contains(toLower(appHostname), 'changeme')
 
 var environmentName = last(split(environmentId, '/'))
 
@@ -120,3 +124,4 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
 
 output fqdn string = app.properties.configuration.ingress.fqdn
 output name string = app.name
+output customDomainVerificationId string = app.properties.customDomainVerificationId

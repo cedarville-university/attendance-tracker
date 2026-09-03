@@ -36,6 +36,11 @@ param identityApiKeyName string = 'attendance-resolver'
 param setupTokenEnabled bool = false
 @description('When false, skip creating the managed-identity role assignments in the foundation modules. Set false for CI/pipeline deploys — the assignments are created once at bootstrap by an Owner. Default true so a first bootstrap works.')
 param deployRoleAssignments bool = true
+@description('When false, skip the managed certificate and custom-domain binding even though appHostname is a real hostname. A managed certificate validates against LIVE DNS at provisioning time, and DNS cannot point at the Container App before the app exists — so a from-scratch environment deploys its first two passes with false, then binds on a third pass once the records are in place. CI never passes this; pipeline deploys always bind.')
+param bindCustomDomain bool = true
+@description('Days of audit_events history the worker keeps (RETENTION_DAYS). 0 leaves the variable unset, which makes the retention sweep a no-op. Attendance records are never pruned regardless.')
+@minValue(0)
+param retentionDays int = 0
 
 var namePrefix = 'attendance-${environmentName}'
 var tags = {
@@ -132,6 +137,7 @@ module web 'modules/web.bicep' = {
     appBaseUrl: 'https://${appHostname}'
     allowedTargetLinkUris: 'https://${appHostname}/index.html'
     appHostname: appHostname
+    bindCustomDomain: bindCustomDomain
     cpu: containerCpu
     memory: containerMemory
     minReplicas: webMinReplicas
@@ -160,6 +166,7 @@ module workerJob 'modules/worker-job.bicep' = {
     allowedTargetLinkUris: 'https://${appHostname}/index.html'
     cpu: containerCpu
     memory: containerMemory
+    retentionDays: retentionDays
   }
 }
 
@@ -187,5 +194,7 @@ output logAnalyticsWorkspaceId string = observability.outputs.workspaceId
 output appInsightsConnectionString string = observability.outputs.appInsightsConnectionString
 output webAppFqdn string = web.outputs.fqdn
 output webAppName string = web.outputs.name
+@description('Value for the asuid.<subdomain> TXT record that proves domain ownership before a managed certificate can issue.')
+output webCustomDomainVerificationId string = web.outputs.customDomainVerificationId
 output workerJobName string = workerJob.outputs.name
 output postgresFqdn string = postgres.outputs.fqdn
