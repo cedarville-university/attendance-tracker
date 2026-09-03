@@ -20,6 +20,13 @@ jobs:
   # Nothing but a checkpoint. Carrying `environment: production` makes the environment's
   # required-reviewer rule suspend the run here — before an image is built and long before
   # anything touches Azure. Pushing a v* tag is a proposal; a human turns it into a deploy.
+  #
+  # This is the ONLY job on `production`, and that is the whole point: GitHub raises a
+  # separate protection request per job, so putting the reviewer-protected environment on
+  # all five jobs cost five approval clicks per release. The working jobs below sit on
+  # `production-deploy`, which holds the same configuration with no protection rule. They
+  # all `needs: guard`, so nothing reaches Azure until this job is approved — the gate is
+  # enforced by the job graph rather than by repeating the prompt.
   guard:
     runs-on: ubuntu-latest
     environment: production
@@ -35,7 +42,7 @@ jobs:
   build-push:
     needs: guard
     runs-on: ubuntu-latest
-    environment: production
+    environment: production-deploy
     timeout-minutes: 30
     outputs:
       image: ${{ steps.meta.outputs.image }}
@@ -62,7 +69,7 @@ jobs:
   infra:
     needs: [guard, build-push]
     runs-on: ubuntu-latest
-    environment: production
+    environment: production-deploy
     timeout-minutes: 25
     # environments/prod.bicepparam resolves postgresAdministratorPassword via
     # readEnvironmentVariable('PG_ADMIN_PASSWORD') when the param file is compiled
@@ -108,7 +115,7 @@ jobs:
   migrate:
     needs: [guard, build-push, infra]
     runs-on: ubuntu-latest
-    environment: production
+    environment: production-deploy
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -146,7 +153,7 @@ jobs:
   deploy:
     needs: [guard, build-push, migrate]
     runs-on: ubuntu-latest
-    environment: production
+    environment: production-deploy
     timeout-minutes: 15
     steps:
       - uses: azure/login@v2

@@ -137,10 +137,34 @@ that the `production` environment's required-reviewer rule suspends the run
 sync — `diff .github/workflows/deploy-dev.yml .github/workflows/deploy-prod.yml`
 should show only those six.
 
-The `production` GitHub Environment uses **custom** deployment branch policies
-(`v*` as a tag policy, `main` as a branch policy), not `protected_branches`. A
-`protected_branches` policy is evaluated against branches and silently blocks
-tag-triggered deployments, which is precisely this pipeline's trigger.
+### Two production environments, one approval
+
+Production spans **two** GitHub Environments, and the split is load-bearing:
+
+| Environment | Holds | Protection | Used by |
+| --- | --- | --- | --- |
+| `production` | nothing | required reviewer | `guard` only |
+| `production-deploy` | the 11 variables + `PG_ADMIN_PASSWORD` | none | the four working jobs |
+
+GitHub raises a **separate protection request per job**, not per run. With all five
+jobs on a reviewer-protected environment, one release cost five approval clicks —
+one as each job became eligible. Confining the protected environment to `guard`
+brings that back to one.
+
+The gate still holds, because every working job declares `needs: guard` and nothing
+runs until that job is approved. The approval is enforced by the job graph; the
+environment only decides how many times you are asked.
+
+`production-deploy` carries the same deployment branch policies as `production`, so
+it cannot be reached from an arbitrary ref even by a workflow that skips `guard`.
+
+Both use **custom** deployment branch policies (`v*` as a tag policy, `main` as a
+branch policy), not `protected_branches`. A `protected_branches` policy is evaluated
+against branches and silently blocks tag-triggered deployments, which is precisely
+this pipeline's trigger.
+
+Keep the configuration in `production-deploy` only. Splitting it across both
+environments gives you two sources of truth that drift.
 
 ## Real ProxID resolver on `dev`
 
