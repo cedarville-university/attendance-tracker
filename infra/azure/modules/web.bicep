@@ -19,18 +19,21 @@ param identityApiUrl string
 param identityApiKeyName string
 @description('Bare public hostname for the Container App custom domain, e.g. attendance-dev.cedarville.edu. Empty or a CHANGEME placeholder disables the binding.')
 param appHostname string = ''
-@description('When false, skip the managed certificate and binding even for a real appHostname — so a from-scratch environment can boot with the correct APP_BASE_URL while its DNS records do not exist yet. See main.bicep.')
-param bindCustomDomain bool = true
+@description('none | hostname | bound — how far to take the custom domain. See main.bicep for why this is a ladder rather than a boolean.')
+@allowed(['none', 'hostname', 'bound'])
+param customDomainMode string = 'bound'
 @description('When true, wire SETUP_TOKEN from the `setup-token` Key Vault secret (admin/setup page bootstrap). The secret MUST be seeded in the vault first or the deploy fails to resolve it. Enable in dev only; leave off for stage/prod.')
 param setupTokenEnabled bool = false
 
 var kvRef = '${keyVaultUri}secrets/'
 
-// Only bind a custom domain when a real hostname is supplied AND the caller has
-// confirmed its DNS records exist. Placeholder envs deploy cleanly with no binding;
-// so does a from-scratch bootstrap that knows its hostname but cannot yet point
-// DNS at an app that does not exist (bindCustomDomain=false).
-var useCustomDomain = bindCustomDomain && !empty(appHostname) && !contains(toLower(appHostname), 'changeme')
+// A placeholder or empty hostname is never registered, whatever the mode asks for.
+var hostnameIsReal = !empty(appHostname) && !contains(toLower(appHostname), 'changeme')
+// Registering the hostname (binding disabled) is what makes the certificate request
+// legal: Azure answers RequireCustomHostnameInEnvironment otherwise. So `bound`
+// implies `hostname`, and the two cannot be applied in a single deployment.
+var registerHostname = hostnameIsReal && customDomainMode != 'none'
+var bindCertificate = hostnameIsReal && customDomainMode == 'bound'
 
 var environmentName = last(split(environmentId, '/'))
 
@@ -38,7 +41,7 @@ resource managedEnv 'Microsoft.App/managedEnvironments@2024-03-01' existing = {
   name: environmentName
 }
 
-resource webCert 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' = if (useCustomDomain) {
+resource webCert 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' = if (bindCertificate) {
   parent: managedEnv
   name: 'cert-${replace(appHostname, '.', '-')}'
   location: location
@@ -65,11 +68,14 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
         targetPort: 3000
         transport: 'auto'
         allowInsecure: false
-        customDomains: useCustomDomain ? [
-          {
+        customDomains: registerHostname ? [
+          bindCertificate ? {
             name: appHostname
             bindingType: 'SniEnabled'
             certificateId: webCert.id
+          } : {
+            name: appHostname
+            bindingType: 'Disabled'
           }
         ] : null
       }

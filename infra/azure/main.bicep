@@ -36,8 +36,9 @@ param identityApiKeyName string = 'attendance-resolver'
 param setupTokenEnabled bool = false
 @description('When false, skip creating the managed-identity role assignments in the foundation modules. Set false for CI/pipeline deploys — the assignments are created once at bootstrap by an Owner. Default true so a first bootstrap works.')
 param deployRoleAssignments bool = true
-@description('When false, skip the managed certificate and custom-domain binding even though appHostname is a real hostname. A managed certificate validates against LIVE DNS at provisioning time, and DNS cannot point at the Container App before the app exists — so a from-scratch environment deploys its first two passes with false, then binds on a third pass once the records are in place. CI never passes this; pipeline deploys always bind.')
-param bindCustomDomain bool = true
+@description('How far to take the custom domain. Standing one up from scratch is a three-step ladder, because each step needs the previous one to already exist: `none` skips it entirely (DNS cannot point at a Container App before the app exists); `hostname` registers appHostname on the app with binding disabled, which validates it against live DNS; `bound` additionally issues the managed certificate and switches the binding to SNI — and Azure rejects certificate creation unless the hostname is ALREADY registered in the environment. Default `bound`: CI never passes this, and by the time a pipeline runs the ladder has been climbed.')
+@allowed(['none', 'hostname', 'bound'])
+param customDomainMode string = 'bound'
 @description('Days of audit_events history the worker keeps (RETENTION_DAYS). 0 leaves the variable unset, which makes the retention sweep a no-op. Attendance records are never pruned regardless.')
 @minValue(0)
 param retentionDays int = 0
@@ -144,7 +145,7 @@ module web 'modules/web.bicep' = {
     appBaseUrl: 'https://${appHostname}'
     allowedTargetLinkUris: 'https://${appHostname}/index.html'
     appHostname: appHostname
-    bindCustomDomain: bindCustomDomain
+    customDomainMode: customDomainMode
     cpu: containerCpu
     memory: containerMemory
     minReplicas: webMinReplicas
