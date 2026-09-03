@@ -1,0 +1,19 @@
+# Local development database. Required by `npm run dev`, `npm run worker`, and the test suites --
+# `npm test` fails at global setup if this server is not running. Only `attendance_tracker` is
+# created here; the separate test and e2e databases are created on demand by their own harnesses.
+# See docs/operations.md.
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: attendance_tracker
+      POSTGRES_PASSWORD: attendance_tracker
+      POSTGRES_DB: attendance_tracker
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  postgres-data:

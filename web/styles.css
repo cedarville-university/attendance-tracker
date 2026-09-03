@@ -1,0 +1,1070 @@
+:root {
+  color-scheme: light;
+
+  /* Neutrals carry a faint cool tint so the whole surface relates to CU Blue. */
+  --color-bg: #f1f4f8;
+  --color-panel: #ffffff;
+  --color-border: #d3dae2;
+  --color-text: #16202b;
+  --color-muted: #526577;
+  --color-idle-bg: #eaeef4;
+
+  /* Cedarville brand: CU Blue is the primary; CU Gold is a decoration-only
+     accent (poor text contrast) reserved for the header rule. */
+  --color-primary: #003963;
+  --color-primary-dark: #002c4d;
+  --color-accent: #fbb93a;
+
+  /* Semantic — functional, kept distinct from the brand hues. */
+  --color-danger: #b3261e;
+  --color-danger-bg: #fdecea;
+  --color-warning: #8a5a00;
+  --color-warning-bg: #fff4de;
+  --color-success: #146c2e;
+  --color-success-bg: #e8f5ea;
+
+  --radius: 8px; /* panels, surfaces */
+  --radius-sm: 6px; /* buttons, inputs, small controls */
+
+  /* One page measure, shared by the header, message strip, restore banner and
+     the main column so they all sit on the same axis. Wide enough for the
+     6-column attendance table to breathe on a classroom projector or a 1440+
+     desktop; prose inside still caps itself at 68ch. */
+  --measure: 1400px;
+  --gutter: var(--space-lg);
+
+  /* Spacing scale — every structural gap/padding pulls from here. */
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2.5rem;
+
+  /* Type. Deliberate native stacks — no web font (the app CSP is 'self'-only). */
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+
+  /* Fixed rem scale, ~1.2 ratio — dense app UI needs predictable sizes, not fluid. */
+  --text-2xs: 0.75rem; /* 12 — badges, table headers, micro eyebrows */
+  --text-xs: 0.8125rem; /* 13 — form hints, diagnostics */
+  --text-sm: 0.875rem; /* 14 — secondary text, table cells, form labels */
+  --text-md: 1rem; /* 16 — body */
+  --text-lg: 1.125rem; /* 18 — panel headings / summaries */
+  --text-xl: 1.375rem; /* 22 — page title */
+  --text-2xl: 1.75rem; /* 28 — Latest Scan headline, narrow layout */
+  --text-3xl: 2.375rem; /* 38 — Latest Scan headline once it spans the full measure */
+
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --leading-tight: 1.2;
+  --leading-normal: 1.55;
+}
+
+/* Form-shaped pages (admin setup) keep the narrower reading measure — the wide
+   one exists for the scanner's tables and would only strand a 9-field form. */
+.page-form {
+  --measure: 960px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+  background: var(--color-bg);
+  color: var(--color-text);
+  /* Full-bleed CU Gold rule. Lives here rather than on .app-header so the
+     header's text can be constrained to --measure without pulling the rule
+     in with it. */
+  border-top: 3px solid var(--color-accent);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3 {
+  line-height: var(--leading-tight);
+  font-weight: var(--weight-bold);
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* The gold rule stays full-bleed (it lives on <body>, above); the header's text
+   does not, so it lands on the same axis as the panels below. */
+.app-header {
+  max-width: var(--measure);
+  margin-inline: auto;
+  padding: var(--space-md) var(--gutter) var(--space-xs);
+}
+
+.app-header h1 {
+  margin: 0 0 var(--space-2xs);
+  font-size: var(--text-xl);
+  letter-spacing: -0.01em;
+  color: var(--color-primary);
+}
+
+.app-subtitle {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+  max-width: 68ch;
+}
+
+/* Horizontal dt/dd pairs: the header course-context strip and the
+   inline session tallies above the attendance table share this treatment. */
+.course-context,
+.stat-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs) var(--space-lg);
+  margin: var(--space-xs) 0 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.course-context[hidden],
+.stat-strip[hidden] {
+  display: none;
+}
+
+.course-context div,
+.stat-strip div {
+  display: flex;
+  gap: 0.35rem;
+  align-items: baseline;
+}
+
+.course-context dt,
+.stat-strip dt {
+  color: var(--color-muted);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.course-context dd,
+.stat-strip dd {
+  margin: 0;
+  font-weight: var(--weight-semibold);
+}
+
+.app-messages {
+  max-width: var(--measure);
+  margin-inline: auto;
+  padding: 0 var(--gutter);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.app-messages:not(:empty) {
+  margin-top: var(--space-sm);
+}
+
+.app-message {
+  padding: 0.6rem 0.9rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  background: var(--color-idle-bg);
+  font-size: var(--text-sm);
+}
+
+.app-message--error {
+  background: var(--color-danger-bg);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.app-message--warning {
+  background: var(--color-warning-bg);
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+}
+
+.restore-banner {
+  /* Same axis as the panels: the measure minus the gutter it would otherwise
+     have padded. */
+  max-width: calc(var(--measure) - 2 * var(--gutter));
+  width: calc(100% - 2 * var(--gutter));
+  margin: var(--space-sm) auto 0;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--color-warning-bg);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+
+.restore-banner[hidden] {
+  display: none;
+}
+
+.restore-banner p {
+  margin: 0;
+}
+
+.restore-banner-actions {
+  display: flex;
+  gap: var(--space-xs);
+}
+
+/* Page column. Base rhythm is --space-md between rows; tier boundaries
+   (.live-view, .tools) add their own larger margin on top of it. */
+.app-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  max-width: var(--measure);
+  margin: 0 auto;
+  padding: var(--space-md) var(--gutter) var(--space-xl);
+}
+
+.panel {
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-md) var(--space-lg);
+  /* Every wide table on this page lives in a .panel, and the .table-scroll that
+     owns the overflow is a *descendant*, not the panel itself. Without this the
+     panel's automatic minimum size resolves to the `white-space: nowrap` table's
+     min-content and the panel bursts out of its column. */
+  min-width: 0;
+}
+
+/* Reader + session controls: one bar, not two equal-weight cards. */
+.control-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm) var(--space-xl);
+  align-items: center;
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-sm) var(--space-md);
+}
+
+.control-bar-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+/* First-run nudge under the control bar; retires after the first connect. */
+.control-hint {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-muted);
+}
+
+.control-hint[hidden] {
+  display: none;
+}
+
+/* Canvas sync status. Was two bare paragraphs on the gray ground, which read as
+   stray debug output; now a quiet strip on the panel surface, status first. */
+.grade-sync {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2xs) var(--space-md);
+  padding: var(--space-xs) var(--space-md);
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.grade-sync[hidden] {
+  display: none;
+}
+
+.grade-sync p {
+  margin: 0;
+}
+
+#grade-sync-status-text {
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-sm);
+}
+
+/* Source order puts the standing explainer first; it is the least urgent thing
+   in the strip, so it follows the live status. */
+#grade-sync-explainer {
+  order: 1;
+  font-size: var(--text-xs);
+}
+
+/* A slim bar for a single labelled control acting on the panel beneath it.
+   `.button-row[hidden]` still wins on specificity, so toggling `hidden` in
+   ui.js keeps working. */
+.control-strip {
+  margin: 0;
+  align-items: center;
+  gap: var(--space-xs) var(--space-sm);
+  padding: var(--space-xs) var(--space-md);
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+/* Sized to hold a long "Name — 1234567" without growing to fill the strip and
+   becoming the loudest thing in it. */
+.control-strip select {
+  flex: 0 1 22rem;
+  min-width: 0;
+}
+
+/* Live-monitoring tier, read top to bottom: the scan readout spans the full
+   measure, then the control that acts on the log, then the log itself. The
+   readout used to be a narrow sticky column beside the table, which capped the
+   6-column table at ~740px and shrank the one thing meant to be legible from
+   across a room. Extra top margin sets the tier apart from the control bar. */
+.live-view {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-md);
+  margin-top: var(--space-xs);
+}
+
+@media (min-width: 900px) {
+  /* Reader and session clusters share one line here; a rule keeps them
+     visually distinct. Scoped to the wide layout so a wrapped, stacked
+     group never shows a stray vertical edge. */
+  .control-bar-group + .control-bar-group {
+    border-inline-start: 1px solid var(--color-border);
+    padding-inline-start: var(--space-md);
+  }
+}
+
+/* Setup tier: pushed down and away, spaced tighter within. */
+.tools {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin-top: var(--space-xl);
+}
+
+.tools-divider {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.panel--tool {
+  background: var(--color-bg);
+}
+
+.panel--tool > summary {
+  color: var(--color-muted);
+}
+
+.panel h2 {
+  margin: 0 0 var(--space-sm);
+  font-size: var(--text-lg);
+  letter-spacing: -0.005em;
+}
+
+.panel h3 {
+  margin: var(--space-md) 0 var(--space-xs);
+  font-size: var(--text-md);
+}
+
+.panel-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+.muted {
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+  max-width: 68ch;
+}
+
+.button-row {
+  display: flex;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+  margin: var(--space-xs) 0;
+  align-items: center;
+}
+
+/* An explicit display on .button-row beats the bare [hidden] attribute, so restore it. */
+.button-row[hidden] {
+  display: none;
+}
+
+/* A label introducing a control in a button row ("Include", "Student without a
+   card") is secondary to the control itself. `.toggle-row` labels are excluded —
+   those are checkbox labels and read at body size. */
+.button-row > label:not(.toggle-row) {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-muted);
+}
+
+button {
+  font: inherit;
+  padding: 0.55rem 1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-panel);
+  color: var(--color-text);
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--color-idle-bg);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Primary: filled CU Blue. Secondary: quiet tinted fill. Danger: outlined. */
+button.primary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--color-primary-dark);
+  border-color: var(--color-primary-dark);
+}
+
+button.secondary {
+  background: var(--color-idle-bg);
+  border-color: var(--color-border);
+}
+
+button.secondary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-idle-bg) 90%, var(--color-text));
+}
+
+button.danger {
+  background: var(--color-panel);
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+button.danger:hover:not(:disabled) {
+  background: var(--color-danger-bg);
+}
+
+/* Armed state for two-step inline confirmation (see confirm-inline.js). */
+button.is-confirming {
+  background: var(--color-danger);
+  border-color: var(--color-danger);
+  color: #fff;
+}
+
+/* Dropdowns share the button's box exactly — same padding block, same radius,
+   same border token, so a select and a button sitting in one .button-row line up
+   instead of a 23px native widget next to a 44px button. `appearance: none` is
+   required: macOS ignores height/radius/border on a native select. The chevron is
+   a data: URI (CSP allows `img-src 'self' data:`), tinted to --color-muted so it
+   reads as a control affordance rather than decoration. */
+select {
+  appearance: none;
+  font: inherit;
+  padding: 0.55rem 2.1rem 0.55rem 0.7rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  background-color: var(--color-panel);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5l5-5' fill='none' stroke='%23526577' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.7rem center;
+  background-size: 0.7rem 0.47rem;
+  cursor: pointer;
+  max-width: 100%;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+select:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-border) 55%, var(--color-text));
+}
+
+select:focus {
+  border-color: var(--color-primary);
+}
+
+select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: var(--color-idle-bg);
+}
+
+/* Compact variant for the per-row correction control (created in ui.js), where a
+   44px control would double every table row's height. */
+.correct-status-select {
+  padding: 0.15rem 1.6rem 0.15rem 0.45rem;
+  font-size: var(--text-sm);
+  background-position: right 0.45rem center;
+  background-size: 0.6rem 0.4rem;
+}
+
+/* Row actions: the correction dropdown and the Remove link on one baseline.
+   Left as a real table-cell (no flex) so the column keeps aligning with its
+   header. */
+.col-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.col-actions > * {
+  vertical-align: middle;
+}
+
+.col-actions .correct-status-select {
+  margin-inline-end: var(--space-sm);
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--color-primary);
+  text-decoration: underline;
+  font-size: var(--text-sm);
+}
+
+.link-button:hover:not(:disabled) {
+  background: none;
+  color: var(--color-primary-dark);
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin: var(--space-2xs) 0;
+}
+
+.field-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  margin: var(--space-xs) 0;
+  min-width: 0;
+}
+
+.field-row label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-muted);
+}
+
+.field-row input[type='text'],
+.field-row input[type='password'],
+.field-row input[type='url'] {
+  font: inherit;
+  padding: 0.45rem 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-panel);
+  width: 100%;
+  max-width: 34rem;
+  min-width: 0;
+}
+
+.field-row input:focus {
+  border-color: var(--color-primary);
+}
+
+/* Grouped fieldsets on the admin registration form. */
+.field-group {
+  min-width: 0;
+  margin: var(--space-md) 0 0;
+  padding: var(--space-sm) var(--space-md) var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.field-group legend {
+  padding: 0 var(--space-2xs);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-muted);
+}
+
+.field-hint {
+  font-size: var(--text-xs);
+  color: var(--color-muted);
+}
+
+.field-hint code {
+  font-size: 1em;
+  overflow-wrap: anywhere;
+}
+
+.field-optional {
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-normal);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-muted);
+}
+
+/* On-blur validation feedback for the admin registration form. */
+.field-error {
+  font-size: var(--text-xs);
+  color: var(--color-danger);
+}
+
+.field-row input:user-invalid {
+  border-color: var(--color-danger);
+}
+
+.fact-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem var(--space-sm);
+  margin: var(--space-xs) 0;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+
+.fact-list dt {
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+
+.fact-list dd {
+  margin: 0;
+  font-weight: var(--weight-semibold);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Long unbroken names / IDs must wrap rather than widen the sticky panel. */
+.stat-strip dd,
+.course-context dd {
+  overflow-wrap: anywhere;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+}
+
+.status-dot--connected {
+  background: var(--color-success);
+}
+
+.status-dot--disconnected {
+  background: var(--color-muted);
+}
+
+.status-dot--connecting {
+  background: var(--color-warning);
+  animation: status-dot-pulse 1s ease-in-out infinite;
+}
+
+@keyframes status-dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Latest scan panel: the most visually prominent element on the page. Now spans
+   the full measure, so the verdict gets real size and the supporting facts sit
+   beside it instead of under it. */
+.latest-scan {
+  border-width: 2px;
+  padding: var(--space-lg);
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.latest-scan-inner {
+  display: grid;
+  gap: var(--space-md);
+}
+
+/* "Latest scan" is an eyebrow, not the headline — the verdict below it is. */
+.latest-scan h2 {
+  margin: 0 0 var(--space-2xs);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-muted);
+}
+
+/* The verdict line carries the student's name at the top of the type scale --
+   it is the one thing here that differs scan to scan, so it earns the size.
+   The status glyph sits beside it as its own flex child: fixed width, baseline
+   aligned, and never pulled into the name's wrapping. */
+.latest-scan-status-text {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  /* nowrap, not wrap: a long name has to wrap inside its own span rather than
+     pushing itself below the glyph and leaving the ✓ orphaned on a line. */
+  flex-wrap: nowrap;
+  margin: 0;
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-bold);
+  line-height: var(--leading-tight);
+  letter-spacing: -0.015em;
+}
+
+.latest-scan-glyph {
+  flex: none;
+  /* Glyphs render optically larger than caps at the same size. */
+  font-size: 0.9em;
+  line-height: 1;
+}
+
+.latest-scan-glyph[hidden] {
+  display: none;
+}
+
+/* A long unbroken name wraps inside the column rather than widening the panel. */
+#latest-scan-headline {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+
+@media (min-width: 900px) {
+  .latest-scan {
+    padding: var(--space-lg) var(--space-xl);
+  }
+
+  .latest-scan-inner {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-xl);
+  }
+
+  .latest-scan-status-text {
+    font-size: var(--text-3xl);
+  }
+
+  /* Facts turn into a labelled row: two grid rows, filled column by column, so
+     Name / University ID / Card code / Time read left to right. The column floor
+     keeps the row from reshuffling on every scan as values change length. */
+  .latest-scan-facts {
+    grid-template-columns: none;
+    grid-template-rows: auto auto;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(7rem, max-content);
+    justify-content: end;
+    gap: 0 var(--space-xl);
+    margin: 0;
+  }
+
+  .latest-scan-facts dt {
+    font-size: var(--text-2xs);
+    font-weight: var(--weight-medium);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+}
+
+.latest-scan--idle {
+  background: var(--color-idle-bg);
+  border-color: var(--color-border);
+}
+
+.latest-scan--pending {
+  background: color-mix(in srgb, var(--color-primary) 8%, var(--color-panel));
+  border-color: var(--color-primary);
+}
+
+.latest-scan--present {
+  background: var(--color-success-bg);
+  border-color: var(--color-success);
+}
+
+.latest-scan--lookup_error {
+  background: var(--color-warning-bg);
+  border-color: var(--color-warning);
+}
+
+/* Unexpected students get the strongest visual treatment: not just red
+   background/border, but bold status text with an explicit icon+label so
+   the warning does not rely on color alone. */
+.latest-scan--unexpected {
+  background: var(--color-danger-bg);
+  border-color: var(--color-danger);
+  border-width: 3px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-danger) 15%, transparent);
+}
+
+.latest-scan--unexpected .latest-scan-status-text {
+  color: var(--color-danger);
+}
+
+/* Long tables scroll inside their own panel rather than pushing the rest of the
+   page down; the header row stays put while they do. */
+.table-scroll {
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 60vh;
+  overscroll-behavior: contain;
+}
+
+table {
+  width: 100%;
+  border-collapse: separate; /* `collapse` drops borders on a sticky thead */
+  border-spacing: 0;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--color-panel);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-muted);
+}
+
+/* Tool panels sit on the gray ground, so their sticky header must match. */
+.panel--tool th {
+  background: var(--color-bg);
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.02em;
+  background: var(--color-idle-bg);
+}
+
+.status-badge--present {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.status-badge--unexpected {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.status-badge--lookup_error {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+
+.status-badge--pending {
+  background: var(--color-idle-bg);
+  color: var(--color-muted);
+}
+
+details.panel > summary {
+  cursor: pointer;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.005em;
+  padding: 0.1rem 0;
+}
+
+.diagnostics-body,
+.details-body {
+  margin-top: var(--space-sm);
+}
+
+.details-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+.diag-pre {
+  background: #0b1220;
+  color: #d7e2f2;
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.diag-report-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.diag-report-entry {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.6rem;
+  font-size: var(--text-xs);
+}
+
+.diag-report-entry-header {
+  display: flex;
+  justify-content: space-between;
+  color: var(--color-muted);
+  margin-bottom: 0.2rem;
+}
+
+.diag-report-hex,
+.diag-report-parsed {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+/* Loading affordance: neutral grayscale shimmer, no brand colour. Used for
+   the Canvas roster table body while the NRPS call is in flight. */
+.skeleton {
+  display: block;
+  height: 1rem;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    90deg,
+    var(--color-idle-bg) 25%,
+    var(--color-border) 37%,
+    var(--color-idle-bg) 63%
+  );
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+
+.skeleton-row td {
+  padding-block: 0.55rem;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+    background: var(--color-idle-bg);
+  }
+}
+
+@media (max-width: 640px) {
+  th,
+  td {
+    white-space: normal;
+  }
+}
+
+/* Reference roster: three short columns. Left un-capped they stretch across the
+   full measure and put 300px of air between a name and its ID. */
+#roster-panel table {
+  max-width: 60rem;
+}
+
+/* Past sessions panel */
+#session-history-panel .is-deleted .col-opened,
+#session-history-panel .is-deleted .col-label,
+#session-history-panel .is-deleted .col-started-by {
+  opacity: 0.55;
+}
+#session-history-panel .status-badge[data-state='deleted'] {
+  background: var(--color-idle-bg);
+  color: var(--color-muted);
+}
+#session-history-panel .col-actions {
+  white-space: nowrap;
+}
+#session-history-panel .col-actions .link-button + .link-button {
+  margin-left: 0.5rem;
+}

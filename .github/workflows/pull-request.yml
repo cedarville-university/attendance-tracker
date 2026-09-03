@@ -1,0 +1,104 @@
+name: pull-request
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: attendance_tracker
+          POSTGRES_PASSWORD: attendance_tracker
+          POSTGRES_DB: attendance_tracker
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U attendance_tracker"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://attendance_tracker:attendance_tracker@localhost:5432/attendance_tracker
+      TEST_DATABASE_URL: postgres://attendance_tracker:attendance_tracker@localhost:5432/attendance_tracker_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: attendance_tracker
+          POSTGRES_PASSWORD: attendance_tracker
+          POSTGRES_DB: attendance_tracker
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U attendance_tracker"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      E2E_DATABASE_URL: postgres://attendance_tracker:attendance_tracker@localhost:5432/attendance_tracker_e2e
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: attendance:pr-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  dep-scan:
+    runs-on: ubuntu-latest
+    continue-on-error: true # advisory in Phase 7; promoted to blocking in Phase 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - uses: google/osv-scanner-action/osv-scanner-action@v1.9.2
+        with:
+          scan-args: |-
+            --lockfile=package-lock.json

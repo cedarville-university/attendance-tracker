@@ -1,0 +1,591 @@
+# Azure infrastructure (Bicep)
+
+Infrastructure-as-code for the attendance-tracker Canvas LTI deployment (spec §35–36).
+This tree defines the **foundation** resources (a user-assigned managed identity,
+Azure Container Registry, Log Analytics workspace + workspace-based Application
+Insights, and a Key Vault) plus the **compute** layer: a Postgres Flexible Server,
+a Container Apps managed environment, the web Container App, the grade-worker
+Container Apps Job, and Azure Monitor alerts. The container image tag is supplied
+by the deploy pipeline on the CLI and the Postgres administrator password via the
+`PG_ADMIN_PASSWORD` environment variable — neither is ever committed (see
+[Secrets supplied at deploy time](#secrets-supplied-at-deploy-time)).
+
+**No secret values live in this tree.** The `.bicepparam` files hold only
+non-secret configuration; `CHANGEME` placeholders must be replaced per
+environment. Actual secrets are seeded directly into Key Vault out of band (see
+[Seed Key Vault secrets](#seed-key-vault-secrets)).
+
+## Layout
+
+```
+infra/azure/
+  main.bicep                     resourceGroup-scoped entry point
+  modules/
+    identity.bicep               user-assigned managed identity
+    registry.bicep               ACR + AcrPull role assignment
+    observability.bicep          Log Analytics + Application Insights
+    keyvault.bicep               Key Vault + Key Vault Secrets User role assignments
+    postgres.bicep               Postgres Flexible Server (TLS-only) + database
+    containerapp-env.bicep       Container Apps managed environment
+    web.bicep                    attendance-web Container App
+    worker-job.bicep             attendance-grade-worker Container Apps Job
+    alerts.bicep                 Azure Monitor action group + alert rules
+  environments/
+    dev.bicepparam
+    stage.bicepparam
+    prod.bicepparam
+```
+
+## Prerequisites
+
+- Azure CLI (`az`) 2.89+ with the Bicep CLI installed (`az bicep version`).
+- Logged in and the target subscription selected:
+
+  ```bash
+  az login
+  az account set --subscription <subscription-id>
+  ```
+
+- A resource group per environment, named `rg-attendance-<env>`:
+
+  ```bash
+  az group create -n rg-attendance-dev   -l eastus
+  az group create -n rg-attendance-stage -l eastus
+  az group create -n rg-attendance-prod  -l eastus
+  ```
+
+- Edit the relevant `environments/<env>.bicepparam` and replace every `CHANGEME`
+  (at minimum `appHostname` and `alertEmail`).
+
+## Secrets supplied at deploy time
+
+No secret value lives in this tree. Two parameters are injected by the caller:
+
+- **`postgresAdministratorPassword`** — each `.bicepparam` reads it from the
+  `PG_ADMIN_PASSWORD` environment variable (`readEnvironmentVariable`, no
+  fallback). The deploy pipeline / bootstrap script exports it from Key Vault or a
+  generated value; if it is unset the Bicep compile fails `BCP427` on purpose.
+- **`containerImage`** — has a `'REPLACED_BY_PIPELINE'` default in `main.bicep`;
+  pass the real `registry/repo:sha` ref with `-p containerImage=...`.
+
+```bash
+export PG_ADMIN_PASSWORD="$(openssl rand -base64 24)"   # throwaway for local checks
+```
+
+## Validate
+
+Template compile (no Azure calls):
+
+```bash
+az bicep build --file infra/azure/main.bicep
+```
+
+Per-environment param-file compile (needs `PG_ADMIN_PASSWORD` exported, above):
+
+```bash
+for e in dev stage prod; do
+  az bicep build-params --file infra/azure/environments/$e.bicepparam
+done
+```
+
+## Preview changes (what-if)
+
+```bash
+export PG_ADMIN_PASSWORD="$(openssl rand -base64 24)"
+
+az deployment group what-if \
+  -g rg-attendance-dev \
+  -f infra/azure/main.bicep \
+  -p infra/azure/environments/dev.bicepparam \
+  -p containerImage='mcr.microsoft.com/k8se/quickstart:latest'
+```
+
+## Deploy
+
+```bash
+export PG_ADMIN_PASSWORD="<from Key Vault / bootstrap>"
+
+az deployment group create \
+  -g rg-attendance-dev \
+  -f infra/azure/main.bicep \
+  -p infra/azure/environments/dev.bicepparam \
+  -p containerImage="$ACR_LOGIN_SERVER/attendance-tracker:$GIT_SHA"
+```
+
+Swap `dev` for `stage` / `prod` (resource group **and** param file) for the other
+environments.
+
+## CI/CD deploy trigger and promotion model
+
+`main` is the release branch. Tags divide the two environments, and the two tag
+patterns are disjoint on purpose — when both workflows matched `v*`, a single tag
+rolled dev and prod together.
+
+| Command | Workflow | Gate |
+| --- | --- | --- |
+| `git tag dev-vX.Y.Z && git push origin dev-vX.Y.Z` | `deploy-dev` | none |
+| `git tag vX.Y.Z && git push origin vX.Y.Z` | `deploy-prod` | `guard` job → required reviewer |
+| `gh workflow run deploy-{dev,prod}.yml` | either | approval on prod |
+
+There is no branch-push trigger on either workflow.
+
+`deploy-prod.yml` is structurally identical to `deploy-dev.yml` and differs in six
+places only: `name`, tag pattern, `environment`, `concurrency.group`, param file,
+and a leading `guard` job. `guard` does nothing but echo the target; it exists so
+that the `production` environment's required-reviewer rule suspends the run
+*before* an image is built and long before Azure is touched. Keep the two files in
+sync — `diff .github/workflows/deploy-dev.yml .github/workflows/deploy-prod.yml`
+should show only those six.
+
+The `production` GitHub Environment uses **custom** deployment branch policies
+(`v*` as a tag policy, `main` as a branch policy), not `protected_branches`. A
+`protected_branches` policy is evaluated against branches and silently blocks
+tag-triggered deployments, which is precisely this pipeline's trigger.
+
+## Real ProxID resolver on `dev`
+
+`dev` runs the **real** Cedarville ProxID resolver, not the mock:
+
+- The `identity-api-key` Key Vault secret holds the **real** resolver key (it
+  replaces the earlier `dev-placeholder-resolver-key`). The key value never
+  appears in the repo.
+- The `IDENTITY_API_URL` GitHub `dev`-environment **variable** holds the
+  non-secret URL **template**
+  `https://cedarvilledataproxyapi.azurewebsites.net/api/ProxId?id={CARD_CODE}&keyname={KEY_NAME}&key={KEY}`.
+  `deploy-dev.yml` passes it through as `-p identityApiUrl='${{ vars.IDENTITY_API_URL }}'`,
+  which overrides the empty value in `dev.bicepparam`.
+- `identityApiKeyName` is committed in `dev.bicepparam` as `ATTENDANCE` (the
+  resolver's `keyname` — an identifier, not a secret). `web.bicep` maps it to the
+  `IDENTITY_API_KEY_NAME` container env var, `identityApiUrl` to `IDENTITY_API_URL`,
+  and the `identity-api-key` KV secret to `IDENTITY_API_KEY` (`secretRef`).
+
+Resolver env contract (`server/src/identity/http-resolver.ts`):
+`createHttpIdentityResolverFromEnv()` needs `IDENTITY_API_URL` +
+`IDENTITY_API_KEY_NAME` + `IDENTITY_API_KEY` **all** set, or it returns `null` and
+the app falls back to `MockIdentityResolver`.
+
+> **Known gap — response field names not wired.** `http-resolver.ts` defaults
+> `universityIdField` to `redwoodId` (and `firstNameField` / `lastNameField` /
+> `emailField` to `firstName` / `lastName` / `email`), and `web.bicep` does **not**
+> set `IDENTITY_API_UNIVERSITY_ID_FIELD` or the other field-override env vars. If
+> the live ProxID JSON uses different keys, the first real scan (Task 22) fails
+> with `missing-university-id`. Fix when confirmed: add those override env vars to
+> `web.bicep`. Not fixed here.
+
+## Seed Key Vault secrets
+
+Run **after** the deployment has created the Key Vault. The vault name is emitted
+as the `keyVaultName` deployment output. Seed the secrets in this order (design
+doc §5); every value here is a real secret and must **never** be committed to the
+repository or placed in a `.bicepparam` file:
+
+```bash
+KV=$(az deployment group show -g rg-attendance-dev -n main \
+  --query properties.outputs.keyVaultName.value -o tsv)
+
+# 1. LTI tool signing keys as a JSON array of JWKs (generated by the tool's keygen).
+az keyvault secret set --vault-name "$KV" --name lti-tool-signing-keys-json \
+  --file ./lti-tool-signing-keys.json
+
+# 2. Card-fingerprint HMAC key (random 32+ bytes, base64).
+az keyvault secret set --vault-name "$KV" --name card-fingerprint-secret \
+  --value "$(openssl rand -base64 32)"
+
+# 3. Identity/roster resolver API key (issued by the identity service).
+az keyvault secret set --vault-name "$KV" --name identity-api-key \
+  --value "<identity-service-api-key>"
+
+# 4. Postgres connection string. Migrations live in server/migrations and are
+#    applied by the migrate job before each release.
+az keyvault secret set --vault-name "$KV" --name database-url \
+  --value "postgres://<user>:<password>@<host>:5432/<db>?sslmode=require"
+
+# 5. Application Insights connection string (deployment output
+#    appInsightsConnectionString, a @secure() output).
+az keyvault secret set --vault-name "$KV" --name appinsights-connection-string \
+  --value "<appinsights-connection-string>"
+```
+
+> **Secrets are NEVER committed.** No secret value belongs in this repository, in
+> a `.bicepparam` file, in a deployment parameter, or in shell history that is
+> checked in. The `.bicepparam` files carry non-secret configuration only.
+
+## GitHub OIDC federation (per environment)
+
+One-time bootstrap that stands up an environment's resource group, seeds its Key
+Vault, and wires GitHub Actions to deploy into it with a federated (password-less)
+credential. Run it once per `<ENV>` (`dev`, then `stage`, then `prod`); every
+step is parameterised so the three runs differ only in `<ENV>`.
+
+Placeholders used below:
+
+| Placeholder | Meaning | Example |
+| --- | --- | --- |
+| `<SUBSCRIPTION_ID>` | target Azure subscription GUID | `00000000-0000-0000-0000-000000000000` |
+| `<ENV>` | environment name | `dev` / `stage` / `prod` |
+| `rg-attendance-<ENV>` | resource group | `rg-attendance-dev` |
+| `id-attendance-<ENV>` | user-assigned managed identity (created by `main.bicep`) | `id-attendance-dev` |
+
+The federated credential is always:
+
+- **issuer** — `https://token.actions.githubusercontent.com`
+- **subject** — `repo:cedarville-university@<ORG_ID>/attendance-tracker@<REPO_ID>:environment:<ENV>`
+  (for this repo: `repo:cedarville-university@48759751/attendance-tracker@1345554752:environment:<ENV>`).
+  GitHub presents this `name@id` form, **not** the plain
+  `repo:cedarville-university/attendance-tracker:environment:<ENV>` — the Azure
+  federated credential `--subject` must match the presented value exactly.
+- **audience** — `api://AzureADTokenExchange`
+
+The exact subject prefix comes from
+`gh api /repos/cedarville-university/attendance-tracker/actions/oidc/customization/sub`
+(field `sub_claim_prefix`); the same prefix applies to every environment (`stage`,
+`prod`) because it is a repo-level property.
+
+> **Two-pass bootstrap.** `web.bicep` and `worker-job.bicep` declare their
+> `configuration.secrets[]` as Key Vault references, which the Container Apps
+> resource provider resolves **when it provisions the revision**. On a
+> from-scratch environment those secrets do not exist yet, so the **first**
+> `az deployment group create` provisions the whole foundation (identity, ACR,
+> Log Analytics, App Insights, Key Vault + its managed-identity role assignment,
+> Postgres, the Container Apps environment) but the `web` app and `worker` job
+> **fail** with `unable to fetch secret '…' using Managed identity`. That is
+> expected. Seed the secrets (Step 2), then run the **same** deploy command
+> again — it is idempotent and `web` + `worker` provision on the second pass.
+
+### Step 1 — Resource group + first `main.bicep` deploy (foundation)
+
+`postgresAdministratorPassword` is **not** a CLI parameter: every
+`environments/<ENV>.bicepparam` resolves it with
+`readEnvironmentVariable('PG_ADMIN_PASSWORD')` at param-file compile time, so it
+must be exported into the environment **before** the `az deployment` call (see
+[Secrets supplied at deploy time](#secrets-supplied-at-deploy-time)). The web app
+starts on the Microsoft quickstart image; Task 19's first pipeline run replaces it
+with the real `registry/repo:sha`.
+
+```bash
+az account set --subscription "<SUBSCRIPTION_ID>"
+az group create -n rg-attendance-<ENV> -l eastus
+
+PG_PW="$(openssl rand -base64 24)"          # keep this value — reused in Step 2 and Step 5
+export PG_ADMIN_PASSWORD="$PG_PW"           # consumed by <ENV>.bicepparam's readEnvironmentVariable
+
+# Recommended: schema-check against live ARM before the real create.
+az deployment group validate -g rg-attendance-<ENV> \
+  -f infra/azure/main.bicep \
+  -p infra/azure/environments/<ENV>.bicepparam \
+  -p containerImage='mcr.microsoft.com/k8se/quickstart:latest' -o table
+
+# First pass — foundation succeeds; web + worker fail (secrets not seeded yet).
+az deployment group create -g rg-attendance-<ENV> \
+  -f infra/azure/main.bicep \
+  -p infra/azure/environments/<ENV>.bicepparam \
+  -p containerImage='mcr.microsoft.com/k8se/quickstart:latest' \
+  --query 'properties.outputs' -o json | tee /tmp/<ENV>-outputs.json
+```
+
+Even though the deployment reports `Failed`, the outputs are still emitted and the
+foundation resources exist. Expected outputs: `containerRegistryLoginServer`,
+`managedIdentityClientId`, `managedIdentityPrincipalId`, `keyVaultName`,
+`keyVaultUri`, `webAppName`, `workerJobName`, `postgresFqdn`,
+`appInsightsConnectionString`. (Grab the values from `az deployment group show -g
+rg-attendance-<ENV> -n main --query properties.outputs` if the pipe did not
+capture them.)
+
+### Step 2 — Grant yourself vault access, seed the five secrets, re-deploy
+
+The Key Vault is created with **RBAC authorization** (`enableRbacAuthorization:
+true`). Subscription Owner / Contributor and directory "global admin" grant the
+management plane only — **no** data-plane access to secret *values*. The operator
+seeding secrets needs a data-plane role on the vault, e.g. **Key Vault Secrets
+Officer** (read+write secrets). Grant it once, scoped to the vault:
+
+```bash
+az role assignment create \
+  --assignee-object-id "$(az ad signed-in-user show --query id -o tsv)" \
+  --assignee-principal-type User \
+  --role "Key Vault Secrets Officer" \
+  --scope "$(az keyvault show -n "$(jq -r .keyVaultName.value /tmp/<ENV>-outputs.json)" --query id -o tsv)"
+# wait ~1-2 min for the assignment to propagate before the secret sets below
+```
+
+There are exactly five secrets: `database-url`, `card-fingerprint-secret`,
+`lti-tool-signing-keys-json`, `identity-api-key`, `appinsights-connection-string`
+(see also [Seed Key Vault secrets](#seed-key-vault-secrets)). The signing-keys
+secret is produced by the committed generator (`scripts/generate-signing-keys.mjs`
+— emits a `[{ kid, privateKeyPkcs8Pem, status }]` array matching
+`rawSigningKeyConfigArraySchema` in `server/src/lti/signing-keys.ts`; contains no
+key material itself):
+
+```bash
+KV=$(jq -r .keyVaultName.value /tmp/<ENV>-outputs.json)
+PG_FQDN=$(jq -r .postgresFqdn.value /tmp/<ENV>-outputs.json)
+AI_CS=$(jq -r .appInsightsConnectionString.value /tmp/<ENV>-outputs.json)
+
+az keyvault secret set --vault-name "$KV" --name database-url \
+  --value "postgres://attendance_admin:${PG_PW}@${PG_FQDN}:5432/attendance?sslmode=require"
+az keyvault secret set --vault-name "$KV" --name card-fingerprint-secret \
+  --value "$(openssl rand -base64 32)"
+az keyvault secret set --vault-name "$KV" --name lti-tool-signing-keys-json \
+  --value "$(node scripts/generate-signing-keys.mjs)"
+az keyvault secret set --vault-name "$KV" --name identity-api-key \
+  --value "<REAL_CEDARVILLE_PROXID_KEY>"   # dev: the REAL resolver key (see "Real ProxID resolver on dev")
+az keyvault secret set --vault-name "$KV" --name appinsights-connection-string \
+  --value "$AI_CS"
+```
+
+Then re-run the **identical** deploy command from Step 1 (second pass). It should
+report `Succeeded`; `web` + `worker` now provision. The `web` revision may still
+show `ActivationFailed` until Task 19 pushes the real application image — the
+`mcr.microsoft.com/k8se/quickstart` placeholder does not listen on port 3000 or
+serve `/health/*`; that is expected at this stage.
+
+### Step 3 — Federated identity credential
+
+```bash
+az identity federated-credential create \
+  --name "github-env-<ENV>" \
+  --identity-name "id-attendance-<ENV>" -g rg-attendance-<ENV> \
+  --issuer "https://token.actions.githubusercontent.com" \
+  --subject "repo:cedarville-university@<ORG_ID>/attendance-tracker@<REPO_ID>:environment:<ENV>" \
+  --audiences "api://AzureADTokenExchange"
+# dev values: <ORG_ID>=48759751, <REPO_ID>=1345554752 — i.e.
+#   --subject "repo:cedarville-university@48759751/attendance-tracker@1345554752:environment:dev"
+# The name@id prefix is what GitHub actually presents (not the plain
+# repo:cedarville-university/attendance-tracker:...); confirm it with
+#   gh api /repos/cedarville-university/attendance-tracker/actions/oidc/customization/sub
+# (field sub_claim_prefix). It is repo-level, so stage and prod use the same prefix.
+```
+
+### Step 4 — Grant the managed identity deploy permissions
+
+Key Vault Secrets User is already assigned by `keyvault.bicep`. The deploy
+identity additionally needs to push images and update the Container App / job:
+
+```bash
+MI_PRINCIPAL=$(jq -r .managedIdentityPrincipalId.value /tmp/<ENV>-outputs.json)
+SUB="<SUBSCRIPTION_ID>"
+RG_SCOPE="/subscriptions/$SUB/resourceGroups/rg-attendance-<ENV>"
+
+az role assignment create --assignee-object-id "$MI_PRINCIPAL" \
+  --assignee-principal-type ServicePrincipal --role "AcrPush" --scope "$RG_SCOPE"
+az role assignment create --assignee-object-id "$MI_PRINCIPAL" \
+  --assignee-principal-type ServicePrincipal --role "Contributor" --scope "$RG_SCOPE"
+```
+
+(Phase 8 tightens `Contributor` to `Container Apps Contributor` +
+`Managed Identity Operator`.)
+
+### Step 5 — GitHub Environment + variables
+
+```bash
+gh api -X PUT repos/cedarville-university/attendance-tracker/environments/<ENV>
+
+for kv in \
+  "AZURE_CLIENT_ID=$(jq -r .managedIdentityClientId.value /tmp/<ENV>-outputs.json)" \
+  "AZURE_TENANT_ID=$(az account show --query tenantId -o tsv)" \
+  "AZURE_SUBSCRIPTION_ID=<SUBSCRIPTION_ID>" \
+  "ACR_LOGIN_SERVER=$(jq -r .containerRegistryLoginServer.value /tmp/<ENV>-outputs.json)" \
+  "RESOURCE_GROUP=rg-attendance-<ENV>" \
+  "WEB_APP_NAME=$(jq -r .webAppName.value /tmp/<ENV>-outputs.json)" \
+  "WORKER_JOB_NAME=$(jq -r .workerJobName.value /tmp/<ENV>-outputs.json)" \
+  "POSTGRES_FQDN=$(jq -r .postgresFqdn.value /tmp/<ENV>-outputs.json)" \
+  "KEY_VAULT_NAME=$(jq -r .keyVaultName.value /tmp/<ENV>-outputs.json)" \
+  "APP_HOSTNAME=attendance-<ENV>.CHANGEME.edu" ; do
+  gh variable set "${kv%%=*}" --env <ENV> --body "${kv#*=}"
+done
+```
+
+Then set the one **environment secret** (not a variable) on the same environment:
+
+```bash
+gh secret set PG_ADMIN_PASSWORD --env <ENV> --body "$PG_PW"
+```
+
+`PG_ADMIN_PASSWORD` is stored as a GitHub **environment secret** because it is the
+Postgres admin password used at deploy time **and** the value every workflow job
+exports before compiling a `.bicepparam` (its `readEnvironmentVariable` has no
+fallback — the compile fails `BCP427` if it is unset). It must equal the `$PG_PW`
+used in Steps 1–2.
+
+### GitHub Environment variables the `deploy-*.yml` workflows expect
+
+One row per variable; all ten are plain environment **variables** (the sole
+secret, `PG_ADMIN_PASSWORD`, is covered above).
+
+| Variable | Source | Example |
+| --- | --- | --- |
+| `AZURE_CLIENT_ID` | Step 1 output `managedIdentityClientId` | `11111111-2222-3333-4444-555555555555` |
+| `AZURE_TENANT_ID` | `az account show --query tenantId -o tsv` | `66666666-7777-8888-9999-000000000000` |
+| `AZURE_SUBSCRIPTION_ID` | `<SUBSCRIPTION_ID>` (Step 1 `az account set`) | `00000000-0000-0000-0000-000000000000` |
+| `ACR_LOGIN_SERVER` | Step 1 output `containerRegistryLoginServer` | `acrattendancedev.azurecr.io` |
+| `RESOURCE_GROUP` | fixed: `rg-attendance-<ENV>` | `rg-attendance-dev` |
+| `WEB_APP_NAME` | Step 1 output `webAppName` | `attendance-web-dev` |
+| `WORKER_JOB_NAME` | Step 1 output `workerJobName` | `attendance-grade-worker-dev` |
+| `POSTGRES_FQDN` | Step 1 output `postgresFqdn` | `psql-attendance-dev.postgres.database.azure.com` |
+| `KEY_VAULT_NAME` | Step 1 output `keyVaultName` | `kv-attendance-dev` |
+| `APP_HOSTNAME` | operator-chosen public hostname (matches `appHostname` in the `.bicepparam`) | `attendance-dev.cedarville.edu` |
+
+## Custom domains and the three-pass first deploy
+
+`web.bicep` declares a `managedCertificates` resource whenever `appHostname` is a
+real hostname. Azure validates that certificate **against live DNS at provisioning
+time**, and the DNS record has to point at the Container App's FQDN — which does
+not exist until the app is created. A from-scratch environment therefore cannot
+both set its hostname and bind its certificate on the first deploy.
+
+`bindCustomDomain` (default `true`) gates the certificate and the `customDomains`
+binding independently of `appHostname`, which makes the ordering tractable:
+
+| Pass | Command | Result |
+| --- | --- | --- |
+| 1 | deploy with `-p bindCustomDomain=false` | foundation provisions; **web + worker fail** on unresolvable Key Vault secret refs — expected |
+| 2 | seed the secrets, re-run the identical command | web + worker provision; app live on `*.azurecontainerapps.io` |
+| — | create the DNS records (below) | — |
+| 3 | deploy **without** `bindCustomDomain` | certificate issues; the custom domain serves |
+
+`APP_BASE_URL` and `ALLOWED_TARGET_LINK_URIS` derive from `appHostname`, not from
+the binding, so they are correct from the very first boot.
+
+CI never passes `bindCustomDomain`. Pipeline deploys always bind, which is right —
+by the time CI runs, DNS exists.
+
+### The two DNS records
+
+Both values come from the pass-2 deployment outputs:
+
+```bash
+FQDN=$(az deployment group show -g rg-attendance-<ENV> -n main \
+  --query properties.outputs.webAppFqdn.value -o tsv)
+ASUID=$(az deployment group show -g rg-attendance-<ENV> -n main \
+  --query properties.outputs.webCustomDomainVerificationId.value -o tsv)
+```
+
+| Record | Name | Value |
+| --- | --- | --- |
+| `CNAME` | the app subdomain, e.g. `attendance` | `$FQDN` |
+| `TXT` | `asuid.` + that subdomain, e.g. `asuid.attendance` | `$ASUID` |
+
+The `TXT` record proves domain ownership; without it the certificate request is
+rejected even when the `CNAME` resolves. Both must be live before pass 3.
+
+## Production bootstrap
+
+> **Production is deliberately not part of any automated first-run.** Work through
+> this once, by hand, when the team decides to go live. Afterwards every release is
+> a `v*` tag plus an approval.
+
+Identical to the dev bootstrap above with `<ENV>` = `prod` and the environment name
+`production` on the GitHub side (the Azure resource group stays
+`rg-attendance-prod`). The corrections proven on dev all carry forward:
+
+- The federated-credential subject uses the **name@id** prefix:
+  `repo:cedarville-university@48759751/attendance-tracker@1345554752:environment:production`.
+  Confirm with `gh api /repos/cedarville-university/attendance-tracker/actions/oidc/customization/sub`.
+- The first bootstrap deploy keeps `deployRoleAssignments` at its default `true`
+  (it is Owner-run); the CI workflow passes `=false`.
+- The operator needs **Key Vault Secrets Officer** on the RBAC-mode vault before
+  seeding — subscription Owner grants the management plane only.
+- `PG_ADMIN_PASSWORD` reaches the workflow as a GitHub **environment secret** and
+  the job exports it as `env:`; never as `-p postgresAdministratorPassword=`.
+- `az extension add --name containerapp` before any `az containerapp*` call.
+- `az postgres flexible-server firewall-rule` flags are `--server-name` + `--name`.
+
+Three things differ from dev:
+
+- **Six** Key Vault secrets, not five: the five listed above plus `setup-token`,
+  because `prod.bicepparam` sets `setupTokenEnabled = true` for go-live.
+- The three-pass sequence above, because prod is the first environment stood up
+  after `bindCustomDomain` existed.
+- **Suffixed resource names.** `prod.bicepparam` sets `globalNameSuffix = 'cu'`, so
+  the vault is `kv-attendance-prod-cu`, the server `psql-attendance-prod-cu`, and
+  the registry `acrattendanceprodcu`.
+
+### Why `globalNameSuffix` exists
+
+Key Vault, Postgres Flexible Server, and ACR names are **globally unique DNS
+labels** — unique across all of Azure, not just this subscription. The first prod
+bootstrap failed on `VaultAlreadyExists` and `ServerNameAlreadyExists` for the bare
+`kv-attendance-prod` / `psql-attendance-prod`: unrelated tenants hold them.
+Nothing was soft-deleted locally; `checkNameAvailability` confirmed the names are
+genuinely taken.
+
+`globalNameSuffix` (max 8 chars, default empty) is appended to those three names
+only. It defaults to empty so `dev` keeps the names it was built with — **changing
+it on a live environment renames, which means recreates, all three.**
+
+Before choosing a suffix for a new environment, probe all three:
+
+```bash
+SUB=$(az account show --query id -o tsv)
+az rest --method post \
+  --url "https://management.azure.com/subscriptions/$SUB/providers/Microsoft.KeyVault/checkNameAvailability?api-version=2023-07-01" \
+  --body '{"name":"kv-attendance-<ENV>-<SUFFIX>","type":"Microsoft.KeyVault/vaults"}' \
+  --query '{available:nameAvailable,reason:reason}'
+```
+
+A `false` with reason `Invalid` means the name broke a length or charset rule
+(Key Vault caps at 24 characters), not that it is taken. `main.bicep` truncates the
+*base* rather than the suffix when it has to fit, because a clipped uniquifier is
+not unique.
+
+### `setup-token` is temporary
+
+`/admin.html` normally requires an LTI Administrator-role session — which cannot
+exist until the first Canvas registration is seeded, which is what `/admin.html` is
+for. `SETUP_TOKEN` bridges that gap once. As soon as an Administrator launch
+reaches the admin page:
+
+```bash
+# in prod.bicepparam
+param setupTokenEnabled = false
+
+az keyvault secret delete --vault-name kv-attendance-prod --name setup-token
+```
+
+then cut a release so the web app drops the env var.
+
+## Alert verification
+
+Phase 7 Task 20 observability check against the live `dev` deployment
+(2026-08-30/31). Recorded for future operators.
+
+- **Structured logs to Log Analytics: verified.** Container stdout JSON lines
+  land in the `ContainerAppConsoleLogs_CL` table in the `log-attendance-dev`
+  workspace. Sampled lines carry only the Task 7 safe-field allowlist
+  (`requestId`, `route`, `httpStatus`, `durationMs`) — no `authorization`
+  header, no `set-cookie`, no card codes, no tokens, no signing keys, no
+  Canvas URLs.
+- **Application Insights traces/requests: verified working as of 2026-08-31**,
+  after commit `b0ef163` added the OpenTelemetry ESM `--import` preload
+  (`server/src/telemetry/otel-preload.js`, wired into the web + worker
+  container `command`). Before that fix the app ran as pure ESM with no
+  loader hook, so `useAzureMonitor()` auto-instrumentation could not patch
+  module loading and `appi-attendance-dev` received zero
+  `requests`/`dependencies`/`traces`. After redeploy, `requests` rows appear
+  for live traffic. Any future entrypoint change must keep the
+  `node --import ./server/dist/telemetry/otel-preload.js ...` prefix (see
+  `Dockerfile`, `modules/web.bicep`, `modules/worker-job.bicep`) or App
+  Insights goes dark again.
+- **Alert rules: verified present and Enabled.** Three rules in
+  `rg-attendance-dev`:
+  - `attendance-dev-db-down` (sev1) — metric alert on Postgres
+    `connections_failed` > 5, `Total` over `PT5M`, evaluated `PT1M`.
+  - `attendance-dev-5xx` (sev2) — metric alert on App Insights
+    `requests/failed`.
+  - `attendance-dev-lti-launch-failures` — scheduled-query-rule alert.
+
+  All three route to action group `attendance-dev-ag`, which has a single
+  Enabled email receiver — the operator address in the `.bicepparam`
+  `alertEmail` (dev: `nbiggs112@cedarville.edu`), common alert schema on.
+- **End-to-end alert fire test: NOT yet exercised — deferred to Phase 8.** A
+  manual test-fire of `attendance-dev-db-down` (temporarily lowering the
+  threshold to force a breach) on 2026-08-30 did not produce a fired alert or
+  notification email within the observed window; the cause was not isolated
+  (likely metric-alert rule-edit propagation lag of 15–30 min beating the
+  threshold restore, or `az monitor metrics alert update --set` on a nested
+  `criteria.allOf[0]` path not persisting). The rule configuration and the
+  action-group email path are both verified by inspection; only the live
+  fire-to-email round trip is unproven. A proper re-test (change the
+  threshold, confirm via `az monitor metrics alert show` that it persisted,
+  wait a full 30 min, check fired history plus inbox, then restore) is a
+  Phase 8 item.

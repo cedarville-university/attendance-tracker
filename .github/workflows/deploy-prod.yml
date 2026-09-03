@@ -1,0 +1,179 @@
+name: deploy-prod
+
+on:
+  push:
+    tags: ['v*']  # production release is cut with `git tag vX.Y.Z && git push origin vX.Y.Z`
+  workflow_dispatch:
+# Structurally identical to deploy-dev.yml. The differences are deliberate and limited to:
+# name, trigger (v* vs dev-v*), environment, concurrency group, param file, and the guard job.
+# Anything else that diverges is a bug in one of the two files.
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  # Nothing but a checkpoint. Carrying `environment: production` makes the environment's
+  # required-reviewer rule suspend the run here — before an image is built and long before
+  # anything touches Azure. Pushing a v* tag is a proposal; a human turns it into a deploy.
+  guard:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 5
+    steps:
+      - name: Announce the target
+        run: |
+          echo "environment : production"
+          echo "ref         : ${{ github.ref }}"
+          echo "commit      : ${{ github.sha }}"
+          echo "image tag   : ${{ github.sha }}"
+
+  build-push:
+    needs: guard
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: ACR login
+        run: az acr login --name "${{ vars.ACR_LOGIN_SERVER }}"
+      - id: meta
+        run: echo "image=${{ vars.ACR_LOGIN_SERVER }}/attendance:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  infra:
+    needs: [guard, build-push]
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 25
+    # environments/prod.bicepparam resolves postgresAdministratorPassword via
+    # readEnvironmentVariable('PG_ADMIN_PASSWORD') when the param file is compiled
+    # on the runner, so the password must be present in the job environment here.
+    # A `-p postgresAdministratorPassword=...` override on the CLI is ignored /
+    # conflicts with that compile-time resolution (confirmed in Task 16/18).
+    env:
+      PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Ensure containerapp CLI extension
+        run: az extension add --name containerapp --upgrade --only-show-errors
+      - name: Deploy Bicep (idempotent; pins the CURRENT image — the roll to the new image happens in the deploy job, after migrate)
+        run: |
+          CURRENT_IMAGE=$(az containerapp show -g "${{ vars.RESOURCE_GROUP }}" -n "${{ vars.WEB_APP_NAME }}" \
+            --query 'properties.template.containers[0].image' -o tsv 2>/dev/null || true)
+          if [ -z "$CURRENT_IMAGE" ]; then CURRENT_IMAGE='mcr.microsoft.com/k8se/quickstart:latest'; fi
+          echo "infra pass pins containerImage=$CURRENT_IMAGE (new image ${{ needs.build-push.outputs.image }} is rolled post-migrate)"
+          # Postgres Flexible Server serialises control-plane ops; the require_secure_transport
+          # config re-PUT intermittently returns ServerIsBusy. The deploy is idempotent, so retry.
+          n=0
+          # identityApiUrl: -p override wins over prod.bicepparam's ''.
+          # bindCustomDomain is deliberately NOT passed — pipeline deploys always bind the
+          # custom domain. Only the from-scratch bootstrap passes it as false (see infra/azure/README.md).
+          until az deployment group create -g "${{ vars.RESOURCE_GROUP }}" \
+            -f infra/azure/main.bicep -p infra/azure/environments/prod.bicepparam \
+            -p containerImage="$CURRENT_IMAGE" \
+            -p identityApiUrl='${{ vars.IDENTITY_API_URL }}' \
+            -p deployRoleAssignments=false ; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then echo "infra deploy failed after $n attempts"; exit 1; fi
+            echo "infra deploy attempt $n failed (likely transient); retrying in 90s"
+            sleep 90
+          done
+
+  migrate:
+    needs: [guard, build-push, infra]
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Open JIT Postgres firewall for this runner
+        id: fw
+        run: |
+          RUNNER_IP=$(curl -s https://api.ipify.org)
+          echo "ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
+          PG_NAME=$(az postgres flexible-server list -g "${{ vars.RESOURCE_GROUP }}" --query '[0].name' -o tsv)
+          echo "pg=$PG_NAME" >> "$GITHUB_OUTPUT"
+          az postgres flexible-server firewall-rule create \
+            -g "${{ vars.RESOURCE_GROUP }}" --server-name "$PG_NAME" \
+            --name "ci-migrate-${{ github.run_id }}" \
+            --start-ip-address "$RUNNER_IP" --end-ip-address "$RUNNER_IP"
+      - name: Run migrations
+        run: |
+          DB_URL=$(az keyvault secret show --vault-name "${{ vars.KEY_VAULT_NAME }}" --name database-url --query value -o tsv)
+          npm ci
+          npm run build
+          DATABASE_URL="$DB_URL" node server/dist/migrate.js
+      - name: Remove JIT firewall rule
+        if: always()
+        run: |
+          az postgres flexible-server firewall-rule delete \
+            -g "${{ vars.RESOURCE_GROUP }}" --server-name "${{ steps.fw.outputs.pg }}" \
+            --name "ci-migrate-${{ github.run_id }}" --yes || true
+
+  deploy:
+    needs: [guard, build-push, migrate]
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 15
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Ensure containerapp CLI extension
+        run: az extension add --name containerapp --upgrade --only-show-errors
+      - name: Roll web + worker to the new image
+        run: |
+          az containerapp update -g "${{ vars.RESOURCE_GROUP }}" -n "${{ vars.WEB_APP_NAME }}" \
+            --image '${{ needs.build-push.outputs.image }}'
+          az containerapp job update -g "${{ vars.RESOURCE_GROUP }}" -n "${{ vars.WORKER_JOB_NAME }}" \
+            --image '${{ needs.build-push.outputs.image }}'
+      - name: Wait for readiness on the new revision
+        run: |
+          FQDN=$(az containerapp show -g "${{ vars.RESOURCE_GROUP }}" -n "${{ vars.WEB_APP_NAME }}" \
+            --query 'properties.configuration.ingress.fqdn' -o tsv)
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "https://$FQDN/health/ready" || true)
+            if [ "$code" = "200" ]; then echo "ready after ${i}0s"; exit 0; fi
+            sleep 10
+          done
+          echo "new revision never became ready"; exit 1
+      - name: Smoke test
+        run: |
+          FQDN=$(az containerapp show -g "${{ vars.RESOURCE_GROUP }}" -n "${{ vars.WEB_APP_NAME }}" \
+            --query 'properties.configuration.ingress.fqdn' -o tsv)
+          curl -sf "https://$FQDN/health/live" | grep -q '"status":"ok"'
+          curl -sf "https://$FQDN/lti/jwks" | grep -q '"keys"'
+          curl -sf "https://$FQDN/index.html" | grep -qi '<title'

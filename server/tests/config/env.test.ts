@@ -1,0 +1,75 @@
+import { describe, it, expect } from 'vitest';
+import { loadEnv, parseAllowedTargetLinkUris } from '../../src/config/env.js';
+
+const BASE_ENV = {
+  DATABASE_URL: 'postgres://attendance_tracker:attendance_tracker@localhost:5432/attendance_tracker',
+  APP_BASE_URL: 'http://localhost:3000',
+  ALLOWED_TARGET_LINK_URIS: 'http://localhost:3000/index.html, http://localhost:3000/scanner.html',
+};
+
+describe('loadEnv', () => {
+  it('parses required vars and applies defaults for optional ones', () => {
+    const env = loadEnv(BASE_ENV);
+    expect(env.DATABASE_URL).toBe(BASE_ENV.DATABASE_URL);
+    expect(env.CLOCK_SKEW_SECONDS).toBe(120);
+    expect(env.LOGIN_TRANSACTION_TTL_SECONDS).toBe(300);
+    expect(env.APP_SESSION_TTL_HOURS).toBe(8);
+  });
+
+  it('throws when a required var is missing', () => {
+    const { DATABASE_URL, ...rest } = BASE_ENV;
+    expect(() => loadEnv(rest)).toThrow(/Invalid environment configuration/);
+  });
+
+  it('coerces numeric overrides from strings', () => {
+    const env = loadEnv({ ...BASE_ENV, CLOCK_SKEW_SECONDS: '60' });
+    expect(env.CLOCK_SKEW_SECONDS).toBe(60);
+  });
+
+  it('defaults PORT to 3000 and coerces a string override', () => {
+    expect(loadEnv(BASE_ENV).PORT).toBe(3000);
+    expect(loadEnv({ ...BASE_ENV, PORT: '8080' }).PORT).toBe(8080);
+  });
+
+  it('normalizes APP_BASE_URL to its bare origin (drops a trailing slash and any path)', () => {
+    expect(loadEnv({ ...BASE_ENV, APP_BASE_URL: 'https://attendance.example.edu/' }).APP_BASE_URL).toBe(
+      'https://attendance.example.edu',
+    );
+    expect(loadEnv({ ...BASE_ENV, APP_BASE_URL: 'https://attendance.example.edu/lti/' }).APP_BASE_URL).toBe(
+      'https://attendance.example.edu',
+    );
+    expect(loadEnv(BASE_ENV).APP_BASE_URL).toBe('http://localhost:3000');
+  });
+});
+
+describe('RUN_MIGRATIONS_ON_BOOT', () => {
+  it('defaults to true when NODE_ENV is not production', () => {
+    const env = loadEnv({ ...BASE_ENV, NODE_ENV: 'development' });
+    expect(env.RUN_MIGRATIONS_ON_BOOT).toBe(true);
+  });
+
+  it('defaults to false when NODE_ENV is production', () => {
+    const env = loadEnv({ ...BASE_ENV, NODE_ENV: 'production' });
+    expect(env.RUN_MIGRATIONS_ON_BOOT).toBe(false);
+  });
+
+  it('honours an explicit "false" even outside production', () => {
+    const env = loadEnv({ ...BASE_ENV, NODE_ENV: 'development', RUN_MIGRATIONS_ON_BOOT: 'false' });
+    expect(env.RUN_MIGRATIONS_ON_BOOT).toBe(false);
+  });
+
+  it('honours an explicit "true" in production', () => {
+    const env = loadEnv({ ...BASE_ENV, NODE_ENV: 'production', RUN_MIGRATIONS_ON_BOOT: 'true' });
+    expect(env.RUN_MIGRATIONS_ON_BOOT).toBe(true);
+  });
+});
+
+describe('parseAllowedTargetLinkUris', () => {
+  it('splits, trims, and drops empty entries', () => {
+    const env = loadEnv(BASE_ENV);
+    expect(parseAllowedTargetLinkUris(env)).toEqual([
+      'http://localhost:3000/index.html',
+      'http://localhost:3000/scanner.html',
+    ]);
+  });
+});

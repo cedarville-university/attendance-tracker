@@ -1,0 +1,32 @@
+{
+  "name": "attendance-tracker",
+  "private": true,
+  "type": "module",
+  "workspaces": ["server", "packages/*"],
+  "scripts": {
+    "dev": "RUN_MIGRATIONS_ON_BOOT=true npm -w @attendance/server run dev",
+    "worker": "RUN_MIGRATIONS_ON_BOOT=true npm -w @attendance/server run start:worker",
+    "build": "npm -w @attendance/server run build",
+    "start": "npm -w @attendance/server run start",
+    "start:worker": "npm -w @attendance/server run start:worker",
+    "migrate": "npm -w @attendance/server run migrate",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.19.0",
+    "@playwright/test": "^1.49.1",
+    "@types/node": "^26.3.0",
+    "drizzle-kit": "^0.31.10",
+    "eslint": "^9.19.0",
+    "eslint-config-prettier": "^9.1.0",
+    "globals": "^15.14.0",
+    "prettier": "^3.4.2",
+    "tsx": "^4.23.12",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.68.0",
+    "vitest": "^3.0.4"
+  }
+}
